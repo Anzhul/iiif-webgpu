@@ -3,6 +3,8 @@ import { IIIFImage } from './iiif-image';
 import { Viewport } from './iiif-view';
 import { TileManager } from './iiif-tile';
 import { ToolBar } from './iiif-toolbar';
+import { AnnotationManager } from './iiif-annotations'
+import { GestureHandler } from './iiif-gesture';
 
 export class IIIFViewer {
     container: HTMLElement;
@@ -10,6 +12,9 @@ export class IIIFViewer {
     images: Map<string, IIIFImage>;
     tiles: Map<string, TileManager>;
     viewport: Viewport;
+    toolbar?: ToolBar;
+    annotationManager?: AnnotationManager;
+    gestureHandler?: GestureHandler;
     private eventListeners: { event: string, handler: EventListener }[];
 
     constructor(container: HTMLElement, /*options: any = {}*/) {
@@ -18,6 +23,8 @@ export class IIIFViewer {
         this.images = new Map();
         this.tiles = new Map();
         this.viewport = new Viewport(container.clientWidth, container.clientHeight);
+        this.toolbar = new ToolBar(container);
+        this.annotationManager = new AnnotationManager();
         this.eventListeners = [];
     }
 
@@ -70,22 +77,6 @@ export class IIIFViewer {
         } else {
             console.warn(`Image with ID ${id} not found for panning.`);
         }
-    }
-
-    addControls(){
-        const controlsContainer = document.createElement('div');
-        controlsContainer.className = 'controls-container';
-        this.container.appendChild(controlsContainer);
-        this.addZoom(controlsContainer);
-        //const zoomInButton = document.createElement('button');
-    }
-
-    addZoom(container = this.container) {
-        const zoomIn = document.createElement('button');
-        zoomIn.className = 'control-button';
-        zoomIn.classList.add('zoom-in-button');
-        container.appendChild(zoomIn);
-        zoomIn.innerHTML = '+';
     }
 
     listen(...ids: string[]) {
