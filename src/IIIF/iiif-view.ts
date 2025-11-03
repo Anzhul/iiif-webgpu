@@ -68,12 +68,41 @@ export class Viewport {
     };
   }
 
-  // Zoom to specific point
-  zoom(newScale: number, imageX: number, imageY: number, image: IIIFImage) {
-    console.log(`Zooming to ${newScale} at image coords (${imageX}, ${imageY})`);
-    this.scale = Math.max(this.minScale, Math.min(this.maxScale, newScale));
-    this.centerX = imageX / image.width;
-    this.centerY = imageY / image.height;
+  // Zoom to specific point (canvasX/Y are in canvas pixel coordinates)
+  zoom(newScale: number, canvasX: number, canvasY: number, image: IIIFImage) {
+    console.log(`Zooming to ${newScale} at canvas coords (${canvasX}, ${canvasY})`);
+
+    // Calculate which point in the image (in image pixel coords) is currently at the mouse position
+    const bounds = this.getImageBounds(image);
+    const viewportWidth = this.containerWidth / this.scale;
+    const viewportHeight = this.containerHeight / this.scale;
+
+    // Convert canvas coordinates to image coordinates
+    const imagePointX = bounds.left + (canvasX / this.scale);
+    const imagePointY = bounds.top + (canvasY / this.scale);
+
+    console.log(`  Image point under cursor: (${imagePointX}, ${imagePointY})`);
+
+    // Clamp new scale
+    newScale = Math.max(this.minScale, Math.min(this.maxScale, newScale));
+
+    // Calculate where this same image point should be after the zoom
+    // We want: imagePoint = newBounds.left + (canvasX / newScale)
+    // So: newBounds.left = imagePoint - (canvasX / newScale)
+    // And: newBounds.left = (newCenter * image.width) - (newViewportWidth / 2)
+    // Therefore: newCenter = (imagePoint - (canvasX / newScale) + (newViewportWidth / 2)) / image.width
+
+    const newViewportWidth = this.containerWidth / newScale;
+    const newViewportHeight = this.containerHeight / newScale;
+
+    this.centerX = (imagePointX - (canvasX / newScale) + (newViewportWidth / 2)) / image.width;
+    this.centerY = (imagePointY - (canvasY / newScale) + (newViewportHeight / 2)) / image.height;
+
+    // Update scale
+    this.scale = newScale;
+
+    console.log(`  New center: (${this.centerX}, ${this.centerY}), scale: ${this.scale}`);
+
     this.constrainCenter(image);
   }
 

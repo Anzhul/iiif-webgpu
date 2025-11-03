@@ -1,4 +1,5 @@
 import { IIIFImage } from './iiif-image';
+import { WebGPURenderer } from './iiif-webgpu';
 
 export class TileManager {
     id: string;
@@ -7,14 +8,16 @@ export class TileManager {
     loadingTiles: Set<string>;
     private maxCacheSize: number;
     private tileAccessOrder: Set<string>;
+    private renderer?: WebGPURenderer;
 
-  constructor(id: string, iiifImage: IIIFImage, maxCacheSize: number = 500) {
+  constructor(id: string, iiifImage: IIIFImage, maxCacheSize: number = 500, renderer?: WebGPURenderer) {
     this.id = id;
     this.image = iiifImage;
     this.tileCache = new Map();
     this.loadingTiles = new Set();
     this.maxCacheSize = maxCacheSize;
     this.tileAccessOrder = new Set();
+    this.renderer = renderer;
   }
 
   // Determine optimal zoom level for current scale
@@ -22,7 +25,7 @@ export class TileManager {
     const imageScale = 1 / scale;
     //console.log(`image scale: ${imageScale}, viewport scale: ${scale}`);
     let bestLevel = 0;
-    
+
     for (let i = 0; i < this.image.scaleFactors.length; i++) {
       if (imageScale <= this.image.scaleFactors[i]) {
         //console.log(`choosing zoom level ${i} with scale factor ${this.image.scaleFactors[i]}`);
@@ -31,8 +34,9 @@ export class TileManager {
       }
     }
     //console.log(`optimal zoom level: ${bestLevel} max zoom: ${this.image.maxZoomLevel}`);
-    return Math.min(bestLevel, this.image.maxZoomLevel);
-    
+    // Increase quality by 1 level (lower number = higher quality)
+    return Math.max(0, Math.min(bestLevel - 1, this.image.maxZoomLevel));
+
 
   }
 
@@ -139,6 +143,12 @@ export class TileManager {
       const cachedTile = { ...tile, image: loadedBitmap };
       this.tileCache.set(tile.id, cachedTile);
       this.markTileAccessed(tile.id);
+
+      // Upload to GPU immediately if renderer is available
+      if (this.renderer) {
+        this.renderer.uploadTextureFromBitmap(tile.id, loadedBitmap);
+      }
+
       this.evictOldTiles();
       return cachedTile;
 
@@ -163,6 +173,19 @@ export class TileManager {
     return tile;
   }
 
+  // Get loaded tiles for rendering (optimized for WebGPU)
+  getLoadedTilesForRender(viewport: any) {
+    const tiles = this.getTilesForViewport(viewport);
+    return tiles
+      .map(tile => this.getCachedTile(tile.id))
+      .filter(tile => tile && tile.image);
+  }
+
+  // Set renderer reference (useful if renderer is created after TileManager)
+  setRenderer(renderer: WebGPURenderer) {
+    this.renderer = renderer;
+  }
+
   // LRU cache management
   private evictOldTiles() {
     if (this.tileCache.size > this.maxCacheSize) {
@@ -171,6 +194,11 @@ export class TileManager {
       const toRemove = Array.from(this.tileAccessOrder).slice(0, toRemoveCount);
 
       for (const tileId of toRemove) {
+        // Clean up GPU texture if renderer exists
+        if (this.renderer) {
+          this.renderer.destroyTexture(tileId);
+        }
+
         this.tileCache.delete(tileId);
         this.tileAccessOrder.delete(tileId);
       }
