@@ -1,18 +1,18 @@
 /* IIIF Toolbar Styles */
 
 :root {
-  --iiif-toolbar-bg: rgba(0, 0, 0, 0.5);
-  --iiif-toolbar-border-radius: 4px;
-  --iiif-toolbar-backdrop-filter: blur(4px);
+  --iiif-toolbar-bg: rgba(0, 0, 0, 0.35);
+  --iiif-toolbar-border-radius: 5px;
+  --iiif-toolbar-backdrop-filter: blur(3px);
   --iiif-toolbar-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
   --iiif-toolbar-transition: all 0.2s ease;
 }
 
 .iiif-toolbar {
   position: absolute;
-  height: clamp(1.5rem, 4.5vh, 2rem);
+  height: clamp(1.75rem, 5vh, 2.5rem);
   width: clamp(12rem, 20vw, 16rem);
-  top: clamp(1rem, 5vh, 2rem);
+  bottom: clamp(2rem, 5vh, 3rem);
   right: clamp(2rem, 5vw, 3rem);
   z-index: 1000;
   background-color: var(--iiif-toolbar-bg);

@@ -26,7 +26,7 @@ export class Viewport {
     const scaleX = this.containerWidth / imageWidth;
     const scaleY = this.containerHeight / imageHeight;
     this.scale = Math.min(scaleX, scaleY);
-    this.minScale = this.scale * 0.5; // Allow zooming out to half of fit size
+    this.minScale = this.scale * 0.2; // Allow zooming out to half of fit size
     this.centerX = 0.5;
     this.centerY = 0.5;
     return this;
@@ -35,9 +35,13 @@ export class Viewport {
   fitToWidth(image: IIIFImage) {
     const imageWidth = image.width;
     this.scale = this.containerWidth / imageWidth;
-    this.minScale = this.scale * 0.5;
+    this.minScale = this.scale * 0.2;
     this.centerX = 0.5;
     this.centerY = 0.5;
+    console.log(`Image width: ${imageWidth}`);
+    console.log(`Container width: ${this.containerWidth}`);
+    console.log(`fitToWidth: scale set to ${this.scale}`);
+
     return this;
   }
 
@@ -52,12 +56,14 @@ export class Viewport {
 
   // Get visible bounds in image coordinates
   getImageBounds(image: IIIFImage) {
+    // How many pixels of the original image are visible in the viewport
     const scaledWidth = this.containerWidth / this.scale;
     const scaledHeight = this.containerHeight / this.scale;
 
     const left = (this.centerX * image.width) - (scaledWidth / 2);
     const top = (this.centerY * image.height) - (scaledHeight / 2);
     
+    //console.log(`Viewport bounds in image coords: left=${left}, top=${top}, width=${scaledWidth}, height=${scaledHeight}`);
     return {
       left: Math.max(0, left),
       top: Math.max(0, top),
@@ -70,18 +76,16 @@ export class Viewport {
 
   // Zoom to specific point (canvasX/Y are in canvas pixel coordinates)
   zoom(newScale: number, canvasX: number, canvasY: number, image: IIIFImage) {
-    console.log(`Zooming to ${newScale} at canvas coords (${canvasX}, ${canvasY})`);
+    //console.log(`Zooming to ${newScale} at canvas coords (${canvasX}, ${canvasY})`);
 
     // Calculate which point in the image (in image pixel coords) is currently at the mouse position
     const bounds = this.getImageBounds(image);
-    const viewportWidth = this.containerWidth / this.scale;
-    const viewportHeight = this.containerHeight / this.scale;
 
     // Convert canvas coordinates to image coordinates
     const imagePointX = bounds.left + (canvasX / this.scale);
     const imagePointY = bounds.top + (canvasY / this.scale);
 
-    console.log(`  Image point under cursor: (${imagePointX}, ${imagePointY})`);
+    //console.log(`  Image point under cursor: (${imagePointX}, ${imagePointY})`);
 
     // Clamp new scale
     newScale = Math.max(this.minScale, Math.min(this.maxScale, newScale));
@@ -101,7 +105,7 @@ export class Viewport {
     // Update scale
     this.scale = newScale;
 
-    console.log(`  New center: (${this.centerX}, ${this.centerY}), scale: ${this.scale}`);
+    //console.log(`  New center: (${this.centerX}, ${this.centerY}), scale: ${this.scale}`);
 
     this.constrainCenter(image);
   }
@@ -126,7 +130,6 @@ export class Viewport {
     }
 
     // Advanced constraint considering zoom level and image bounds
-    const bounds = this.getImageBounds(image);
     const scaledWidth = this.containerWidth / this.scale;
     const scaledHeight = this.containerHeight / this.scale;
 

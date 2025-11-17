@@ -13,6 +13,60 @@ interface TileRenderData {
     height: number;
 }
 
+// Matrix helper functions
+function createViewMatrix(centerX: number, centerY: number, scale: number, imageWidth: number, imageHeight: number, canvasWidth: number, canvasHeight: number): Float32Array {
+    // The view matrix transforms from image space to view space
+    // It handles pan (translation) and zoom (scale)
+
+    // Calculate viewport center in image pixels
+    const viewportCenterX = centerX * imageWidth;
+    const viewportCenterY = centerY * imageHeight;
+
+    // Calculate how much of the image is visible (in image pixels)
+    const viewportWidth = canvasWidth / scale;
+    const viewportHeight = canvasHeight / scale;
+
+    // Calculate the visible area bounds in image space
+    const viewportMinX = viewportCenterX - viewportWidth / 2;
+    const viewportMinY = viewportCenterY - viewportHeight / 2;
+
+    // Calculate the scaled image size
+    const scaledImageWidth = imageWidth * scale;
+    const scaledImageHeight = imageHeight * scale;
+
+    // If the scaled image is smaller than the canvas, add centering offset
+    const centerOffsetX = scaledImageWidth < canvasWidth ? (canvasWidth - scaledImageWidth) / 2 : 0;
+    const centerOffsetY = scaledImageHeight < canvasHeight ? (canvasHeight - scaledImageHeight) / 2 : 0;
+
+    // Translate to move viewport top-left to origin, then add centering offset
+    const tx = -viewportMinX * scale + centerOffsetX;
+    const ty = -viewportMinY * scale + centerOffsetY;
+
+    // Column-major order (WGSL uses column-major)
+    return new Float32Array([
+        scale, 0,     0, 0,  // Column 0 (scale for zoom)
+        0,     scale, 0, 0,  // Column 1
+        0,     0,     1, 0,  // Column 2
+        tx, ty, 0, 1   // Column 3 (translation already includes scale)
+    ]);
+}
+
+function createProjectionMatrix(canvasWidth: number, canvasHeight: number): Float32Array {
+    // Orthographic projection that maps canvas pixel coordinates to clip space [-1, 1]
+    // Also flips Y axis (image space has Y=0 at top, clip space has Y=-1 at top)
+
+    const scaleX = 2.0 / canvasWidth;
+    const scaleY = -2.0 / canvasHeight;  // Negative to flip Y
+
+    // Column-major order
+    return new Float32Array([
+        scaleX, 0,      0, 0,  // Column 0
+        0,      scaleY, 0, 0,  // Column 1
+        0,      0,      1, 0,  // Column 2
+        -1,     1,      0, 1   // Column 3 (translate to -1..1 range)
+    ]);
+}
+
 export class WebGPURenderer {
     canvas: HTMLCanvasElement;
     container: HTMLElement;
@@ -30,17 +84,12 @@ export class WebGPURenderer {
     private textureCache: Map<string, GPUTexture> = new Map();
     private bindGroupCache: Map<string, GPUBindGroup> = new Map();
     private uniformBufferCache: Map<string, GPUBuffer> = new Map();
-    private _debugLogged: boolean = false;
-    private _uniformsLogged: boolean = false;
-    private _drawCallCounts?: Set<number>;
-    private _textureUploadWarned: boolean = false;
-    private _bindGroupWarned: boolean = false;
-    private _presentLogged: boolean = false;
-    private _lastLoggedScale?: number;
 
     constructor(container: HTMLElement) {
-        console.log(`Initializing WebGPU Renderer for container ${container}`);
+
         this.container = container;
+
+        // devicePixelRatio: How many physical pixels per CSS pixel
         this.devicePixelRatio = window.devicePixelRatio || 1;
 
         // Create canvas element
@@ -61,41 +110,10 @@ export class WebGPURenderer {
 
         // Append canvas to container
         container.appendChild(this.canvas);
-
-        console.log(`Canvas created with DPR: ${this.devicePixelRatio}, Resolution: ${this.canvas.width}x${this.canvas.height}`);
     }
 
-    // Call this after construction to initialize WebGPU
+    // Initialize WebGPU asynchronously
     async initialize(): Promise<void> {
-        await this.initWebGPU();
-    }
-
-    private updateCanvasSize() {
-        // Get CSS dimensions
-        const displayWidth = this.container.clientWidth;
-        const displayHeight = this.container.clientHeight;
-
-        // Scale internal resolution by device pixel ratio for crisp rendering
-        this.canvas.width = Math.floor(displayWidth * this.devicePixelRatio);
-        this.canvas.height = Math.floor(displayHeight * this.devicePixelRatio);
-    }
-
-    resize() {
-        // Update device pixel ratio in case it changed (e.g., window moved to different monitor)
-        this.devicePixelRatio = window.devicePixelRatio || 1;
-        this.updateCanvasSize();
-
-        // Reconfigure canvas context
-        if (this.context && this.device) {
-            this.context.configure({
-                device: this.device,
-                format: this.format,
-                alphaMode: 'opaque',
-            });
-        }
-    }
-
-    private async initWebGPU() {
         if (!navigator.gpu) {
             console.error('WebGPU is not supported in this browser');
             return;
@@ -144,11 +162,36 @@ export class WebGPURenderer {
         }
     }
 
+    private updateCanvasSize() {
+        // Get CSS dimensions
+        const displayWidth = this.container.clientWidth;
+        const displayHeight = this.container.clientHeight;
+
+        // Scale internal resolution by device pixel ratio for high-DPI displays
+        this.canvas.width = Math.floor(displayWidth * this.devicePixelRatio);
+        this.canvas.height = Math.floor(displayHeight * this.devicePixelRatio);
+    }
+
+    resize() {
+        // Update device pixel ratio in case it changed (e.g., window moved to different monitor)
+        this.devicePixelRatio = window.devicePixelRatio || 1;
+        this.updateCanvasSize();
+
+        // Reconfigure canvas context
+        if (this.context && this.device) {
+            this.context.configure({
+                device: this.device,
+                format: this.format,
+                alphaMode: 'opaque',
+            });
+        }
+    }
+
     private async createPipeline() {
         if (!this.device) return;
 
         const shaderModule = this.device.createShaderModule({
-            label: 'Tile Renderer Shader',
+            label: 'Tile Shader Module',
             code: ShaderModule,
         });
 
@@ -222,8 +265,9 @@ export class WebGPURenderer {
         if (!this.device) return;
 
         // Create uniform buffer
-        // We have: 2 + 1 + 1(pad) + 2 + 2(pad) + 2 + 2(pad) + 2 + 2(pad) + 2 + 2(pad) = 20 floats = 80 bytes
-        // Round up to 256 for safety and alignment
+        // Layout: viewMatrix (16 floats) + projectionMatrix (16 floats) + tilePosition (2+2 pad) + tileSize (2+2 pad)
+        // Total: 16 + 16 + 4 + 4 = 40 floats = 160 bytes
+        // Using 256 bytes for alignment and safety
         this.uniformBuffer = this.device.createBuffer({
             size: 256,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -317,36 +361,6 @@ export class WebGPURenderer {
             return;
         }
 
-        // Debug logging (only log once)
-        if (!this._debugLogged && tiles.length > 0) {
-            console.log('=== Render Debug Info ===');
-            console.log('Viewport:', {
-                centerX: viewport.centerX,
-                centerY: viewport.centerY,
-                scale: viewport.scale,
-                containerSize: { w: viewport.containerWidth, h: viewport.containerHeight }
-            });
-
-            // Calculate what the viewport is actually looking at
-            const scaledWidth = viewport.containerWidth / viewport.scale;
-            const scaledHeight = viewport.containerHeight / viewport.scale;
-            const left = (viewport.centerX * image.width) - (scaledWidth / 2);
-            const top = (viewport.centerY * image.height) - (scaledHeight / 2);
-
-            console.log('Viewport bounds in image pixels:', {
-                left, top,
-                right: left + scaledWidth,
-                bottom: top + scaledHeight,
-                width: scaledWidth,
-                height: scaledHeight
-            });
-            console.log('Image:', { width: image.width, height: image.height });
-            console.log('Canvas:', { width: this.canvas.width, height: this.canvas.height });
-            console.log('Tiles to render:', tiles.length);
-            console.log('First tile:', tiles[0]);
-            this._debugLogged = true;
-        }
-
         const commandEncoder = this.device.createCommandEncoder();
         const textureView = this.context.getCurrentTexture().createView();
 
@@ -361,23 +375,14 @@ export class WebGPURenderer {
 
         renderPass.setPipeline(this.pipeline);
 
-        let drawCallCount = 0;
-        let tileIds: string[] = [];
-
         // Render each tile
         for (const tile of tiles) {
-            tileIds.push(tile.id);
             // Get texture from cache (should already be uploaded)
             let texture = this.textureCache.get(tile.id);
             if (!texture) {
                 // Fallback: upload if not found (shouldn't normally happen)
-                if (!this._textureUploadWarned) {
-                    console.log(`Uploading texture for tile ${tile.id} (not in cache)`);
-                    this._textureUploadWarned = true;
-                }
                 texture = this.uploadTextureFromBitmap(tile.id, tile.image);
                 if (!texture) {
-                    console.warn(`Failed to upload texture for tile ${tile.id}`);
                     continue;
                 }
             }
@@ -385,13 +390,8 @@ export class WebGPURenderer {
             // Get or create bind group
             let bindGroup = this.bindGroupCache.get(tile.id);
             if (!bindGroup) {
-                if (!this._bindGroupWarned) {
-                    console.log(`Creating bind group for tile ${tile.id}`);
-                    this._bindGroupWarned = true;
-                }
                 bindGroup = this.getOrCreateBindGroup(tile.id, texture);
                 if (!bindGroup) {
-                    console.warn(`Failed to create bind group for tile ${tile.id}`);
                     continue;
                 }
             }
@@ -399,78 +399,41 @@ export class WebGPURenderer {
             // Update uniforms for this tile
             // Note: viewport.scale is in CSS pixels, so multiply by DPR for physical pixels
             const physicalScale = viewport.scale * this.devicePixelRatio;
+
+            // Create view matrix (handles pan and zoom via scale)
+            const viewMatrix = createViewMatrix(
+                viewport.centerX,
+                viewport.centerY,
+                physicalScale,
+                image.width,
+                image.height,
+                this.canvas.width,
+                this.canvas.height
+            );
+
+            // Create projection matrix (orthographic projection)
+            const projectionMatrix = createProjectionMatrix(
+                this.canvas.width,
+                this.canvas.height
+            );
+
+            // Pack uniforms: 2 mat4x4 (32 floats) + tile data (8 floats)
             const uniformData = new Float32Array([
-                viewport.centerX, viewport.centerY,     // viewportCenter
-                physicalScale,                           // viewportScale (adjusted for DPR)
-                0.0,                                     // padding
-                this.canvas.width, this.canvas.height,  // canvasSize (physical pixels)
-                0.0, 0.0,                               // padding
-                image.width, image.height,              // imageSize
-                0.0, 0.0,                               // padding
-                tile.x, tile.y,                         // tilePosition
-                0.0, 0.0,                               // padding
-                tile.width, tile.height,                // tileSize
-                0.0, 0.0,                               // padding
+                ...viewMatrix,                          // viewMatrix (16 floats)
+                ...projectionMatrix,                    // projectionMatrix (16 floats)
+                tile.x, tile.y,                         // tilePosition (2 floats)
+                0.0, 0.0,                               // padding (2 floats)
+                tile.width, tile.height,                // tileSize (2 floats)
+                0.0, 0.0,                               // padding (2 floats)
             ]);
-
-            // Debug: log first tile's uniforms and calculated positions
-            // Log when scale changes significantly (zoom happened)
-            const scaleChanged = !this._lastLoggedScale ||
-                                 Math.abs(viewport.scale - this._lastLoggedScale) > 0.001;
-            if (!this._uniformsLogged || scaleChanged) {
-                this._lastLoggedScale = viewport.scale;
-                console.log('=== Coordinate Transform Debug ===');
-                console.log('Uniforms being sent to shader:', {
-                    viewportCenter: [viewport.centerX, viewport.centerY],
-                    viewportScale: physicalScale,
-                    canvasSize: [this.canvas.width, this.canvas.height],
-                    imageSize: [image.width, image.height],
-                    tilePosition: [tile.x, tile.y],
-                    tileSize: [tile.width, tile.height],
-                    dpr: this.devicePixelRatio
-                });
-
-                // Manually calculate what shader will compute (using physical pixels)
-                const viewportCenterPixels = [viewport.centerX * image.width, viewport.centerY * image.height];
-                const viewportSize = [this.canvas.width / physicalScale, this.canvas.height / physicalScale];
-                const viewportMin = [
-                    viewportCenterPixels[0] - viewportSize[0] * 0.5,
-                    viewportCenterPixels[1] - viewportSize[1] * 0.5
-                ];
-
-                const tileMin = [tile.x, tile.y];
-                const tileMax = [tile.x + tile.width, tile.y + tile.height];
-
-                // Calculate where top-left corner of tile should appear on canvas (physical pixels)
-                const tileInViewport = [
-                    (tileMin[0] - viewportMin[0]) * physicalScale,
-                    (tileMin[1] - viewportMin[1]) * physicalScale
-                ];
-
-                // Calculate tile size on canvas (physical pixels)
-                const tileSizeOnCanvas = [
-                    tile.width * physicalScale,
-                    tile.height * physicalScale
-                ];
-
-                console.log('Manual calculation check:', {
-                    viewportCenterPixels,
-                    viewportSize,
-                    viewportMin,
-                    tileMin,
-                    tileMax,
-                    tileTopLeftOnCanvas: tileInViewport,
-                    tileSizeOnCanvas,
-                    canvasSize: [this.canvas.width, this.canvas.height],
-                    isVisible: tileInViewport[0] < this.canvas.width &&
-                               tileInViewport[1] < this.canvas.height &&
-                               tileInViewport[0] + tileSizeOnCanvas[0] > 0 &&
-                               tileInViewport[1] + tileSizeOnCanvas[1] > 0
-                });
-
-                if (!this._uniformsLogged) {
-                    this._uniformsLogged = true;
-                }
+            if (tile.id == '2-3-5') {
+                //console.log(`Uploading uniforms for tile ${tile.id}:`);
+                //console.log(` viewportCenter: (${viewport.centerX}, ${viewport.centerY})`);
+                //console.log(` viewportScale: ${physicalScale}`);
+                console.log(` canvasSize: (${this.canvas.width}, ${this.canvas.height})`);
+                //console.log(` imageSize: (${image.width}, ${image.height})`);
+                //console.log(` tilePosition: (${tile.x}, ${tile.y})`);
+                //console.log(` tileSize: (${tile.width}, ${tile.height})`);
             }
 
             // Get the uniform buffer for this tile
@@ -486,26 +449,11 @@ export class WebGPURenderer {
             // Draw the tile
             renderPass.setBindGroup(0, bindGroup);
             renderPass.draw(6, 1, 0, 0);
-            drawCallCount++;
-        }
-
-        // Always log draw calls for debugging (will show once per unique count)
-        if (!this._drawCallCounts) this._drawCallCounts = new Set();
-        if (!this._drawCallCounts.has(drawCallCount)) {
-            console.log(`Executed ${drawCallCount} draw calls for tiles:`, tileIds);
-            console.log('Tile positions:', tiles.map(t => ({ id: t.id, x: t.x, y: t.y, w: t.width, h: t.height })));
-            this._drawCallCounts.add(drawCallCount);
         }
 
         renderPass.end();
         const commandBuffer = commandEncoder.finish();
         this.device.queue.submit([commandBuffer]);
-
-        // Force presentation (shouldn't be necessary but let's try)
-        if (!this._presentLogged) {
-            console.log('Command buffer submitted, texture should present automatically');
-            this._presentLogged = true;
-        }
     }
 
     destroyTexture(tileId: string) {

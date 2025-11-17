@@ -36,6 +36,7 @@ export class IIIFViewer {
         this.eventListeners = [];
 
         // Check if webGPU is supported and initialize renderer
+        // This operation is asynchronous so must be in another function
         this.rendererReady = this.initializeRenderer();
     }
 
@@ -44,7 +45,6 @@ export class IIIFViewer {
             try {
                 this.renderer = new WebGPURenderer(this.container);
                 await this.renderer.initialize();
-                console.log('WebGPU renderer fully initialized');
 
                 // Set renderer for all existing TileManagers
                 for (const tileManager of this.tiles.values()) {
@@ -55,7 +55,8 @@ export class IIIFViewer {
                 this.renderer = undefined;
             }
         } else {
-            console.warn('WebGPU is not available in this browser');
+            // Add a fallback webGL renderer here later
+            console.warn('WebGPU is not available in this browser, defaulting to WebGL (not implemented yet)');
         }
     }
 
@@ -73,22 +74,16 @@ export class IIIFViewer {
     }
 
     async addImage(id: string, url: string) {
-        console.log('addImage: Starting to load image...');
         const iiifImage = new IIIFImage(id, url);
         await iiifImage.loadManifest(url);
-        console.log('addImage: Manifest loaded');
         this.images.set(id, iiifImage);
 
         // Pass renderer to TileManager if available
-        const tileManager = new TileManager(id, iiifImage, 500, this.renderer);
+        const tileManager = new TileManager(id, iiifImage, 500, this.renderer, 0.35);
 
         this.viewport.fitToWidth(iiifImage);
-        this.viewport.getImageBounds(iiifImage);
         this.tiles.set(id, tileManager);
-        this.tiles.get(id)?.getOptimalZoomLevel(this.viewport.scale);
-        this.viewport.fitToContainer(iiifImage);
         this.tiles.get(id)?.getTilesForViewport(this.viewport);
-        console.log('addImage: Complete');
     }
 
     async removeImage(id: string) {

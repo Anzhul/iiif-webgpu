@@ -6,7 +6,7 @@ if (container) {
     const viewer = new IIIFViewer(container);
     //viewer.addControls();
     viewer.listen('test');
-    viewer.addImage('test','https://free.iiifhosting.com/iiif/f05a0fafa249ef246f0cfc4a747372c6963dfba48fa231a6e888b590c5638397/info.json')
+    viewer.addImage('test','https://free.iiifhosting.com/iiif/616bc3c8dc9a69d3e935139c8c77b76f32137cab7ce0e4fd2166507cdc948b/info.json')
         .then(() => {
             console.log('Image loaded successfully');
             viewer.startRenderLoop('test');

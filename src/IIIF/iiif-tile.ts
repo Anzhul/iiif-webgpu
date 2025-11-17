@@ -4,13 +4,17 @@ import { WebGPURenderer } from './iiif-webgpu';
 export class TileManager {
     id: string;
     image: IIIFImage;
+    // Holds successfully loaded tiles
     tileCache: Map<string, any>;
+    // Holds Tile IDs currently being fetched from the network, prevents duplicate loads
     loadingTiles: Set<string>;
     private maxCacheSize: number;
+    // Tracks which tiles were accessed recently for LRU cache eviction
     private tileAccessOrder: Set<string>;
     private renderer?: WebGPURenderer;
+    private distanceDetail: number;
 
-  constructor(id: string, iiifImage: IIIFImage, maxCacheSize: number = 500, renderer?: WebGPURenderer) {
+  constructor(id: string, iiifImage: IIIFImage, maxCacheSize: number = 500, renderer?: WebGPURenderer, distanceDetail: number = 0.35) {
     this.id = id;
     this.image = iiifImage;
     this.tileCache = new Map();
@@ -18,26 +22,22 @@ export class TileManager {
     this.maxCacheSize = maxCacheSize;
     this.tileAccessOrder = new Set();
     this.renderer = renderer;
+    this.distanceDetail = distanceDetail;
   }
 
   // Determine optimal zoom level for current scale
   getOptimalZoomLevel(scale: number) {
-    const imageScale = 1 / scale;
-    //console.log(`image scale: ${imageScale}, viewport scale: ${scale}`);
-    let bestLevel = 0;
+    const imageScale = this.distanceDetail / scale;
+    let bestLevel = this.image.maxZoomLevel;
 
     for (let i = 0; i < this.image.scaleFactors.length; i++) {
       if (imageScale <= this.image.scaleFactors[i]) {
-        //console.log(`choosing zoom level ${i} with scale factor ${this.image.scaleFactors[i]}`);
         bestLevel = i;
         break;
       }
     }
-    //console.log(`optimal zoom level: ${bestLevel} max zoom: ${this.image.maxZoomLevel}`);
-    // Increase quality by 1 level (lower number = higher quality)
-    return Math.max(0, Math.min(bestLevel - 1, this.image.maxZoomLevel));
 
-
+    return Math.max(0, Math.min(bestLevel, this.image.maxZoomLevel));
   }
 
   // Get tiles needed for current viewport
@@ -45,18 +45,19 @@ export class TileManager {
     const zoomLevel = this.getOptimalZoomLevel(viewport.scale);
     const scaleFactor = this.image.scaleFactors[zoomLevel];
     const bounds = viewport.getImageBounds(this.image);
-    
+
     // Scale bounds to the resolution level
+    // Start
     const levelBounds = {
       left: Math.floor(bounds.left / scaleFactor),
-      top: Math.floor(bounds.top / scaleFactor), 
+      top: Math.floor(bounds.top / scaleFactor),
       right: Math.ceil(bounds.right / scaleFactor),
       bottom: Math.ceil(bounds.bottom / scaleFactor)
     };
 
     const tiles = [];
     const tileSize = this.image.tileSize;
-    
+
     const startTileX = Math.floor(levelBounds.left / tileSize);
     const startTileY = Math.floor(levelBounds.top / tileSize);
     const endTileX = Math.floor(levelBounds.right / tileSize);
