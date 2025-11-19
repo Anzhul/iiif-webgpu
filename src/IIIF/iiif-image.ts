@@ -40,4 +40,10 @@ export class IIIFImage {
         const size = `${tileSize},${tileSize}`;
         return this.getImageUrl(region, size);
     }
+
+    // Get the lowest resolution full image for thumbnail background
+    getThumbnailUrl(maxDimension = 512) {
+        // Request full image at lowest resolution
+        return this.getImageUrl('full', `!${maxDimension},${maxDimension}`);
+    }
 }

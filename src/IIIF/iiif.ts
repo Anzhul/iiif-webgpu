@@ -6,6 +6,23 @@ import { WebGPURenderer } from './iiif-webgpu';
 import { ToolBar } from './iiif-toolbar';
 import { AnnotationManager } from './iiif-annotations'
 import { GestureHandler } from './iiif-gesture';
+import type { EasingFunction } from './easing';
+import { easeOutCubic, interpolate } from './easing';
+
+interface Animation {
+    type: 'zoom' | 'pan' | 'panX' | 'panY';
+    startTime: number;
+    duration: number;
+    startValue: number;
+    targetValue: number;
+    easing: EasingFunction;
+    imageId: string;
+    // For zoom animations - store the canvas point and the image point it maps to
+    zoomCanvasX?: number;
+    zoomCanvasY?: number;
+    zoomImagePointX?: number;
+    zoomImagePointY?: number;
+}
 
 export class IIIFViewer {
     returnManifest(): any {
@@ -20,18 +37,22 @@ export class IIIFViewer {
     toolbar?: ToolBar;
     annotationManager?: AnnotationManager;
     gestureHandler?: GestureHandler;
+    gsap?: any;
     private eventListeners: { event: string, handler: EventListener }[];
     private rendererReady: Promise<void>;
     private renderLoopActive: boolean = false;
     private animationFrameId?: number;
+    private animations = new Map<string, Animation>();
 
-    constructor(container: HTMLElement, /*options: any = {}*/) {
+    constructor(container: HTMLElement, options: any = {}) {
         this.container = container;
         this.manifests = [];
         this.images = new Map();
         this.tiles = new Map();
         this.viewport = new Viewport(container.clientWidth, container.clientHeight);
-        this.toolbar = new ToolBar(container);
+        this.toolbar = new ToolBar(container, options.toolbar);
+        this.gsap = options.gsap || undefined;
+
         this.annotationManager = new AnnotationManager();
         this.eventListeners = [];
 
@@ -84,6 +105,9 @@ export class IIIFViewer {
         this.viewport.fitToWidth(iiifImage);
         this.tiles.set(id, tileManager);
         this.tiles.get(id)?.getTilesForViewport(this.viewport);
+
+        // Load low-resolution thumbnail for background
+        await tileManager.loadThumbnail();
     }
 
     async removeImage(id: string) {
@@ -97,19 +121,106 @@ export class IIIFViewer {
         }
     }
 
+    private updateAnimations() {
+        const now = performance.now();
+        const completedKeys: string[] = [];
+
+        for (const [key, anim] of this.animations) {
+            const elapsed = now - anim.startTime;
+            const progress = Math.min(elapsed / anim.duration, 1);
+            const easedProgress = anim.easing(progress);
+
+            const currentValue = interpolate(
+                anim.startValue,
+                anim.targetValue,
+                easedProgress
+            );
+
+            // Apply animation based on type
+            if (anim.type === 'zoom') {
+                this.viewport.scale = currentValue;
+
+                // Recalculate center to keep the zoom point stationary
+                if (anim.zoomCanvasX !== undefined && anim.zoomCanvasY !== undefined &&
+                    anim.zoomImagePointX !== undefined && anim.zoomImagePointY !== undefined) {
+                    const image = this.images.get(anim.imageId);
+                    if (image) {
+                        // Calculate where the center should be to keep the image point under the canvas point
+                        // Use currentValue (the animated scale) for consistency
+                        const newViewportWidth = this.viewport.containerWidth / currentValue;
+                        const newViewportHeight = this.viewport.containerHeight / currentValue;
+
+                        this.viewport.centerX = (anim.zoomImagePointX - (anim.zoomCanvasX / currentValue) + (newViewportWidth / 2)) / image.width;
+                        this.viewport.centerY = (anim.zoomImagePointY - (anim.zoomCanvasY / currentValue) + (newViewportHeight / 2)) / image.height;
+                    }
+                }
+
+                // Update tiles for this image
+                const tiles = this.tiles.get(anim.imageId);
+                if (tiles) {
+                    tiles.getTilesForViewport(this.viewport);
+                }
+            } else if (anim.type === 'panX') {
+                this.viewport.centerX = currentValue;
+
+                const tiles = this.tiles.get(anim.imageId);
+                if (tiles) {
+                    tiles.getTilesForViewport(this.viewport);
+                }
+            } else if (anim.type === 'panY') {
+                this.viewport.centerY = currentValue;
+
+                const tiles = this.tiles.get(anim.imageId);
+                if (tiles) {
+                    tiles.getTilesForViewport(this.viewport);
+                }
+            }
+
+            // Mark completed animations
+            if (progress >= 1) {
+                completedKeys.push(key);
+            }
+        }
+
+        // Remove completed animations
+        completedKeys.forEach(key => this.animations.delete(key));
+    }
+
     zoom(newScale: number, imageX: number, imageY: number, id: string) {
         const image = this.images.get(id);
-        console.log(`Zoom request to scale ${newScale} at (${imageX}, ${imageY}) for image ID ${id}`);
-        if (image) {
-            this.viewport.zoom(newScale, imageX, imageY, image);
-            const tiles = this.tiles.get(id);
-            if (tiles) {
-                tiles.getTilesForViewport(this.viewport);
-                
-            }
-        } else {
+
+        if (!image) {
             console.warn(`Image with ID ${id} not found for zooming.`);
+            return;
         }
+
+        // Calculate which point in the image is currently at the mouse position
+        // Use unclamped bounds values to get the correct image point
+        const scaledWidth = this.viewport.containerWidth / this.viewport.scale;
+        const scaledHeight = this.viewport.containerHeight / this.viewport.scale;
+        const boundsLeft = (this.viewport.centerX * image.width) - (scaledWidth / 2);
+        const boundsTop = (this.viewport.centerY * image.height) - (scaledHeight / 2);
+
+        const imagePointX = boundsLeft + (imageX / this.viewport.scale);
+        const imagePointY = boundsTop + (imageY / this.viewport.scale);
+
+        // Clamp new scale
+        newScale = Math.max(this.viewport.minScale, Math.min(this.viewport.maxScale, newScale));
+
+        // Store the canvas point and the image point it maps to
+        this.animations.set('zoom', {
+            type: 'zoom',
+            startTime: performance.now(),
+            duration: 800,
+            startValue: this.viewport.scale,
+            targetValue: newScale,
+            easing: easeOutCubic,
+            imageId: id,
+            zoomCanvasX: imageX,
+            zoomCanvasY: imageY,
+            zoomImagePointX: imagePointX,
+            zoomImagePointY: imagePointY
+        });
     }
 
     pan(deltaX: number, deltaY: number, id: string) {
@@ -148,13 +259,12 @@ export class IIIFViewer {
             //alt or shift key pressed
             if (event.altKey || event.shiftKey) {
                 event.preventDefault();
-                const zoomFactor = 1.1;
+                const zoomFactor = 1.35;
                 const rect = this.container.getBoundingClientRect();
                 const imageX = event.clientX - rect.left;
                 const imageY = event.clientY - rect.top;
                 const newScale = event.deltaY < 0 ? this.viewport.scale * zoomFactor : this.viewport.scale / zoomFactor;
                 ids.forEach(id => this.zoom(newScale, imageX, imageY, id));
-                console.log(zoomFactor);
             }
         };
 
@@ -176,6 +286,9 @@ export class IIIFViewer {
 
 
     async render(imageId?: string) {
+        // Update animations first (this modifies viewport state)
+        this.updateAnimations();
+
         // Wait for renderer to be ready
         await this.rendererReady;
 
@@ -202,8 +315,11 @@ export class IIIFViewer {
         // Get loaded tiles for rendering
         const tiles = tileManager.getLoadedTilesForRender(this.viewport);
 
+        // Get thumbnail for background layer
+        const thumbnail = tileManager.getThumbnail();
+
         // Render with WebGPU
-        this.renderer.render(this.viewport, image, tiles);
+        this.renderer.render(this.viewport, image, tiles, thumbnail);
     }
 
     startRenderLoop(imageId?: string) {
@@ -215,18 +331,28 @@ export class IIIFViewer {
         this.renderLoopActive = true;
         console.log('Starting render loop for image:', imageId);
 
-        const loop = async () => {
-            if (!this.renderLoopActive) {
-                console.log('Render loop stopped');
-                return;
-            }
-
-            await this.render(imageId);
-            this.animationFrameId = requestAnimationFrame(loop);
-        };
-
-        console.log('Calling initial loop()');
-        loop();
+        if (this.gsap) {
+            // Use GSAP ticker for the render loop
+            const gsapLoop = () => {
+                if (!this.renderLoopActive) {
+                    this.gsap!.ticker.remove(gsapLoop);
+                    return;
+                }
+                this.render(imageId);
+            };
+            this.gsap.ticker.add(gsapLoop);
+        } else {
+            // Fallback to requestAnimationFrame
+            const loop = async () => {
+                if (!this.renderLoopActive) {
+                    console.log('Render loop stopped');
+                    return;
+                }
+                await this.render(imageId);
+                this.animationFrameId = requestAnimationFrame(loop);
+            };
+            loop();
+        }
     }
 
     stopRenderLoop() {

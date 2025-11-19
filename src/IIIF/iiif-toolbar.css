@@ -1,19 +1,18 @@
 /* IIIF Toolbar Styles */
 
 :root {
-  --iiif-toolbar-bg: rgba(0, 0, 0, 0.35);
-  --iiif-toolbar-border-radius: 5px;
-  --iiif-toolbar-backdrop-filter: blur(3px);
+  --iiif-toolbar-bg: rgba(0, 0, 0, 0.5);
+  --iiif-toolbar-border-radius: 10px;
+  --iiif-toolbar-backdrop-filter: blur(1px);
   --iiif-toolbar-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
   --iiif-toolbar-transition: all 0.2s ease;
 }
 
 .iiif-toolbar {
   position: absolute;
-  height: clamp(1.75rem, 5vh, 2.5rem);
-  width: clamp(12rem, 20vw, 16rem);
-  bottom: clamp(2rem, 5vh, 3rem);
-  right: clamp(2rem, 5vw, 3rem);
+  height: clamp(1.65rem, 4.5vh, 2.45rem);
+  top: clamp(2rem, 5vh, 3rem);
+  right: clamp(2rem, 6vw, 4rem);
   z-index: 1000;
   background-color: var(--iiif-toolbar-bg);
   border-radius: var(--iiif-toolbar-border-radius);
@@ -21,9 +20,10 @@
   box-shadow: var(--iiif-toolbar-shadow);
   transition: var(--iiif-toolbar-transition);
   display: flex;
-  align-items: center;
+  align-items: left;
   justify-content: space-around;
   padding: 0 0.5rem;
+  cursor: default;
 }
 
 .iiif-toolbar.hidden {
@@ -32,31 +32,29 @@
 }
 
 .iiif-toolbar-button {
+  position: relative;
+  left: 0;
   background: transparent;
   border: none;
   cursor: pointer;
-  padding: 0.25rem;
   border-radius: 3px;
   transition: var(--iiif-toolbar-transition);
   display: flex;
   align-items: center;
   justify-content: center;
-  min-width: 1.5rem;
-  min-height: 1.5rem;
+  height: 100%;
+  min-width: 2.25rem;
+  margin: 0 0.1rem;
 }
 
+
+
 .iiif-toolbar-button:hover {
-  background-color: rgba(255, 255, 255, 0.1);
+  background-color: rgba(0, 0, 0, 0.1);
 }
 
 .iiif-toolbar-button:active {
-  background-color: rgba(255, 255, 255, 0.2);
-}
-
-.iiif-toolbar-button svg {
-  width: 1rem;
-  height: 1rem;
-  fill: white;
+  background-color: rgba(0, 0, 0, 0.2);
 }
 
 /* Position variants */
@@ -89,9 +87,9 @@
 }
 
 .iiif-toolbar.theme-light .iiif-toolbar-button:hover {
-  background-color: rgba(0, 0, 0, 0.1);
+  background-color: rgba(0, 0, 0, 0.35);
 }
 
 .iiif-toolbar.theme-light .iiif-toolbar-button:active {
-  background-color: rgba(0, 0, 0, 0.2);
+  background-color: rgba(0, 0, 0, 0.45);
 }

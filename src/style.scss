@@ -13,6 +13,7 @@ body{
   overflow: hidden;
   position: absolute;
   background-color: blue;
+  z-index: 100;
 }
 
 .iiif-container:active {

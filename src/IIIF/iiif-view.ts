@@ -133,13 +133,18 @@ export class Viewport {
     const scaledWidth = this.containerWidth / this.scale;
     const scaledHeight = this.containerHeight / this.scale;
 
-    // Calculate limits based on zoom level
-    const minCenterX = (scaledWidth / 2) / image.width;
-    const maxCenterX = 1 - (scaledWidth / 2) / image.width;
-    const minCenterY = (scaledHeight / 2) / image.height;
-    const maxCenterY = 1 - (scaledHeight / 2) / image.height;
+    // When viewport is larger than image, don't constrain (allow free positioning for zoom-to-cursor)
+    // When viewport is smaller than image, constrain to keep image visible
+    if (scaledWidth < image.width) {
+      const minCenterX = (scaledWidth / 2) / image.width;
+      const maxCenterX = 1 - (scaledWidth / 2) / image.width;
+      this.centerX = Math.max(minCenterX, Math.min(maxCenterX, this.centerX));
+    }
 
-    this.centerX = Math.max(minCenterX, Math.min(maxCenterX, this.centerX));
-    this.centerY = Math.max(minCenterY, Math.min(maxCenterY, this.centerY));
+    if (scaledHeight < image.height) {
+      const minCenterY = (scaledHeight / 2) / image.height;
+      const maxCenterY = 1 - (scaledHeight / 2) / image.height;
+      this.centerY = Math.max(minCenterY, Math.min(maxCenterY, this.centerY));
+    }
   }
 }

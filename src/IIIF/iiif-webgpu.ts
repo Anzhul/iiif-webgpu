@@ -30,17 +30,9 @@ function createViewMatrix(centerX: number, centerY: number, scale: number, image
     const viewportMinX = viewportCenterX - viewportWidth / 2;
     const viewportMinY = viewportCenterY - viewportHeight / 2;
 
-    // Calculate the scaled image size
-    const scaledImageWidth = imageWidth * scale;
-    const scaledImageHeight = imageHeight * scale;
-
-    // If the scaled image is smaller than the canvas, add centering offset
-    const centerOffsetX = scaledImageWidth < canvasWidth ? (canvasWidth - scaledImageWidth) / 2 : 0;
-    const centerOffsetY = scaledImageHeight < canvasHeight ? (canvasHeight - scaledImageHeight) / 2 : 0;
-
-    // Translate to move viewport top-left to origin, then add centering offset
-    const tx = -viewportMinX * scale + centerOffsetX;
-    const ty = -viewportMinY * scale + centerOffsetY;
+    // Translate to move viewport top-left to origin
+    const tx = -viewportMinX * scale;
+    const ty = -viewportMinY * scale;
 
     // Column-major order (WGSL uses column-major)
     return new Float32Array([
@@ -356,7 +348,75 @@ export class WebGPURenderer {
         return bindGroup;
     }
 
-    render(viewport: Viewport, image: IIIFImage, tiles: TileRenderData[]) {
+    private renderTile(renderPass: GPURenderPassEncoder, viewport: Viewport, image: IIIFImage, tile: TileRenderData) {
+        if (!this.device) return;
+
+        // Get texture from cache (should already be uploaded)
+        let texture = this.textureCache.get(tile.id);
+        if (!texture) {
+            // Fallback: upload if not found (shouldn't normally happen)
+            texture = this.uploadTextureFromBitmap(tile.id, tile.image);
+            if (!texture) {
+                return;
+            }
+        }
+
+        // Get or create bind group
+        let bindGroup = this.bindGroupCache.get(tile.id);
+        if (!bindGroup) {
+            bindGroup = this.getOrCreateBindGroup(tile.id, texture);
+            if (!bindGroup) {
+                return;
+            }
+        }
+
+        // Update uniforms for this tile
+        // Note: viewport.scale is in CSS pixels, so multiply by DPR for physical pixels
+        const physicalScale = viewport.scale * this.devicePixelRatio;
+
+        // Create view matrix (handles pan and zoom via scale)
+        const viewMatrix = createViewMatrix(
+            viewport.centerX,
+            viewport.centerY,
+            physicalScale,
+            image.width,
+            image.height,
+            this.canvas.width,
+            this.canvas.height
+        );
+
+        // Create projection matrix (orthographic projection)
+        const projectionMatrix = createProjectionMatrix(
+            this.canvas.width,
+            this.canvas.height
+        );
+
+        // Pack uniforms: 2 mat4x4 (32 floats) + tile data (8 floats)
+        const uniformData = new Float32Array([
+            ...viewMatrix,                          // viewMatrix (16 floats)
+            ...projectionMatrix,                    // projectionMatrix (16 floats)
+            tile.x, tile.y,                         // tilePosition (2 floats)
+            0.0, 0.0,                               // padding (2 floats)
+            tile.width, tile.height,                // tileSize (2 floats)
+            0.0, 0.0,                               // padding (2 floats)
+        ]);
+
+        // Get the uniform buffer for this tile
+        const tileUniformBuffer = this.uniformBufferCache.get(tile.id);
+        if (!tileUniformBuffer) {
+            console.warn(`No uniform buffer found for tile ${tile.id}`);
+            return;
+        }
+
+        // Write uniforms to this tile's specific buffer
+        this.device.queue.writeBuffer(tileUniformBuffer, 0, uniformData);
+
+        // Draw the tile
+        renderPass.setBindGroup(0, bindGroup);
+        renderPass.draw(6, 1, 0, 0);
+    }
+
+    render(viewport: Viewport, image: IIIFImage, tiles: TileRenderData[], thumbnail?: TileRenderData) {
         if (!this.device || !this.context || !this.pipeline) {
             return;
         }
@@ -375,80 +435,14 @@ export class WebGPURenderer {
 
         renderPass.setPipeline(this.pipeline);
 
+        // Render thumbnail first as background layer if available
+        if (thumbnail) {
+            this.renderTile(renderPass, viewport, image, thumbnail);
+        }
+
         // Render each tile
         for (const tile of tiles) {
-            // Get texture from cache (should already be uploaded)
-            let texture = this.textureCache.get(tile.id);
-            if (!texture) {
-                // Fallback: upload if not found (shouldn't normally happen)
-                texture = this.uploadTextureFromBitmap(tile.id, tile.image);
-                if (!texture) {
-                    continue;
-                }
-            }
-
-            // Get or create bind group
-            let bindGroup = this.bindGroupCache.get(tile.id);
-            if (!bindGroup) {
-                bindGroup = this.getOrCreateBindGroup(tile.id, texture);
-                if (!bindGroup) {
-                    continue;
-                }
-            }
-
-            // Update uniforms for this tile
-            // Note: viewport.scale is in CSS pixels, so multiply by DPR for physical pixels
-            const physicalScale = viewport.scale * this.devicePixelRatio;
-
-            // Create view matrix (handles pan and zoom via scale)
-            const viewMatrix = createViewMatrix(
-                viewport.centerX,
-                viewport.centerY,
-                physicalScale,
-                image.width,
-                image.height,
-                this.canvas.width,
-                this.canvas.height
-            );
-
-            // Create projection matrix (orthographic projection)
-            const projectionMatrix = createProjectionMatrix(
-                this.canvas.width,
-                this.canvas.height
-            );
-
-            // Pack uniforms: 2 mat4x4 (32 floats) + tile data (8 floats)
-            const uniformData = new Float32Array([
-                ...viewMatrix,                          // viewMatrix (16 floats)
-                ...projectionMatrix,                    // projectionMatrix (16 floats)
-                tile.x, tile.y,                         // tilePosition (2 floats)
-                0.0, 0.0,                               // padding (2 floats)
-                tile.width, tile.height,                // tileSize (2 floats)
-                0.0, 0.0,                               // padding (2 floats)
-            ]);
-            if (tile.id == '2-3-5') {
-                //console.log(`Uploading uniforms for tile ${tile.id}:`);
-                //console.log(` viewportCenter: (${viewport.centerX}, ${viewport.centerY})`);
-                //console.log(` viewportScale: ${physicalScale}`);
-                console.log(` canvasSize: (${this.canvas.width}, ${this.canvas.height})`);
-                //console.log(` imageSize: (${image.width}, ${image.height})`);
-                //console.log(` tilePosition: (${tile.x}, ${tile.y})`);
-                //console.log(` tileSize: (${tile.width}, ${tile.height})`);
-            }
-
-            // Get the uniform buffer for this tile
-            const tileUniformBuffer = this.uniformBufferCache.get(tile.id);
-            if (!tileUniformBuffer) {
-                console.warn(`No uniform buffer found for tile ${tile.id}`);
-                continue;
-            }
-
-            // Write uniforms to this tile's specific buffer
-            this.device.queue.writeBuffer(tileUniformBuffer, 0, uniformData);
-
-            // Draw the tile
-            renderPass.setBindGroup(0, bindGroup);
-            renderPass.draw(6, 1, 0, 0);
+            this.renderTile(renderPass, viewport, image, tile);
         }
 
         renderPass.end();

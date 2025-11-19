@@ -13,6 +13,10 @@ export class TileManager {
     private tileAccessOrder: Set<string>;
     private renderer?: WebGPURenderer;
     private distanceDetail: number;
+    // Cache of the most recently rendered tiles (for fallback when zooming)
+    private lastRenderedTiles: any[] = [];
+    // Permanent low-resolution thumbnail for background
+    private thumbnail: any = null;
 
   constructor(id: string, iiifImage: IIIFImage, maxCacheSize: number = 500, renderer?: WebGPURenderer, distanceDetail: number = 0.35) {
     this.id = id;
@@ -174,17 +178,83 @@ export class TileManager {
     return tile;
   }
 
-  // Get loaded tiles for rendering (optimized for WebGPU)
+  // Get loaded tiles for rendering with fallback to previous tiles (optimized for WebGPU)
   getLoadedTilesForRender(viewport: any) {
-    const tiles = this.getTilesForViewport(viewport);
-    return tiles
+    const requestedTiles = this.getTilesForViewport(viewport);
+
+    // Try to get all requested tiles at the current zoom level
+    const loadedTiles = requestedTiles
       .map(tile => this.getCachedTile(tile.id))
       .filter(tile => tile && tile.image);
+
+    // If we got all tiles, update cache and return
+    if (loadedTiles.length === requestedTiles.length) {
+      this.lastRenderedTiles = loadedTiles;
+      return loadedTiles;
+    }
+
+    // Some tiles are missing - use previous tiles as fallback
+    if (this.lastRenderedTiles.length > 0) {
+      // Combine: new loaded tiles + old tiles for areas not yet loaded
+      const tileMap = new Map(loadedTiles.map(t => [t.id, t]));
+
+      // Add previous tiles that don't overlap with new ones
+      for (const oldTile of this.lastRenderedTiles) {
+        if (!tileMap.has(oldTile.id)) {
+          tileMap.set(oldTile.id, oldTile);
+        }
+      }
+
+      return Array.from(tileMap.values());
+    }
+
+    // No previous tiles available, just return what we have
+    return loadedTiles;
   }
 
   // Set renderer reference (useful if renderer is created after TileManager)
   setRenderer(renderer: WebGPURenderer) {
     this.renderer = renderer;
+  }
+
+  // Load low-resolution thumbnail for background
+  async loadThumbnail(maxDimension = 512) {
+    const thumbnailUrl = this.image.getThumbnailUrl(maxDimension);
+
+    try {
+      const response = await fetch(thumbnailUrl);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const blob = await response.blob();
+      const loadedBitmap = await createImageBitmap(blob);
+
+      this.thumbnail = {
+        id: 'thumbnail',
+        image: loadedBitmap,
+        x: 0,
+        y: 0,
+        width: this.image.width,
+        height: this.image.height,
+        url: thumbnailUrl
+      };
+
+      // Upload to GPU immediately if renderer is available
+      if (this.renderer) {
+        this.renderer.uploadTextureFromBitmap('thumbnail', loadedBitmap);
+      }
+
+      return this.thumbnail;
+    } catch (error) {
+      console.error(`Failed to load thumbnail: ${thumbnailUrl}`, error);
+      return null;
+    }
+  }
+
+  // Get the thumbnail for background rendering
+  getThumbnail() {
+    return this.thumbnail;
   }
 
   // LRU cache management
