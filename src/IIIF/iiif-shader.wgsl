@@ -1,4 +1,4 @@
-struct Uniforms {
+struct TileUniforms {
     // Transformation matrices
     viewMatrix: mat4x4<f32>,        // Handles pan and zoom
     projectionMatrix: mat4x4<f32>,  // Maps image space to clip space
@@ -10,7 +10,7 @@ struct Uniforms {
     _padding1: vec2<f32>,           // Explicit padding
 }
 
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(0) var<storage, read> tileData: array<TileUniforms>;
 @group(0) @binding(1) var textureSampler: sampler;
 @group(0) @binding(2) var tileTexture: texture_2d<f32>;
 
@@ -20,7 +20,7 @@ struct VertexOutput {
 }
 
 @vertex
-fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+fn vs_main(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) tileIndex: u32) -> VertexOutput {
     // Create a unit quad (0,0) to (1,1)
     var positions = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -32,6 +32,9 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
     );
 
     let pos = positions[vertexIndex];
+
+    // Get uniforms for this tile instance
+    let uniforms = tileData[tileIndex];
 
     // Map vertex (0-1) to tile position in image space
     let tileTL = uniforms.tilePosition;

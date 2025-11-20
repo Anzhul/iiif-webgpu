@@ -68,14 +68,16 @@ export class WebGPURenderer {
     private device?: GPUDevice;
     private context?: GPUCanvasContext;
     private pipeline?: GPURenderPipeline;
-    private uniformBuffer?: GPUBuffer;
     private sampler?: GPUSampler;
     private format: GPUTextureFormat = 'bgra8unorm';
+
+    // Shared storage buffer for all tile uniforms
+    private storageBuffer?: GPUBuffer;
+    private storageBufferSize: number = 256 * 1000; // Support up to 1000 tiles
 
     // Texture cache: tileId -> GPUTexture
     private textureCache: Map<string, GPUTexture> = new Map();
     private bindGroupCache: Map<string, GPUBindGroup> = new Map();
-    private uniformBufferCache: Map<string, GPUBuffer> = new Map();
 
     constructor(container: HTMLElement) {
 
@@ -145,8 +147,8 @@ export class WebGPURenderer {
 
             // Create resources
             await this.createPipeline();
-            this.createBuffers();
             this.createSampler();
+            this.createStorageBuffer();
 
             console.log('WebGPU initialized successfully');
         } catch (error) {
@@ -204,7 +206,7 @@ export class WebGPURenderer {
                         {
                             binding: 0,
                             visibility: GPUShaderStage.VERTEX,
-                            buffer: { type: 'uniform' }
+                            buffer: { type: 'read-only-storage' }
                         },
                         {
                             binding: 1,
@@ -253,19 +255,6 @@ export class WebGPURenderer {
         });
     }
 
-    private createBuffers() {
-        if (!this.device) return;
-
-        // Create uniform buffer
-        // Layout: viewMatrix (16 floats) + projectionMatrix (16 floats) + tilePosition (2+2 pad) + tileSize (2+2 pad)
-        // Total: 16 + 16 + 4 + 4 = 40 floats = 160 bytes
-        // Using 256 bytes for alignment and safety
-        this.uniformBuffer = this.device.createBuffer({
-            size: 256,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
-    }
-
     private createSampler() {
         if (!this.device) return;
 
@@ -275,6 +264,15 @@ export class WebGPURenderer {
             mipmapFilter: 'linear',
             addressModeU: 'clamp-to-edge',
             addressModeV: 'clamp-to-edge',
+        });
+    }
+
+    private createStorageBuffer() {
+        if (!this.device) return;
+
+        this.storageBuffer = this.device.createBuffer({
+            size: this.storageBufferSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
     }
 
@@ -308,48 +306,13 @@ export class WebGPURenderer {
         return texture;
     }
 
-    private getOrCreateBindGroup(tileId: string, texture: GPUTexture): GPUBindGroup | undefined {
-        if (!this.device || !this.pipeline || !this.sampler) {
-            return undefined;
-        }
 
-        // Check cache
-        if (this.bindGroupCache.has(tileId)) {
-            return this.bindGroupCache.get(tileId)!;
-        }
-
-        // Create uniform buffer for this tile
-        const uniformBuffer = this.device.createBuffer({
-            size: 256,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
-        this.uniformBufferCache.set(tileId, uniformBuffer);
-
-        // Create new bind group
-        const bindGroup = this.device.createBindGroup({
-            layout: this.pipeline.getBindGroupLayout(0),
-            entries: [
-                {
-                    binding: 0,
-                    resource: { buffer: uniformBuffer }
-                },
-                {
-                    binding: 1,
-                    resource: this.sampler
-                },
-                {
-                    binding: 2,
-                    resource: texture.createView()
-                }
-            ]
-        });
-
-        this.bindGroupCache.set(tileId, bindGroup);
-        return bindGroup;
-    }
-
-    private renderTile(renderPass: GPURenderPassEncoder, viewport: Viewport, image: IIIFImage, tile: TileRenderData) {
-        if (!this.device) return;
+    private renderTile(
+        renderPass: GPURenderPassEncoder,
+        tile: TileRenderData,
+        tileIndex: number
+    ) {
+        if (!this.device || !this.storageBuffer || !this.sampler || !this.pipeline) return;
 
         // Get texture from cache (should already be uploaded)
         let texture = this.textureCache.get(tile.id);
@@ -361,20 +324,43 @@ export class WebGPURenderer {
             }
         }
 
-        // Get or create bind group
-        let bindGroup = this.bindGroupCache.get(tile.id);
+        // Create bind group for this texture (cache by texture, not by tile)
+        const textureKey = tile.id;
+        let bindGroup = this.bindGroupCache.get(textureKey);
+
         if (!bindGroup) {
-            bindGroup = this.getOrCreateBindGroup(tile.id, texture);
-            if (!bindGroup) {
-                return;
-            }
+            bindGroup = this.device.createBindGroup({
+                layout: this.pipeline.getBindGroupLayout(0),
+                entries: [
+                    {
+                        binding: 0,
+                        resource: { buffer: this.storageBuffer }
+                    },
+                    {
+                        binding: 1,
+                        resource: this.sampler
+                    },
+                    {
+                        binding: 2,
+                        resource: texture.createView()
+                    }
+                ]
+            });
+            this.bindGroupCache.set(textureKey, bindGroup);
         }
 
-        // Update uniforms for this tile
-        // Note: viewport.scale is in CSS pixels, so multiply by DPR for physical pixels
-        const physicalScale = viewport.scale * this.devicePixelRatio;
+        // Draw the tile using instanced rendering with tileIndex
+        renderPass.setBindGroup(0, bindGroup);
+        renderPass.draw(6, 1, 0, tileIndex);
+    }
 
-        // Create view matrix (handles pan and zoom via scale)
+    render(viewport: Viewport, image: IIIFImage, tiles: TileRenderData[], thumbnail?: TileRenderData) {
+        if (!this.device || !this.context || !this.pipeline || !this.storageBuffer) {
+            return;
+        }
+
+        // Calculate view and projection matrices ONCE for all tiles
+        const physicalScale = viewport.scale * this.devicePixelRatio;
         const viewMatrix = createViewMatrix(
             viewport.centerX,
             viewport.centerY,
@@ -384,42 +370,36 @@ export class WebGPURenderer {
             this.canvas.width,
             this.canvas.height
         );
-
-        // Create projection matrix (orthographic projection)
         const projectionMatrix = createProjectionMatrix(
             this.canvas.width,
             this.canvas.height
         );
 
-        // Pack uniforms: 2 mat4x4 (32 floats) + tile data (8 floats)
-        const uniformData = new Float32Array([
-            ...viewMatrix,                          // viewMatrix (16 floats)
-            ...projectionMatrix,                    // projectionMatrix (16 floats)
-            tile.x, tile.y,                         // tilePosition (2 floats)
-            0.0, 0.0,                               // padding (2 floats)
-            tile.width, tile.height,                // tileSize (2 floats)
-            0.0, 0.0,                               // padding (2 floats)
-        ]);
+        // Prepare all tiles (including thumbnail)
+        const allTiles = thumbnail ? [thumbnail, ...tiles] : tiles;
 
-        // Get the uniform buffer for this tile
-        const tileUniformBuffer = this.uniformBufferCache.get(tile.id);
-        if (!tileUniformBuffer) {
-            console.warn(`No uniform buffer found for tile ${tile.id}`);
-            return;
+        // Batch write all tile uniforms to storage buffer ONCE
+        const uniformData = new Float32Array(allTiles.length * 40); // 40 floats per tile (256 bytes / 4 bytes per float)
+
+        for (let i = 0; i < allTiles.length; i++) {
+            const tile = allTiles[i];
+            const offset = i * 40;
+
+            // Pack: viewMatrix (16) + projectionMatrix (16) + tilePosition (2) + padding (2) + tileSize (2) + padding (2)
+            uniformData.set(viewMatrix, offset);
+            uniformData.set(projectionMatrix, offset + 16);
+            uniformData[offset + 32] = tile.x;
+            uniformData[offset + 33] = tile.y;
+            uniformData[offset + 34] = 0.0; // padding
+            uniformData[offset + 35] = 0.0; // padding
+            uniformData[offset + 36] = tile.width;
+            uniformData[offset + 37] = tile.height;
+            uniformData[offset + 38] = 0.0; // padding
+            uniformData[offset + 39] = 0.0; // padding
         }
 
-        // Write uniforms to this tile's specific buffer
-        this.device.queue.writeBuffer(tileUniformBuffer, 0, uniformData);
-
-        // Draw the tile
-        renderPass.setBindGroup(0, bindGroup);
-        renderPass.draw(6, 1, 0, 0);
-    }
-
-    render(viewport: Viewport, image: IIIFImage, tiles: TileRenderData[], thumbnail?: TileRenderData) {
-        if (!this.device || !this.context || !this.pipeline) {
-            return;
-        }
+        // Single write operation for all tile data
+        this.device.queue.writeBuffer(this.storageBuffer, 0, uniformData);
 
         const commandEncoder = this.device.createCommandEncoder();
         const textureView = this.context.getCurrentTexture().createView();
@@ -435,14 +415,9 @@ export class WebGPURenderer {
 
         renderPass.setPipeline(this.pipeline);
 
-        // Render thumbnail first as background layer if available
-        if (thumbnail) {
-            this.renderTile(renderPass, viewport, image, thumbnail);
-        }
-
-        // Render each tile
-        for (const tile of tiles) {
-            this.renderTile(renderPass, viewport, image, tile);
+        // Render each tile with its index
+        for (let i = 0; i < allTiles.length; i++) {
+            this.renderTile(renderPass, allTiles[i], i);
         }
 
         renderPass.end();
@@ -451,36 +426,26 @@ export class WebGPURenderer {
     }
 
     destroyTexture(tileId: string) {
-        // Destroy a specific texture, bind group, and uniform buffer
+        // Destroy a specific texture and bind group
         const texture = this.textureCache.get(tileId);
         if (texture) {
             texture.destroy();
             this.textureCache.delete(tileId);
         }
-        const uniformBuffer = this.uniformBufferCache.get(tileId);
-        if (uniformBuffer) {
-            uniformBuffer.destroy();
-            this.uniformBufferCache.delete(tileId);
-        }
         this.bindGroupCache.delete(tileId);
     }
 
     clearTextureCache() {
-        // Destroy all cached textures and uniform buffers
+        // Destroy all cached textures
         for (const texture of this.textureCache.values()) {
             texture.destroy();
         }
-        for (const uniformBuffer of this.uniformBufferCache.values()) {
-            uniformBuffer.destroy();
-        }
         this.textureCache.clear();
-        this.uniformBufferCache.clear();
         this.bindGroupCache.clear();
     }
 
     destroy() {
         this.clearTextureCache();
-        this.uniformBuffer?.destroy();
         this.device?.destroy();
     }
 }
