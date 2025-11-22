@@ -7,7 +7,7 @@ import { ToolBar } from './iiif-toolbar';
 import { AnnotationManager } from './iiif-annotations'
 import { GestureHandler } from './iiif-gesture';
 import type { EasingFunction } from './easing';
-import { easeOutCubic, interpolate } from './easing';
+import { easeOutQuart, interpolate } from './easing';
 
 interface ViewportTransform {
     scale: number;
@@ -23,15 +23,21 @@ interface Animation {
     targetTransform: ViewportTransform;
     easing: EasingFunction;
     imageId: string;
-    // For zoom animations - store the canvas point and the image point it maps to
+    // For zoom animations - store the canvas point for anchor
     zoomCanvasX?: number;
     zoomCanvasY?: number;
-    zoomImagePointX?: number;
-    zoomImagePointY?: number;
 }
 
 interface PanState {
     isDragging: boolean;
+    // Anchor point approach: track which image point should stay under cursor
+    anchorImageX?: number;  // The image point (in image pixels) we're anchored to
+    anchorImageY?: number;
+    targetCanvasX: number;  // Where the anchor should appear (in canvas pixels)
+    targetCanvasY: number;
+    currentCanvasX: number; // Smoothly interpolated position
+    currentCanvasY: number;
+    imageId?: string;
 }
 
 export class IIIFViewer {
@@ -51,10 +57,17 @@ export class IIIFViewer {
     private animations = new Map<string, Animation>();
     private cachedContainerRect: DOMRect;
     private panState: PanState = {
-        isDragging: false
+        isDragging: false,
+        targetCanvasX: 0,
+        targetCanvasY: 0,
+        currentCanvasX: 0,
+        currentCanvasY: 0
     };
     private lastTileRequestTime: number = 0;
     private readonly TILE_REQUEST_THROTTLE = 100; // Request tiles max once per 100ms
+    private lastZoomTime: number = 0;
+    private readonly ZOOM_THROTTLE = 80; // Minimum ms between zoom events
+    private readonly PAN_TRAILING_FACTOR = 0.15; // Lower = more trailing/lag (0.1-0.3 recommended)
 
     constructor(container: HTMLElement, options: any = {}) {
         this.container = container;
@@ -176,17 +189,43 @@ export class IIIFViewer {
         let needsTileUpdate = false;
         let imageId: string | undefined;
 
+        // Handle interactive pan with trailing effect
+        if (this.panState.isDragging ||
+            Math.abs(this.panState.targetCanvasX - this.panState.currentCanvasX) > 0.5 ||
+            Math.abs(this.panState.targetCanvasY - this.panState.currentCanvasY) > 0.5) {
+
+            // Smoothly interpolate current canvas position towards target
+            this.panState.currentCanvasX += (this.panState.targetCanvasX - this.panState.currentCanvasX) * this.PAN_TRAILING_FACTOR;
+            this.panState.currentCanvasY += (this.panState.targetCanvasY - this.panState.currentCanvasY) * this.PAN_TRAILING_FACTOR;
+
+            // Update viewport using matrix-based transformation
+            if (this.panState.anchorImageX !== undefined &&
+                this.panState.anchorImageY !== undefined &&
+                this.panState.imageId) {
+
+                const image = this.images.get(this.panState.imageId);
+                if (image) {
+                    // Set viewport center so that anchorImagePoint appears at currentCanvasPoint
+                    this.viewport.setCenterFromImagePoint(
+                        this.panState.anchorImageX,
+                        this.panState.anchorImageY,
+                        this.panState.currentCanvasX,
+                        this.panState.currentCanvasY,
+                        image
+                    );
+
+                    needsTileUpdate = true;
+                    imageId = this.panState.imageId;
+                }
+            }
+        }
+
         // Apply zoom animation (if exists)
         const zoomAnim = this.animations.get('zoom');
         if (zoomAnim) {
             const elapsed = now - zoomAnim.startTime;
             const progress = Math.min(elapsed / zoomAnim.duration, 1);
             const easedProgress = zoomAnim.easing(progress);
-
-            // Store the current center and scale before zoom (may have been updated by pan or direct drag)
-            const preZoomCenterX = this.viewport.centerX;
-            const preZoomCenterY = this.viewport.centerY;
-            const preZoomScale = this.viewport.scale;
 
             // Interpolate scale
             const newScale = interpolate(
@@ -195,37 +234,32 @@ export class IIIFViewer {
                 easedProgress
             );
 
-            // Apply scale
-            this.viewport.scale = newScale;
-
-            // Adjust center to keep the zoom point fixed
+            // Adjust center to keep the zoom point fixed using matrix-based transformation
             if (zoomAnim.zoomCanvasX !== undefined && zoomAnim.zoomCanvasY !== undefined) {
                 const image = this.images.get(zoomAnim.imageId);
                 if (image) {
-                    // Cache viewport dimensions to avoid redundant calculations
-                    const containerWidth = this.viewport.containerWidth;
-                    const containerHeight = this.viewport.containerHeight;
-                    const imageWidth = image.width;
-                    const imageHeight = image.height;
+                    // Get the image point currently under the zoom canvas point
+                    const currentImagePoint = this.viewport.canvasToImagePoint(
+                        zoomAnim.zoomCanvasX,
+                        zoomAnim.zoomCanvasY,
+                        image
+                    );
 
-                    // Recalculate which image point is currently under the zoom canvas point
-                    // Using the pre-zoom center and scale to account for any panning
-                    const preZoomViewportWidth = containerWidth / preZoomScale;
-                    const preZoomViewportHeight = containerHeight / preZoomScale;
-                    const boundsLeft = (preZoomCenterX * imageWidth) - (preZoomViewportWidth / 2);
-                    const boundsTop = (preZoomCenterY * imageHeight) - (preZoomViewportHeight / 2);
+                    // Update scale first
+                    this.viewport.scale = newScale;
 
-                    // What image point is currently under the canvas zoom point?
-                    const currentImagePointX = boundsLeft + (zoomAnim.zoomCanvasX / preZoomScale);
-                    const currentImagePointY = boundsTop + (zoomAnim.zoomCanvasY / preZoomScale);
-
-                    // Now calculate center that keeps THIS point under the canvas point at new scale
-                    const newViewportWidth = containerWidth / newScale;
-                    const newViewportHeight = containerHeight / newScale;
-
-                    this.viewport.centerX = (currentImagePointX - (zoomAnim.zoomCanvasX / newScale) + (newViewportWidth / 2)) / imageWidth;
-                    this.viewport.centerY = (currentImagePointY - (zoomAnim.zoomCanvasY / newScale) + (newViewportHeight / 2)) / imageHeight;
+                    // Now set center so that the same image point stays under the canvas point at new scale
+                    this.viewport.setCenterFromImagePoint(
+                        currentImagePoint.x,
+                        currentImagePoint.y,
+                        zoomAnim.zoomCanvasX,
+                        zoomAnim.zoomCanvasY,
+                        image
+                    );
                 }
+            } else {
+                // If no zoom point specified, just update scale
+                this.viewport.scale = newScale;
             }
 
             needsTileUpdate = true;
@@ -269,23 +303,20 @@ export class IIIFViewer {
         const currentCenterX = this.viewport.centerX;
         const currentCenterY = this.viewport.centerY;
 
-        // Calculate which point in the image is currently at the mouse position
-        const scaledWidth = this.viewport.containerWidth / currentScale;
-        const scaledHeight = this.viewport.containerHeight / currentScale;
-        const boundsLeft = (currentCenterX * image.width) - (scaledWidth / 2);
-        const boundsTop = (currentCenterY * image.height) - (scaledHeight / 2);
-
-        const imagePointX = boundsLeft + (imageX / currentScale);
-        const imagePointY = boundsTop + (imageY / currentScale);
-
         // Clamp new scale
         newScale = Math.max(this.viewport.minScale, Math.min(this.viewport.maxScale, newScale));
+
+        // Calculate adaptive duration based on zoom distance
+        const zoomRatio = Math.abs(Math.log(newScale / currentScale));
+        const baseDuration = 700; // Base duration in ms
+        const maxDuration = 1000; // Maximum duration in ms
+        const duration = Math.min(baseDuration + (zoomRatio * 300), maxDuration);
 
         // Create zoom animation (can coexist with pan animation)
         this.animations.set('zoom', {
             type: 'zoom',
             startTime: performance.now(),
-            duration: 800,
+            duration: duration,
             startTransform: {
                 scale: currentScale,
                 centerX: currentCenterX,
@@ -293,91 +324,57 @@ export class IIIFViewer {
             },
             targetTransform: {
                 scale: newScale,
-                centerX: currentCenterX, // Will be recalculated in updateAnimations
-                centerY: currentCenterY  // Will be recalculated in updateAnimations
+                centerX: currentCenterX,
+                centerY: currentCenterY
             },
-            easing: easeOutCubic,
+            easing: easeOutQuart,
             imageId: id,
-            // Store zoom anchor point for recalculation
             zoomCanvasX: imageX,
-            zoomCanvasY: imageY,
-            zoomImagePointX: imagePointX,
-            zoomImagePointY: imagePointY
+            zoomCanvasY: imageY
         });
     }
 
-    pan(deltaX: number, deltaY: number, id: string) {
-        const image = this.images.get(id);
-        if (!image) {
-            console.warn(`Image with ID ${id} not found for panning.`);
-            return;
-        }
-
-        const currentScale = this.viewport.scale;
-
-        // Direct viewport update
-        this.viewport.centerX -= (deltaX / (currentScale * image.width));
-        this.viewport.centerY -= (deltaY / (currentScale * image.height));
-
-        // Request tiles for new viewport position
-        const tiles = this.tiles.get(id);
-        if (tiles) {
-            tiles.requestTilesForViewport(this.viewport);
-        }
-    }
-
-
-
+    panTo(){}
+    
     listen(...ids: string[]) {
         const mousedownHandler = (event: MouseEvent) => {
             event.preventDefault();
 
-            this.panState.isDragging = true;
-
-            const startX = event.clientX;
-            const startY = event.clientY;
-
-            // Store initial viewport state
-            const initialCenterX = this.viewport.centerX;
-            const initialCenterY = this.viewport.centerY;
-
-            // Cache image dimensions and scale once (only support first image)
             const image = this.images.get(ids[0]);
             if (!image) return;
 
-            const currentScale = this.viewport.scale;
-            const imageWidth = image.width;
-            const imageHeight = image.height;
+            this.panState.isDragging = true;
+            this.panState.imageId = ids[0];
 
-            // Track latest mouse position
-            let latestDeltaX = 0;
-            let latestDeltaY = 0;
-            let rafId: number | null = null;
+            // Calculate canvas-relative coordinates
+            const canvasX = event.clientX - this.cachedContainerRect.left;
+            const canvasY = event.clientY - this.cachedContainerRect.top;
+
+            // Convert to image coordinates to establish anchor point
+            const imagePoint = this.viewport.canvasToImagePoint(canvasX, canvasY, image);
+            this.panState.anchorImageX = imagePoint.x;
+            this.panState.anchorImageY = imagePoint.y;
+
+            // Initialize both target and current to the starting position
+            this.panState.targetCanvasX = canvasX;
+            this.panState.targetCanvasY = canvasY;
+            this.panState.currentCanvasX = canvasX;
+            this.panState.currentCanvasY = canvasY;
 
             const onMouseMove = (moveEvent: MouseEvent) => {
-                // Just store the latest delta, don't update viewport yet
-                latestDeltaX = moveEvent.clientX - startX;
-                latestDeltaY = moveEvent.clientY - startY;
+                // Update target canvas position
+                const newCanvasX = moveEvent.clientX - this.cachedContainerRect.left;
+                const newCanvasY = moveEvent.clientY - this.cachedContainerRect.top;
 
-                // Schedule update on next frame if not already scheduled
-                if (rafId === null) {
-                    rafId = requestAnimationFrame(() => {
-                        // Update viewport with latest delta
-                        this.viewport.centerX = initialCenterX - (latestDeltaX / (currentScale * imageWidth));
-                        this.viewport.centerY = initialCenterY - (latestDeltaY / (currentScale * imageHeight));
-
-                        rafId = null; // Ready for next frame
-                    });
-                }
+                this.panState.targetCanvasX = newCanvasX;
+                this.panState.targetCanvasY = newCanvasY;
             };
 
             const onMouseUp = () => {
                 this.panState.isDragging = false;
 
-                // Cancel any pending frame
-                if (rafId !== null) {
-                    cancelAnimationFrame(rafId);
-                }
+                // Let the animation continue to catch up to target position
+                // The updateAnimations loop will stop automatically when caught up
 
                 // Request tiles for final position
                 const tiles = this.tiles.get(ids[0]);
@@ -397,7 +394,16 @@ export class IIIFViewer {
             //alt or shift key pressed
             if (event.altKey || event.shiftKey) {
                 event.preventDefault();
-                const zoomFactor = 1.38;
+
+                // Throttle zoom events for smoother experience
+                const now = performance.now();
+                if (now - this.lastZoomTime < this.ZOOM_THROTTLE) {
+                    return;
+                }
+                this.lastZoomTime = now;
+
+                // Use smaller zoom factor for smoother incremental zooming
+                const zoomFactor = 1.35; 
                 const imageX = event.clientX - this.cachedContainerRect.left;
                 const imageY = event.clientY - this.cachedContainerRect.top;
                 const newScale = event.deltaY < 0 ? this.viewport.scale * zoomFactor : this.viewport.scale / zoomFactor;

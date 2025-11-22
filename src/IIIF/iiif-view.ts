@@ -147,4 +147,53 @@ export class Viewport {
       this.centerY = Math.max(minCenterY, Math.min(maxCenterY, this.centerY));
     }
   }
+
+  // Matrix-based coordinate transformations
+
+  // Convert canvas pixel coordinates to image pixel coordinates
+  canvasToImagePoint(canvasX: number, canvasY: number, image: IIIFImage): { x: number, y: number } {
+    // Calculate viewport bounds in image space
+    const viewportWidth = this.containerWidth / this.scale;
+    const viewportHeight = this.containerHeight / this.scale;
+    const viewportMinX = (this.centerX * image.width) - (viewportWidth / 2);
+    const viewportMinY = (this.centerY * image.height) - (viewportHeight / 2);
+
+    // Transform canvas pixel to image pixel
+    const imageX = viewportMinX + (canvasX / this.scale);
+    const imageY = viewportMinY + (canvasY / this.scale);
+
+    return { x: imageX, y: imageY };
+  }
+
+  // Convert image pixel coordinates to normalized coordinates (0-1)
+  imageToNormalizedPoint(imageX: number, imageY: number, image: IIIFImage): { x: number, y: number } {
+    return {
+      x: imageX / image.width,
+      y: imageY / image.height
+    };
+  }
+
+  // Convert canvas pixel coordinates directly to normalized coordinates
+  canvasToNormalized(canvasX: number, canvasY: number, image: IIIFImage): { x: number, y: number } {
+    const imagePoint = this.canvasToImagePoint(canvasX, canvasY, image);
+    return this.imageToNormalizedPoint(imagePoint.x, imagePoint.y, image);
+  }
+
+  // Convert normalized coordinates back to image pixel coordinates
+  normalizedToImagePoint(normalizedX: number, normalizedY: number, image: IIIFImage): { x: number, y: number } {
+    return {
+      x: normalizedX * image.width,
+      y: normalizedY * image.height
+    };
+  }
+
+  // Set center such that a given image point appears at a given canvas position
+  setCenterFromImagePoint(imageX: number, imageY: number, canvasX: number, canvasY: number, image: IIIFImage) {
+    const viewportWidth = this.containerWidth / this.scale;
+    const viewportHeight = this.containerHeight / this.scale;
+
+    // Calculate what center would place imagePoint at canvasPosition
+    this.centerX = (imageX - (canvasX / this.scale) + (viewportWidth / 2)) / image.width;
+    this.centerY = (imageY - (canvasY / this.scale) + (viewportHeight / 2)) / image.height;
+  }
 }
