@@ -188,3 +188,23 @@ export function interpolate(start: number, end: number, progress: number, easing
     const easedProgress = easing(progress);
     return start + (end - start) * easedProgress;
 }
+
+/**
+ * Spring easing function based on OpenSeadragon's implementation
+ * Creates smooth, physics-based animation
+ *
+ * @param stiffness - Controls the curve shape (default: 6.5)
+ *                   - Lower values (1-3): Slower, more gradual
+ *                   - Higher values (10+): Faster, snappier
+ * @returns An easing function
+ */
+export function createSpringEasing(stiffness: number = 6.5): EasingFunction {
+    return (t: number) => {
+        if (t === 0) return 0;
+        if (t === 1) return 1;
+        return (1.0 - Math.exp(stiffness * -t)) / (1.0 - Math.exp(-stiffness));
+    };
+}
+
+// Default spring easing (OpenSeadragon default stiffness)
+export const spring: EasingFunction = createSpringEasing(6.5);

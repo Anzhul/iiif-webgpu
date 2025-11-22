@@ -44,55 +44,44 @@ export class TileManager {
     return Math.max(0, Math.min(bestLevel, this.image.maxZoomLevel));
   }
 
-  // Get tiles needed for current viewport
-  getTilesForViewport(viewport: any) {
-    const zoomLevel = this.getOptimalZoomLevel(viewport.scale);
-    const scaleFactor = this.image.scaleFactors[zoomLevel];
-    const bounds = viewport.getImageBounds(this.image);
-
-    // Scale bounds to the resolution level
-    // Start
-    const levelBounds = {
-      left: Math.floor(bounds.left / scaleFactor),
-      top: Math.floor(bounds.top / scaleFactor),
-      right: Math.ceil(bounds.right / scaleFactor),
-      bottom: Math.ceil(bounds.bottom / scaleFactor)
-    };
-
-    const tiles = [];
-    const tileSize = this.image.tileSize;
-
-    const startTileX = Math.floor(levelBounds.left / tileSize);
-    const startTileY = Math.floor(levelBounds.top / tileSize);
-    const endTileX = Math.floor(levelBounds.right / tileSize);
-    const endTileY = Math.floor(levelBounds.bottom / tileSize);
-
-    for (let tileY = startTileY; tileY <= endTileY; tileY++) {
-      for (let tileX = startTileX; tileX <= endTileX; tileX++) {
-        const tile = this.createTile(tileX, tileY, zoomLevel, scaleFactor);
-        if (tile) tiles.push(tile);
-      }
-    }
-
-    // Load all tiles in parallel
-    this.loadTilesBatch(tiles);
-    return tiles;
-  }
 
   createTile(tileX: number, tileY: number, zoomLevel: number, scaleFactor: number) {
     const tileSize = this.image.tileSize;
     const x = tileX * tileSize * scaleFactor;
     const y = tileY * tileSize * scaleFactor;
-    
+
     // Don't create tiles outside image bounds
     if (x >= this.image.width || y >= this.image.height) {
       return null;
     }
 
+    const tileId = `${zoomLevel}-${tileX}-${tileY}`;
+
+    // Check if tile already exists in cache or is being loaded
+    const cachedTile = this.tileCache.get(tileId);
+    if (cachedTile) {
+      this.markTileAccessed(tileId);
+      return cachedTile;
+    }
+
+    // If tile is being loaded, return a placeholder with the ID
+    if (this.loadingTiles.has(tileId)) {
+      return {
+        id: tileId,
+        x: x,
+        y: y,
+        width: Math.min(tileSize * scaleFactor, this.image.width - x),
+        height: Math.min(tileSize * scaleFactor, this.image.height - y),
+        tileX: tileX,
+        tileY: tileY,
+        zoomLevel: zoomLevel,
+        scaleFactor: scaleFactor
+      };
+    }
+
+    // Create new tile object only if it doesn't exist
     const width = Math.min(tileSize * scaleFactor, this.image.width - x);
     const height = Math.min(tileSize * scaleFactor, this.image.height - y);
-
-    const tileId = `${zoomLevel}-${tileX}-${tileY}`;
     const url = this.image.getTileUrl(x, y, width, height);
 
     return {
@@ -178,17 +167,89 @@ export class TileManager {
     return tile;
   }
 
-  // Get loaded tiles for rendering with fallback to previous tiles (optimized for WebGPU)
-  getLoadedTilesForRender(viewport: any) {
-    const requestedTiles = this.getTilesForViewport(viewport);
+  // Request tiles for viewport (triggers loading but doesn't wait)
+  // This should be called when viewport changes (pan/zoom)
+  requestTilesForViewport(viewport: any) {
+    const zoomLevel = this.getOptimalZoomLevel(viewport.scale);
+    const scaleFactor = this.image.scaleFactors[zoomLevel];
+    const bounds = viewport.getImageBounds(this.image);
 
-    // Try to get all requested tiles at the current zoom level
-    const loadedTiles = requestedTiles
-      .map(tile => this.getCachedTile(tile.id))
-      .filter(tile => tile && tile.image);
+    // Scale bounds to the resolution level
+    const levelBounds = {
+      left: Math.floor(bounds.left / scaleFactor),
+      top: Math.floor(bounds.top / scaleFactor),
+      right: Math.ceil(bounds.right / scaleFactor),
+      bottom: Math.ceil(bounds.bottom / scaleFactor)
+    };
+
+    const tiles = [];
+    const tileSize = this.image.tileSize;
+
+    const startTileX = Math.floor(levelBounds.left / tileSize);
+    const startTileY = Math.floor(levelBounds.top / tileSize);
+    const endTileX = Math.floor(levelBounds.right / tileSize);
+    const endTileY = Math.floor(levelBounds.bottom / tileSize);
+
+    for (let tileY = startTileY; tileY <= endTileY; tileY++) {
+      for (let tileX = startTileX; tileX <= endTileX; tileX++) {
+        const tile = this.createTile(tileX, tileY, zoomLevel, scaleFactor);
+        if (tile) tiles.push(tile);
+      }
+    }
+
+    // Load all tiles in parallel (non-blocking)
+    this.loadTilesBatch(tiles);
+  }
+
+  // Get loaded tiles for rendering with fallback to previous tiles (optimized for WebGPU)
+  // This is called every render frame and should NOT trigger new tile requests
+  getLoadedTilesForRender(viewport: any) {
+    const zoomLevel = this.getOptimalZoomLevel(viewport.scale);
+    const scaleFactor = this.image.scaleFactors[zoomLevel];
+    const bounds = viewport.getImageBounds(this.image);
+
+    // Scale bounds to the resolution level
+    const levelBounds = {
+      left: Math.floor(bounds.left / scaleFactor),
+      top: Math.floor(bounds.top / scaleFactor),
+      right: Math.ceil(bounds.right / scaleFactor),
+      bottom: Math.ceil(bounds.bottom / scaleFactor)
+    };
+
+    const tileSize = this.image.tileSize;
+    const startTileX = Math.floor(levelBounds.left / tileSize);
+    const startTileY = Math.floor(levelBounds.top / tileSize);
+    const endTileX = Math.floor(levelBounds.right / tileSize);
+    const endTileY = Math.floor(levelBounds.bottom / tileSize);
+
+    // Build list of tile IDs we need for current viewport
+    const neededTileIds = new Set<string>();
+    for (let tileY = startTileY; tileY <= endTileY; tileY++) {
+      for (let tileX = startTileX; tileX <= endTileX; tileX++) {
+        const x = tileX * tileSize * scaleFactor;
+        const y = tileY * tileSize * scaleFactor;
+
+        // Don't create tiles outside image bounds
+        if (x >= this.image.width || y >= this.image.height) {
+          continue;
+        }
+
+        const tileId = `${zoomLevel}-${tileX}-${tileY}`;
+        neededTileIds.add(tileId);
+      }
+    }
+
+    // Get only loaded tiles from cache (no network requests)
+    const loadedTiles = [];
+    for (const tileId of neededTileIds) {
+      const cachedTile = this.getCachedTile(tileId);
+      if (cachedTile && cachedTile.image) {
+        loadedTiles.push(cachedTile);
+      }
+    }
 
     // If we got all tiles, update cache and return
-    if (loadedTiles.length === requestedTiles.length) {
+    if (loadedTiles.length === neededTileIds.size) {
       this.lastRenderedTiles = loadedTiles;
       return loadedTiles;
     }

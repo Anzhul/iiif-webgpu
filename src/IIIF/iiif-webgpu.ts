@@ -277,7 +277,7 @@ export class WebGPURenderer {
     }
 
     uploadTextureFromBitmap(tileId: string, bitmap: ImageBitmap): GPUTexture | undefined {
-        if (!this.device) return undefined;
+        if (!this.device || !this.pipeline || !this.sampler || !this.storageBuffer) return undefined;
 
         // Check if texture already exists
         if (this.textureCache.has(tileId)) {
@@ -303,6 +303,26 @@ export class WebGPURenderer {
         // Cache the texture
         this.textureCache.set(tileId, texture);
 
+        // Pre-create bind group for this texture
+        const bindGroup = this.device.createBindGroup({
+            layout: this.pipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: { buffer: this.storageBuffer }
+                },
+                {
+                    binding: 1,
+                    resource: this.sampler
+                },
+                {
+                    binding: 2,
+                    resource: texture.createView()
+                }
+            ]
+        });
+        this.bindGroupCache.set(tileId, bindGroup);
+
         return texture;
     }
 
@@ -312,41 +332,18 @@ export class WebGPURenderer {
         tile: TileRenderData,
         tileIndex: number
     ) {
-        if (!this.device || !this.storageBuffer || !this.sampler || !this.pipeline) return;
+        if (!this.device) return;
 
-        // Get texture from cache (should already be uploaded)
-        let texture = this.textureCache.get(tile.id);
-        if (!texture) {
-            // Fallback: upload if not found (shouldn't normally happen)
-            texture = this.uploadTextureFromBitmap(tile.id, tile.image);
-            if (!texture) {
-                return;
-            }
-        }
-
-        // Create bind group for this texture (cache by texture, not by tile)
-        const textureKey = tile.id;
-        let bindGroup = this.bindGroupCache.get(textureKey);
+        // Get bind group from cache (should already be created during texture upload)
+        let bindGroup = this.bindGroupCache.get(tile.id);
 
         if (!bindGroup) {
-            bindGroup = this.device.createBindGroup({
-                layout: this.pipeline.getBindGroupLayout(0),
-                entries: [
-                    {
-                        binding: 0,
-                        resource: { buffer: this.storageBuffer }
-                    },
-                    {
-                        binding: 1,
-                        resource: this.sampler
-                    },
-                    {
-                        binding: 2,
-                        resource: texture.createView()
-                    }
-                ]
-            });
-            this.bindGroupCache.set(textureKey, bindGroup);
+            // Fallback: upload texture and create bind group if not found (shouldn't normally happen)
+            this.uploadTextureFromBitmap(tile.id, tile.image);
+            bindGroup = this.bindGroupCache.get(tile.id);
+            if (!bindGroup) {
+                return;
+            }
         }
 
         // Draw the tile using instanced rendering with tileIndex
