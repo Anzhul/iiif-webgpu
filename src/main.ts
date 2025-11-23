@@ -8,7 +8,9 @@ if (container) {
         toolbar: { 
             zoom: true,
             annotations: true,
-            layers: true
+            layers: true,
+            CVButton: true,
+            fullscreen: true
         },
         gsap: gsap
     });

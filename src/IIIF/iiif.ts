@@ -334,7 +334,28 @@ export class IIIFViewer {
         });
     }
 
-    panTo(){}
+    pan(deltaX: number, deltaY: number, imageId: string) {
+        const image = this.images.get(imageId);
+        if (!image) {
+            console.warn(`Image with ID ${imageId} not found for panning.`);
+            return;
+        }
+
+        // Convert delta to normalized coordinates
+        const normalizedDx = (deltaX / this.viewport.scale) / image.width;
+        const normalizedDy = (deltaY / this.viewport.scale) / image.height;
+
+        // Update viewport center
+        this.viewport.centerX += normalizedDx;
+        this.viewport.centerY += normalizedDy;
+        this.viewport.constrainCenter(image);
+
+        // Request new tiles after panning
+        const tiles = this.tiles.get(imageId);
+        if (tiles) {
+            tiles.requestTilesForViewport(this.viewport);
+        }
+    }
     
     listen(...ids: string[]) {
         const mousedownHandler = (event: MouseEvent) => {

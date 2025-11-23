@@ -4,13 +4,13 @@
   --iiif-toolbar-bg: rgba(0, 0, 0, 0.5);
   --iiif-toolbar-border-radius: 8px;
   --iiif-toolbar-backdrop-filter: blur(1px);
-  --iiif-toolbar-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-  --iiif-toolbar-transition: all 0.2s ease;
+  --iiif-toolbar-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  --iiif-toolbar-transition: ease-in-out 0.3s;
 }
 
 .iiif-toolbar {
   position: absolute;
-  height: clamp(1.45rem, 3.5vh, 2.25rem);
+  height: 2.2rem;
   top: clamp(2rem, 5vh, 3rem);
   right: clamp(2rem, 6vw, 4rem);
   z-index: 1000;
@@ -24,6 +24,38 @@
   justify-content: space-around;
   padding: 0 0.5rem;
   cursor: default;
+}
+
+.iiif-toolbar-main-tools{
+  left: 0;
+  justify-content: space-around;
+  height: 100%;
+  display: flex;
+}
+
+.iiif-toolbar-secondary-tools{
+  right: 0;
+  justify-content: space-around;
+  height: 100%;
+  display: flex;
+}
+
+.iiif-toolbar-divider {
+  position: relative;
+  left: 0;
+  display: flex;
+  height: 100%;
+  width: 1rem;
+}
+
+.iiif-toolbar-divider-block{
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 1px;
+  height: 40%;
+  background-color: rgba(255, 255, 255, 0.65);
 }
 
 .iiif-toolbar.hidden {
@@ -47,14 +79,12 @@
   margin: 0 0.1rem;
 }
 
-
-
 .iiif-toolbar-button:hover {
-  background-color: rgba(0, 0, 0, 0.1);
+  background-color: rgba(0, 0, 0, 0.25);
 }
 
 .iiif-toolbar-button:active {
-  background-color: rgba(0, 0, 0, 0.2);
+  background-color: rgba(0, 0, 0, 0.45);
 }
 
 /* Position variants */
@@ -87,9 +117,13 @@
 }
 
 .iiif-toolbar.theme-light .iiif-toolbar-button:hover {
-  background-color: rgba(0, 0, 0, 0.35);
+  background-color: rgba(0, 0, 0, 0.25);
 }
 
 .iiif-toolbar.theme-light .iiif-toolbar-button:active {
-  background-color: rgba(0, 0, 0, 0.45);
+  background-color: rgba(0, 0, 0, 0.35);
+}
+
+.iiif-toolbar-button-fullscreen.active {
+  background-color: rgba(0, 0, 0, 0.35);
 }
