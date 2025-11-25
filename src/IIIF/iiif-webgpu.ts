@@ -1,5 +1,6 @@
 
 /// <reference types="@webgpu/types" />
+import { mat4 } from 'gl-matrix';
 import { IIIFImage } from './iiif-image.js';
 import { Viewport } from './iiif-view.js';
 import ShaderModule from './iiif-shader.wgsl?raw';
@@ -9,54 +10,101 @@ interface TileRenderData {
     image: ImageBitmap;
     x: number;
     y: number;
+    z: number;  // Z position in world space (default 0 for image plane)
     width: number;
     height: number;
 }
 
-// Matrix helper functions
-function createViewMatrix(centerX: number, centerY: number, scale: number, imageWidth: number, imageHeight: number, canvasWidth: number, canvasHeight: number): Float32Array {
-    // The view matrix transforms from image space to view space
-    // It handles pan (translation) and zoom (scale)
-
-    // Calculate viewport center in image pixels
-    const viewportCenterX = centerX * imageWidth;
-    const viewportCenterY = centerY * imageHeight;
-
-    // Calculate how much of the image is visible (in image pixels)
-    const viewportWidth = canvasWidth / scale;
-    const viewportHeight = canvasHeight / scale;
-
-    // Calculate the visible area bounds in image space
-    const viewportMinX = viewportCenterX - viewportWidth / 2;
-    const viewportMinY = viewportCenterY - viewportHeight / 2;
-
-    // Translate to move viewport top-left to origin
-    const tx = -viewportMinX * scale;
-    const ty = -viewportMinY * scale;
-
-    // Column-major order (WGSL uses column-major)
-    return new Float32Array([
-        scale, 0,     0, 0,  // Column 0 (scale for zoom)
-        0,     scale, 0, 0,  // Column 1
-        0,     0,     1, 0,  // Column 2
-        tx, ty, 0, 1   // Column 3 (translation already includes scale)
-    ]);
+/**
+ * Creates a perspective projection matrix
+ * Maps from camera view space to clip space with perspective division
+ */
+function createPerspectiveMatrix(
+    fovDegrees: number,
+    aspectRatio: number,
+    near: number,
+    far: number
+): Float32Array {
+    const fovRadians = (fovDegrees * Math.PI) / 180;
+    const projection = mat4.create();
+    mat4.perspective(projection, fovRadians, aspectRatio, near, far);
+    return projection as Float32Array;
 }
 
-function createProjectionMatrix(canvasWidth: number, canvasHeight: number): Float32Array {
-    // Orthographic projection that maps canvas pixel coordinates to clip space [-1, 1]
-    // Also flips Y axis (image space has Y=0 at top, clip space has Y=-1 at top)
+/**
+ * Creates a view matrix (camera transformation)
+ * Positions the camera in world space looking at the image
+ */
+function createViewMatrix(
+    centerX: number,
+    centerY: number,
+    cameraZ: number,
+    imageWidth: number,
+    imageHeight: number,
+    scale: number
+): Float32Array {
+    // Calculate where the camera should look in scaled world space
+    // Since we scale tile positions, we must also scale camera position
+    const lookAtX = centerX * imageWidth * scale;
+    const lookAtY = centerY * imageHeight * scale;
+    // Image plane is at Z=0
 
-    const scaleX = 2.0 / canvasWidth;
-    const scaleY = -2.0 / canvasHeight;  // Negative to flip Y
+    // Camera position
+    const cameraX = lookAtX;
+    const cameraY = lookAtY;
+    // cameraZ is passed in (distance from image plane)
 
-    // Column-major order
-    return new Float32Array([
-        scaleX, 0,      0, 0,  // Column 0
-        0,      scaleY, 0, 0,  // Column 1
-        0,      0,      1, 0,  // Column 2
-        -1,     1,      0, 1   // Column 3 (translate to -1..1 range)
-    ]);
+    // View matrix with Y-axis flip to match screen coordinates
+    // In WebGPU/OpenGL, Y increases upward, but in screen space Y increases downward
+    // We flip Y in the view matrix to correct this
+    const view = mat4.create();
+
+    // Create translation
+    mat4.translate(view, view, [-cameraX, cameraY, -cameraZ]);
+
+    // Apply Y-axis flip
+    mat4.scale(view, view, [1, -1, 1]);
+
+    return view as Float32Array;
+}
+
+/**
+ * Multiplies two 4x4 matrices (column-major order)
+ */
+function multiplyMatrices(a: Float32Array, b: Float32Array): Float32Array {
+    const result = mat4.create();
+    mat4.multiply(result, a as mat4, b as mat4);
+    return result as Float32Array;
+}
+
+/**
+ * Creates a complete 3D transformation matrix for the IIIF viewer
+ * This creates a true model-view-projection (MVP) matrix with perspective
+ */
+function create3DTransformMatrix(
+    centerX: number,
+    centerY: number,
+    imageWidth: number,
+    imageHeight: number,
+    canvasWidth: number,
+    canvasHeight: number,
+    cameraZ: number,
+    fov: number,
+    near: number,
+    far: number,
+    scale: number
+): Float32Array {
+    // Create perspective projection matrix
+    const aspectRatio = canvasWidth / canvasHeight;
+    const projection = createPerspectiveMatrix(fov, aspectRatio, near, far);
+
+    // Create view matrix (camera position and orientation)
+    const view = createViewMatrix(centerX, centerY, cameraZ, imageWidth, imageHeight, scale);
+
+    // Combine projection * view
+    const vp = multiplyMatrices(projection, view);
+
+    return vp;
 }
 
 export class WebGPURenderer {
@@ -70,10 +118,12 @@ export class WebGPURenderer {
     private pipeline?: GPURenderPipeline;
     private sampler?: GPUSampler;
     private format: GPUTextureFormat = 'bgra8unorm';
+    private depthTexture?: GPUTexture;
+    private depthFormat: GPUTextureFormat = 'depth24plus';
 
     // Shared storage buffer for all tile uniforms
     private storageBuffer?: GPUBuffer;
-    private storageBufferSize: number = 256 * 1000; // Support up to 1000 tiles
+    private storageBufferSize: number = 160 * 1000; // Support up to 1000 tiles (160 bytes per tile)
 
     // Texture cache: tileId -> GPUTexture
     private textureCache: Map<string, GPUTexture> = new Map();
@@ -149,6 +199,7 @@ export class WebGPURenderer {
             await this.createPipeline();
             this.createSampler();
             this.createStorageBuffer();
+            this.createDepthTexture();
 
             console.log('WebGPU initialized successfully');
         } catch (error) {
@@ -179,6 +230,9 @@ export class WebGPURenderer {
                 alphaMode: 'opaque',
             });
         }
+
+        // Recreate depth texture with new size
+        this.createDepthTexture();
     }
 
     private async createPipeline() {
@@ -252,6 +306,31 @@ export class WebGPURenderer {
                 topology: 'triangle-list',
                 cullMode: 'none',  // Disable culling to ensure triangles are visible
             },
+            depthStencil: {
+                format: this.depthFormat,
+                depthWriteEnabled: true,
+                depthCompare: 'less',  // Closer fragments pass the depth test
+            },
+        });
+    }
+
+    private createDepthTexture() {
+        if (!this.device) return;
+
+        // Destroy old depth texture if it exists
+        if (this.depthTexture) {
+            this.depthTexture.destroy();
+        }
+
+        // Create new depth texture matching canvas size
+        this.depthTexture = this.device.createTexture({
+            size: {
+                width: this.canvas.width,
+                height: this.canvas.height,
+                depthOrArrayLayers: 1,
+            },
+            format: this.depthFormat,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
         });
     }
 
@@ -356,43 +435,69 @@ export class WebGPURenderer {
             return;
         }
 
-        // Calculate view and projection matrices ONCE for all tiles
+        // Apply viewport scale to model matrices to achieve zoom effect
         const physicalScale = viewport.scale * this.devicePixelRatio;
-        const viewMatrix = createViewMatrix(
+
+        // Calculate the combined Model-View-Projection (MVP) matrix for the scene
+        // Keep camera at fixed Z distance, but scale camera X/Y to match scaled tile positions
+        const mvpMatrix = create3DTransformMatrix(
             viewport.centerX,
             viewport.centerY,
-            physicalScale,
             image.width,
             image.height,
             this.canvas.width,
-            this.canvas.height
-        );
-        const projectionMatrix = createProjectionMatrix(
-            this.canvas.width,
-            this.canvas.height
+            this.canvas.height,
+            viewport.cameraZ,
+            viewport.fov,
+            viewport.near,
+            viewport.far,
+            physicalScale
         );
 
         // Prepare all tiles (including thumbnail)
         const allTiles = thumbnail ? [thumbnail, ...tiles] : tiles;
 
         // Batch write all tile uniforms to storage buffer ONCE
-        const uniformData = new Float32Array(allTiles.length * 40); // 40 floats per tile (256 bytes / 4 bytes per float)
+        // WGSL struct layout (with proper alignment):
+        // mat4x4<f32> mvpMatrix:      64 bytes (16 floats) - offset 0
+        // mat4x4<f32> modelMatrix:    64 bytes (16 floats) - offset 64
+        // vec2<f32> tilePosition:     8 bytes (2 floats)   - offset 128
+        // vec2<f32> _padding0:        8 bytes (2 floats)   - offset 136
+        // vec2<f32> tileSize:         8 bytes (2 floats)   - offset 144
+        // vec2<f32> _padding1:        8 bytes (2 floats)   - offset 152
+        // Total per tile: 160 bytes = 40 floats
+        const floatsPerTile = 40;
+        const uniformData = new Float32Array(allTiles.length * floatsPerTile);
 
         for (let i = 0; i < allTiles.length; i++) {
             const tile = allTiles[i];
-            const offset = i * 40;
+            const offset = i * floatsPerTile;
 
-            // Pack: viewMatrix (16) + projectionMatrix (16) + tilePosition (2) + padding (2) + tileSize (2) + padding (2)
-            uniformData.set(viewMatrix, offset);
-            uniformData.set(projectionMatrix, offset + 16);
-            uniformData[offset + 32] = tile.x;
-            uniformData[offset + 33] = tile.y;
-            uniformData[offset + 34] = 0.0; // padding
-            uniformData[offset + 35] = 0.0; // padding
-            uniformData[offset + 36] = tile.width;
-            uniformData[offset + 37] = tile.height;
-            uniformData[offset + 38] = 0.0; // padding
-            uniformData[offset + 39] = 0.0; // padding
+            // Create model matrix for this specific tile
+            // Apply viewport scale to match zoom level - this makes tiles appear larger/smaller
+            const modelMatrix = mat4.create();
+            mat4.translate(modelMatrix, modelMatrix, [
+                tile.x * physicalScale,
+                tile.y * physicalScale,
+                tile.z
+            ]);
+            mat4.scale(modelMatrix, modelMatrix, [
+                tile.width * physicalScale,
+                tile.height * physicalScale,
+                1
+            ]);
+
+            // Pack data with correct alignment
+            uniformData.set(mvpMatrix, offset);           // 16 floats: mvpMatrix
+            uniformData.set(modelMatrix, offset + 16);    // 16 floats: modelMatrix
+            uniformData[offset + 32] = tile.x;            // tilePosition.x
+            uniformData[offset + 33] = tile.y;            // tilePosition.y
+            uniformData[offset + 34] = 0.0;               // _padding0.x
+            uniformData[offset + 35] = 0.0;               // _padding0.y
+            uniformData[offset + 36] = tile.width;        // tileSize.x
+            uniformData[offset + 37] = tile.height;       // tileSize.y
+            uniformData[offset + 38] = 0.0;               // _padding1.x
+            uniformData[offset + 39] = 0.0;               // _padding1.y
         }
 
         // Single write operation for all tile data
@@ -407,7 +512,13 @@ export class WebGPURenderer {
                 clearValue: { r: 0.1, g: 0.1, b: 0.1, a: 1.0 },
                 loadOp: 'clear',
                 storeOp: 'store',
-            }]
+            }],
+            depthStencilAttachment: {
+                view: this.depthTexture!.createView(),
+                depthClearValue: 1.0,  // Clear to max depth (far plane)
+                depthLoadOp: 'clear',
+                depthStoreOp: 'store',
+            }
         });
 
         renderPass.setPipeline(this.pipeline);

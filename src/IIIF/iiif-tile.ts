@@ -70,6 +70,7 @@ export class TileManager {
         id: tileId,
         x: x,
         y: y,
+        z: 0,  // Tiles are on the image plane at Z=0
         width: Math.min(tileSize * scaleFactor, this.image.width - x),
         height: Math.min(tileSize * scaleFactor, this.image.height - y),
         tileX: tileX,
@@ -89,6 +90,7 @@ export class TileManager {
       url: url,
       x: x,
       y: y,
+      z: 0,  // Tiles are on the image plane at Z=0
       width: width,
       height: height,
       tileX: tileX,
@@ -174,16 +176,19 @@ export class TileManager {
     const scaleFactor = this.image.scaleFactors[zoomLevel];
     const bounds = viewport.getImageBounds(this.image);
 
-    // Scale bounds to the resolution level
+    // Add a small margin to prevent edge clipping (1 extra tile on each side)
+    const tileSize = this.image.tileSize;
+    const margin = tileSize * scaleFactor;
+
+    // Scale bounds to the resolution level with margin
     const levelBounds = {
-      left: Math.floor(bounds.left / scaleFactor),
-      top: Math.floor(bounds.top / scaleFactor),
-      right: Math.ceil(bounds.right / scaleFactor),
-      bottom: Math.ceil(bounds.bottom / scaleFactor)
+      left: Math.floor((bounds.left - margin) / scaleFactor),
+      top: Math.floor((bounds.top - margin) / scaleFactor),
+      right: Math.ceil((bounds.right + margin) / scaleFactor),
+      bottom: Math.ceil((bounds.bottom + margin) / scaleFactor)
     };
 
     const tiles = [];
-    const tileSize = this.image.tileSize;
 
     const startTileX = Math.floor(levelBounds.left / tileSize);
     const startTileY = Math.floor(levelBounds.top / tileSize);
@@ -296,6 +301,7 @@ export class TileManager {
         image: loadedBitmap,
         x: 0,
         y: 0,
+        z: -1,  // Just behind the image plane so tiles at z=0 render on top
         width: this.image.width,
         height: this.image.height,
         url: thumbnailUrl

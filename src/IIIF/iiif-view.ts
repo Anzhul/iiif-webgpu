@@ -1,13 +1,28 @@
 import { IIIFImage } from './iiif-image';
 
+/**
+ * Classical camera view representation in image pixel coordinates
+ * Useful for camera-like pan/zoom operations
+ */
+
 export class Viewport {
-    containerWidth: number;
-    containerHeight: number;
-    scale: number;
-    centerX: number; // Normalized (0-1)
-    centerY: number; // Normalized (0-1)
-    minScale: number;
-    maxScale: number;
+  // Scale
+  scale: number;
+  minScale: number;
+  maxScale: number;
+
+  // Container dimensions
+  containerWidth: number;
+  containerHeight: number;
+
+  centerX: number; // Normalized (0-1)
+  centerY: number; // Normalized (0-1)
+
+  // 3D camera properties
+  cameraZ: number; // Camera Z position (distance from image plane)
+  fov: number; // Field of view in degrees
+  near: number; // Near clipping plane
+  far: number; // Far clipping plane
 
   constructor(containerWidth: number, containerHeight: number) {
     this.containerWidth = containerWidth;
@@ -17,19 +32,12 @@ export class Viewport {
     this.centerY = 0.5;
     this.minScale = 0;
     this.maxScale = 10;
-  }
 
-  // Set viewport to fit entire image
-  fitToContainer(image : IIIFImage) {
-    const imageWidth = image.width;
-    const imageHeight = image.height;
-    const scaleX = this.containerWidth / imageWidth;
-    const scaleY = this.containerHeight / imageHeight;
-    this.scale = Math.min(scaleX, scaleY);
-    this.minScale = this.scale * 0.2; // Allow zooming out to half of fit size
-    this.centerX = 0.5;
-    this.centerY = 0.5;
-    return this;
+    // Initialize 3D camera parameters
+    this.cameraZ = 1000; // Camera is 1000 pixels away from the image plane (at Z=0)
+    this.fov = 45; // 60 degree field of view
+    this.near = 0.1; // Near clipping plane
+    this.far = 10000; // Far clipping plane
   }
 
   fitToWidth(image: IIIFImage) {
@@ -38,19 +46,7 @@ export class Viewport {
     this.minScale = this.scale * 0.2;
     this.centerX = 0.5;
     this.centerY = 0.5;
-    console.log(`Image width: ${imageWidth}`);
-    console.log(`Container width: ${this.containerWidth}`);
-    console.log(`fitToWidth: scale set to ${this.scale}`);
-
-    return this;
-  }
-
-  fitToHeight(image: IIIFImage) {
-    const imageHeight = image.height;
-    this.scale = this.containerHeight / imageHeight;
-    this.minScale = this.scale * 0.5;
-    this.centerX = 0.5;
-    this.centerY = 0.5;
+    console.log(this);
     return this;
   }
 
@@ -63,7 +59,6 @@ export class Viewport {
     const left = (this.centerX * image.width) - (scaledWidth / 2);
     const top = (this.centerY * image.height) - (scaledHeight / 2);
 
-    //console.log(`Viewport bounds in image coords: left=${left}, top=${top}, width=${scaledWidth}, height=${scaledHeight}`);
     return {
       left: Math.max(0, left),
       top: Math.max(0, top),
@@ -104,7 +99,8 @@ export class Viewport {
   // Matrix-based coordinate transformations
 
   // Convert canvas pixel coordinates to image pixel coordinates
-  canvasToImagePoint(canvasX: number, canvasY: number, image: IIIFImage): { x: number, y: number } {
+  // In 3D mode, this performs a ray-plane intersection at Z=0
+  canvasToImagePoint(canvasX: number, canvasY: number, image: IIIFImage, targetZ: number = 0): { x: number, y: number, z: number } {
     // Calculate viewport bounds in image space
     const viewportWidth = this.containerWidth / this.scale;
     const viewportHeight = this.containerHeight / this.scale;
@@ -115,29 +111,7 @@ export class Viewport {
     const imageX = viewportMinX + (canvasX / this.scale);
     const imageY = viewportMinY + (canvasY / this.scale);
 
-    return { x: imageX, y: imageY };
-  }
-
-  // Convert image pixel coordinates to normalized coordinates (0-1)
-  imageToNormalizedPoint(imageX: number, imageY: number, image: IIIFImage): { x: number, y: number } {
-    return {
-      x: imageX / image.width,
-      y: imageY / image.height
-    };
-  }
-
-  // Convert canvas pixel coordinates directly to normalized coordinates
-  canvasToNormalized(canvasX: number, canvasY: number, image: IIIFImage): { x: number, y: number } {
-    const imagePoint = this.canvasToImagePoint(canvasX, canvasY, image);
-    return this.imageToNormalizedPoint(imagePoint.x, imagePoint.y, image);
-  }
-
-  // Convert normalized coordinates back to image pixel coordinates
-  normalizedToImagePoint(normalizedX: number, normalizedY: number, image: IIIFImage): { x: number, y: number } {
-    return {
-      x: normalizedX * image.width,
-      y: normalizedY * image.height
-    };
+    return { x: imageX, y: imageY, z: targetZ };
   }
 
   // Set center such that a given image point appears at a given canvas position
@@ -149,4 +123,6 @@ export class Viewport {
     this.centerX = (imageX - (canvasX / this.scale) + (viewportWidth / 2)) / image.width;
     this.centerY = (imageY - (canvasY / this.scale) + (viewportHeight / 2)) / image.height;
   }
+
+
 }
