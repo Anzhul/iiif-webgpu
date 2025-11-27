@@ -6,8 +6,8 @@ import { WebGPURenderer } from './iiif-webgpu';
 import { ToolBar } from './iiif-toolbar';
 import { AnnotationManager } from './iiif-annotations'
 import { GestureHandler } from './iiif-gesture';
-import { ViewportController } from './iiif-viewport-controller';
 import { Camera } from './iiif-camera';
+import { WorldSpace } from './iiif-world';
 
 export class IIIFViewer {
     container: HTMLElement;
@@ -15,6 +15,7 @@ export class IIIFViewer {
     images: Map<string, IIIFImage>;
     tiles: Map<string, TileManager>;
     viewport: Viewport;
+    world: WorldSpace;
     camera: Camera;
     renderer?: WebGPURenderer;
     toolbar?: ToolBar;
@@ -32,15 +33,13 @@ export class IIIFViewer {
         this.images = new Map();
         this.tiles = new Map();
         this.viewport = new Viewport(container.clientWidth, container.clientHeight);
+        this.world = new WorldSpace();
         this.toolbar = new ToolBar(container, options.toolbar);
-        this.camera = new Camera(this.viewport, this.tiles);
+        this.camera = new Camera(this.viewport, this.world, this.images, this.tiles);
         this.gsap = options.gsap || undefined;
 
         this.annotationManager = new AnnotationManager();
         this.eventListeners = [];
-
-        // Initialize viewport controller
-        this.viewportController = new ViewportController(this.viewport, this.images, this.tiles);
 
         // Cache the container's bounding rect
         this.cachedContainerRect = container.getBoundingClientRect();
@@ -114,18 +113,28 @@ export class IIIFViewer {
         }
     }
 
-    async addImage(id: string, url: string, focus: boolean = false) {
+    async addImage(id: string, url: string, focus: boolean = false, worldX: number = 0, worldY: number = 0) {
         const iiifImage = new IIIFImage(id, url);
         await iiifImage.loadManifest(url);
         this.images.set(id, iiifImage);
 
+        // Place image in world space
+        // If this is the first image, place at origin, otherwise place based on parameters
+        const isFirstImage = this.world.getAllImageTransforms().length === 0;
+        if (isFirstImage) {
+            this.world.placeImage(id, iiifImage, 0, 0);
+        } else {
+            this.world.placeImage(id, iiifImage, worldX, worldY);
+        }
+
         // Pass renderer to TileManager if available
         const tileManager = new TileManager(id, iiifImage, 500, this.renderer, 0.35);
+        this.tiles.set(id, tileManager);
 
         if (focus) {
-            this.viewport.fitToWidth(iiifImage);
+            // Use camera to focus on the new image
+            this.camera.focusOnImage(id, 0.1, 500);
         }
-        this.tiles.set(id, tileManager);
 
         // Request initial tiles for the viewport
         tileManager.requestTilesForViewport(this.viewport);
@@ -139,6 +148,7 @@ export class IIIFViewer {
         if (index !== -1) {
             this.images.delete(id);
             this.tiles.delete(id);
+            this.world.removeImage(id);
             console.log(`Image with ID ${id} removed.`);
         } else {
             console.warn(`Image with ID ${id} not found.`);
@@ -147,56 +157,34 @@ export class IIIFViewer {
 
 
     private updateAnimations() {
-        this.viewportController.updateAnimations();
+        // Update camera animations
+        const cameraResult = this.camera.update();
+        return cameraResult;
     }
 
-    zoom(newScale: number, imageX: number, imageY: number, id: string) {
-        //this.viewportController.zoom(newScale, imageX, imageY, id);
-        console.log(`zooming!`);
-    }
-
-    pan(deltaX: number, deltaY: number, imageId: string) {
-        //this.viewportController.pan(deltaX, deltaY, imageId);
-        console.log(`panning!`);
-    }
-    
-    listen(...ids: string[]) {
+    listen(..._ids: string[]) {
         const mousedownHandler = (event: MouseEvent) => {
             event.preventDefault();
-
-            const image = this.images.get(ids[0]);
-            if (!image) return;
 
             // Calculate canvas-relative coordinates
             const canvasX = event.clientX - this.cachedContainerRect.left;
             const canvasY = event.clientY - this.cachedContainerRect.top;
 
-            // Start pan via controller
-            this.viewportController.startPan(canvasX, canvasY, ids[0]);
-
-            let prevCanvasX = canvasX;
-            let prevCanvasY = canvasY;
+            // Start interactive pan
+            this.camera.startInteractivePan(canvasX, canvasY);
 
             const onMouseMove = (moveEvent: MouseEvent) => {
                 // Update target canvas position
                 const newCanvasX = moveEvent.clientX - this.cachedContainerRect.left;
                 const newCanvasY = moveEvent.clientY - this.cachedContainerRect.top;
 
-                // Calculate incremental delta from previous position
-                const deltaX = newCanvasX - prevCanvasX;
-                const deltaY = newCanvasY - prevCanvasY;
-
-                // Update pan via controller
-                this.viewportController.updatePan(newCanvasX, newCanvasY, deltaX, deltaY);
-
-                // Update previous position for next move event
-                prevCanvasX = newCanvasX;
-                prevCanvasY = newCanvasY;
+                // Update pan via camera
+                this.camera.updateInteractivePan(newCanvasX, newCanvasY);
             };
 
             const onMouseUp = () => {
-                // End pan via controller
-                this.viewportController.endPan();
+                // End interactive pan
+                this.camera.endInteractivePan();
 
                 this.container.removeEventListener('mousemove', onMouseMove);
                 this.container.removeEventListener('mouseup', onMouseUp);
@@ -207,11 +195,17 @@ export class IIIFViewer {
         };
 
         const wheelHandler = (event: WheelEvent) => {
-            const canvasX = event.clientX - this.cachedContainerRect.left;
-            const canvasY = event.clientY - this.cachedContainerRect.top;
+            // Prevent default scroll behavior when alt or shift is pressed
+            if (event.altKey || event.shiftKey) {
+                event.preventDefault();
 
-            // Handle wheel via controller
-            this.viewportController.handleWheel(event, canvasX, canvasY, ids);
+                const canvasX = event.clientX - this.cachedContainerRect.left;
+                const canvasY = event.clientY - this.cachedContainerRect.top;
+
+                // Calculate zoom delta (in Z units)
+                const zoomFactor = event.deltaY < 0 ? -100 : 100;
+                this.camera.setZoomTarget(zoomFactor, canvasX, canvasY);
+            }
         };
 
         this.container.addEventListener('mousedown', mousedownHandler);
@@ -237,7 +231,7 @@ export class IIIFViewer {
 
     render(imageId?: string) {
         // Update animations first (this modifies viewport state)
-        //this.updateAnimations();
+        this.updateAnimations();
 
         // Check renderer availability synchronously
         if (!this.renderer) {
