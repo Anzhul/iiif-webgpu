@@ -7,6 +7,7 @@ import { ToolBar } from './iiif-toolbar';
 import { AnnotationManager } from './iiif-annotations'
 import { GestureHandler } from './iiif-gesture';
 import { ViewportController } from './iiif-viewport-controller';
+import { Camera } from './iiif-camera';
 
 export class IIIFViewer {
     container: HTMLElement;
@@ -14,6 +15,7 @@ export class IIIFViewer {
     images: Map<string, IIIFImage>;
     tiles: Map<string, TileManager>;
     viewport: Viewport;
+    camera: Camera;
     renderer?: WebGPURenderer;
     toolbar?: ToolBar;
     annotationManager?: AnnotationManager;
@@ -22,7 +24,6 @@ export class IIIFViewer {
     private eventListeners: { event: string, handler: EventListener }[];
     private renderLoopActive: boolean = false;
     private animationFrameId?: number;
-    private viewportController: ViewportController;
     private cachedContainerRect: DOMRect;
 
     constructor(container: HTMLElement, options: any = {}) {
@@ -32,6 +33,7 @@ export class IIIFViewer {
         this.tiles = new Map();
         this.viewport = new Viewport(container.clientWidth, container.clientHeight);
         this.toolbar = new ToolBar(container, options.toolbar);
+        this.camera = new Camera(this.viewport, this.tiles);
         this.gsap = options.gsap || undefined;
 
         this.annotationManager = new AnnotationManager();
@@ -112,7 +114,7 @@ export class IIIFViewer {
         }
     }
 
-    async addImage(id: string, url: string) {
+    async addImage(id: string, url: string, focus: boolean = false) {
         const iiifImage = new IIIFImage(id, url);
         await iiifImage.loadManifest(url);
         this.images.set(id, iiifImage);
@@ -120,7 +122,9 @@ export class IIIFViewer {
         // Pass renderer to TileManager if available
         const tileManager = new TileManager(id, iiifImage, 500, this.renderer, 0.35);
 
-        this.viewport.fitToWidth(iiifImage);
+        if (focus) {
+            this.viewport.fitToWidth(iiifImage);
+        }
         this.tiles.set(id, tileManager);
 
         // Request initial tiles for the viewport
@@ -147,11 +151,13 @@ export class IIIFViewer {
     }
 
     zoom(newScale: number, imageX: number, imageY: number, id: string) {
-        this.viewportController.zoom(newScale, imageX, imageY, id);
+        //this.viewportController.zoom(newScale, imageX, imageY, id);
+        console.log(`zooming!`);
     }
 
     pan(deltaX: number, deltaY: number, imageId: string) {
-        this.viewportController.pan(deltaX, deltaY, imageId);
+        //this.viewportController.pan(deltaX, deltaY, imageId);
+        console.log(`panning!`);
     }
     
     listen(...ids: string[]) {
@@ -231,7 +237,7 @@ export class IIIFViewer {
 
     render(imageId?: string) {
         // Update animations first (this modifies viewport state)
-        this.updateAnimations();
+        //this.updateAnimations();
 
         // Check renderer availability synchronously
         if (!this.renderer) {

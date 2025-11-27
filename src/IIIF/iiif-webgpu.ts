@@ -40,13 +40,12 @@ function createViewMatrix(
     centerY: number,
     cameraZ: number,
     imageWidth: number,
-    imageHeight: number,
-    scale: number
+    imageHeight: number
 ): Float32Array {
-    // Calculate where the camera should look in scaled world space
-    // Since we scale tile positions, we must also scale camera position
-    const lookAtX = centerX * imageWidth * scale;
-    const lookAtY = centerY * imageHeight * scale;
+    // Calculate where the camera should look in image pixel coordinates
+    // No scaling needed - work in raw image pixel space
+    const lookAtX = centerX * imageWidth;
+    const lookAtY = centerY * imageHeight;
     // Image plane is at Z=0
 
     // Camera position
@@ -69,15 +68,6 @@ function createViewMatrix(
 }
 
 /**
- * Multiplies two 4x4 matrices (column-major order)
- */
-function multiplyMatrices(a: Float32Array, b: Float32Array): Float32Array {
-    const result = mat4.create();
-    mat4.multiply(result, a as mat4, b as mat4);
-    return result as Float32Array;
-}
-
-/**
  * Creates a complete 3D transformation matrix for the IIIF viewer
  * This creates a true model-view-projection (MVP) matrix with perspective
  */
@@ -91,20 +81,20 @@ function create3DTransformMatrix(
     cameraZ: number,
     fov: number,
     near: number,
-    far: number,
-    scale: number
+    far: number
 ): Float32Array {
     // Create perspective projection matrix
     const aspectRatio = canvasWidth / canvasHeight;
     const projection = createPerspectiveMatrix(fov, aspectRatio, near, far);
 
     // Create view matrix (camera position and orientation)
-    const view = createViewMatrix(centerX, centerY, cameraZ, imageWidth, imageHeight, scale);
+    const view = createViewMatrix(centerX, centerY, cameraZ, imageWidth, imageHeight);
 
     // Combine projection * view
-    const vp = multiplyMatrices(projection, view);
+    const vp = mat4.create();
+    mat4.multiply(vp, projection as mat4, view as mat4);
 
-    return vp;
+    return vp as Float32Array;
 }
 
 export class WebGPURenderer {
@@ -435,11 +425,8 @@ export class WebGPURenderer {
             return;
         }
 
-        // Apply viewport scale to model matrices to achieve zoom effect
-        const physicalScale = viewport.scale * this.devicePixelRatio;
-
         // Calculate the combined Model-View-Projection (MVP) matrix for the scene
-        // Keep camera at fixed Z distance, but scale camera X/Y to match scaled tile positions
+        // Work in image pixel coordinates - zoom is controlled by cameraZ distance
         const mvpMatrix = create3DTransformMatrix(
             viewport.centerX,
             viewport.centerY,
@@ -450,8 +437,7 @@ export class WebGPURenderer {
             viewport.cameraZ,
             viewport.fov,
             viewport.near,
-            viewport.far,
-            physicalScale
+            viewport.far
         );
 
         // Prepare all tiles (including thumbnail)
@@ -474,16 +460,16 @@ export class WebGPURenderer {
             const offset = i * floatsPerTile;
 
             // Create model matrix for this specific tile
-            // Apply viewport scale to match zoom level - this makes tiles appear larger/smaller
+            // Work in image pixel coordinates - no scaling needed
             const modelMatrix = mat4.create();
             mat4.translate(modelMatrix, modelMatrix, [
-                tile.x * physicalScale,
-                tile.y * physicalScale,
+                tile.x,
+                tile.y,
                 tile.z
             ]);
             mat4.scale(modelMatrix, modelMatrix, [
-                tile.width * physicalScale,
-                tile.height * physicalScale,
+                tile.width,
+                tile.height,
                 1
             ]);
 

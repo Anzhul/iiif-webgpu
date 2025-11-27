@@ -6,10 +6,6 @@ import { IIIFImage } from './iiif-image';
  */
 
 export class Viewport {
-  // Scale
-  scale: number;
-  minScale: number;
-  maxScale: number;
 
   // Container dimensions
   containerWidth: number;
@@ -20,33 +16,90 @@ export class Viewport {
 
   // 3D camera properties
   cameraZ: number; // Camera Z position (distance from image plane)
+  minZ: number;
+  maxZ: number;
+
   fov: number; // Field of view in degrees
   near: number; // Near clipping plane
   far: number; // Far clipping plane
 
+  scale: number; // Cached scale derived from cameraZ
+
   constructor(containerWidth: number, containerHeight: number) {
     this.containerWidth = containerWidth;
     this.containerHeight = containerHeight;
-    this.scale = 1;
+
     this.centerX = 0.5; // Normalized coordinates (0-1)
     this.centerY = 0.5;
-    this.minScale = 0;
-    this.maxScale = 10;
 
     // Initialize 3D camera parameters
     this.cameraZ = 1000; // Camera is 1000 pixels away from the image plane (at Z=0)
+    this.minZ = 100;
+    this.maxZ = 2000;
+
     this.fov = 45; // 60 degree field of view
     this.near = 0.1; // Near clipping plane
     this.far = 10000; // Far clipping plane
+
+    this.scale = this.calculateScale();
   }
 
+  private calculateScale(): number {
+    const fovRadians = (this.fov * Math.PI) / 180;
+    const visibleHeight = 2 * this.cameraZ * Math.tan(fovRadians / 2);
+    return this.containerHeight / visibleHeight;
+  }
+
+  private updateScale(): void {
+    this.scale = this.calculateScale();
+  }
+
+  getScale(): number {
+    return this.scale;
+  }
+    
+
   fitToWidth(image: IIIFImage) {
-    const imageWidth = image.width;
-    this.scale = this.containerWidth / imageWidth;
-    this.minScale = this.scale * 0.2;
+
+    const targetScale = this.containerWidth / image.width;
+
+    const fovRadians = (this.fov * Math.PI) / 180;
+    this.cameraZ = this.containerHeight / (2 * targetScale * Math.tan(fovRadians / 2));
+
+    // Set max zoom out to 5x farther, max zoom in to 10x closer
+    this.maxZ = this.cameraZ * 5;
+    this.minZ = this.cameraZ * 0.1;
+
+    // Update clipping planes based on zoom constraints
+    this.near = this.minZ * 0.01;  // 1% of closest zoom for safety
+    this.far = this.maxZ * 2;      // 2x farthest zoom for safety
+
+    this.updateScale();
+
     this.centerX = 0.5;
     this.centerY = 0.5;
-    console.log(this);
+    return this;
+  }
+
+
+  fitToHeight(image: IIIFImage) {
+    const imageHeight = image.height;
+    const targetScale = this.containerHeight / imageHeight;
+    // Calculate camera Z for this scale
+    const fovRadians = (this.fov * Math.PI) / 180;
+    this.cameraZ = this.containerHeight / (2 * targetScale * Math.tan(fovRadians / 2));
+    // Set max zoom out to 5x farther, max zoom in to 10x closer
+    this.maxZ = this.cameraZ * 5;
+    this.minZ = this.cameraZ * 0.1;
+
+    // Update clipping planes based on zoom constraints
+    this.near = this.minZ * 0.01;  // 1% of closest zoom for safety
+    this.far = this.maxZ * 2;      // 2x farthest zoom for safety
+
+    this.updateScale();
+
+    this.centerX = 0.5;
+    this.centerY = 0.5;
     return this;
   }
 
