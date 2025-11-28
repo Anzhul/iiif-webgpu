@@ -276,12 +276,12 @@ export class Camera {
      * @param easing - Easing function
      */
     toImage(imageX: number, imageY: number, imageZ: number, imageId: string, duration = 500, easing: EasingFunction = easeOutQuart) {
-        const worldPoint = this.world.imageToWorld(imageX, imageY, imageId);
+        /*const worldPoint = this.world.imageToWorld(imageX, imageY, imageId);
         if (!worldPoint) {
             console.warn(`Image with ID ${imageId} not found in world`);
             return;
         }
-        this.to(worldPoint.x, worldPoint.y, imageZ, duration, easing);
+        this.to(worldPoint.x, worldPoint.y, imageZ, duration, easing);*/
     }
 
     /**
@@ -291,28 +291,7 @@ export class Camera {
      * @param duration - Animation duration
      */
     focusOnImage(imageId: string, padding = 0.1, duration = 500) {
-        const transform = this.world.getImageTransform(imageId);
-        if (!transform) {
-            console.warn(`Image with ID ${imageId} not found in world`);
-            return;
-        }
 
-        // Calculate center of image in world space
-        const centerX = transform.worldX + transform.displayWidth / 2;
-        const centerY = transform.worldY + transform.displayHeight / 2;
-
-        // Calculate Z to fit image
-        const paddedWidth = transform.displayWidth * (1 + padding * 2);
-        const paddedHeight = transform.displayHeight * (1 + padding * 2);
-        const scaleX = this.viewport.containerWidth / paddedWidth;
-        const scaleY = this.viewport.containerHeight / paddedHeight;
-        const targetScale = Math.min(scaleX, scaleY);
-
-        const fovRadians = (this.viewport.fov * Math.PI) / 180;
-        const targetZ = this.viewport.containerHeight / (2 * targetScale * Math.tan(fovRadians / 2));
-        const clampedZ = Math.max(this.viewport.minZ, Math.min(this.viewport.maxZ, targetZ));
-
-        this.to(centerX, centerY, clampedZ, duration);
     }
 
     /**
@@ -321,17 +300,6 @@ export class Camera {
      * @param duration - Animation duration
      */
     fitToWorld(padding = 0.1, duration = 500) {
-        const center = this.world.getWorldCenter();
-        if (!center) {
-            console.warn('No images in world');
-            return;
-        }
-
-        // Use viewport's fitToWorld to calculate Z
-        this.viewport.fitToWorld(this.world, padding);
-
-        // Animate to the calculated position
-        this.to(this.viewport.cameraWorldX, this.viewport.cameraWorldY, this.viewport.cameraZ, duration);
     }
 
     // ============================================================================
@@ -507,8 +475,8 @@ export class Camera {
         const visibleImages = this.viewport.getVisibleImages(this.world);
 
         // Request tiles for each visible image
-        visibleImages.forEach(transform => {
-            const tileManager = this.tiles.get(transform.id);
+        visibleImages.forEach(image => {
+            const tileManager = this.tiles.get(image.id);
             if (tileManager) {
                 tileManager.requestTilesForViewport(this.viewport);
             }

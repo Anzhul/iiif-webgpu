@@ -113,28 +113,41 @@ export class IIIFViewer {
         }
     }
 
-    async addImage(id: string, url: string, focus: boolean = false, worldX: number = 0, worldY: number = 0) {
+    async addGroup(id: string, group: any = {}) {
+        //this.world.addGroup(id, group);
+        for (const imageId in group.images) {
+            const imageOptions = group.images[imageId];
+            await this.addImage(imageId, imageOptions.url, imageOptions.focus || false, imageOptions.worldX || 0, imageOptions.worldY || 0);
+        }
+    }
+
+    async removeGroup(id: string) {
+        // Implement group removal logic
+    }
+
+    async move(options: any = {}) {
+        // Implement move logic for images/groups
+    }
+
+    async addImage({id, url, x = 0, y = 0, z = 0, scale = 1.0, rotation = 0, detail = 1.0}: 
+    {id: string, url: string, x?: number, y?: number, z?: number, scale?: number, rotation?: number, detail?: number}) {
         const iiifImage = new IIIFImage(id, url);
         await iiifImage.loadManifest(url);
         this.images.set(id, iiifImage);
 
         // Place image in world space
         // If this is the first image, place at origin, otherwise place based on parameters
+        this.world.addImage(id, x, y, z, scale, rotation);
         const isFirstImage = this.world.getAllImageTransforms().length === 0;
         if (isFirstImage) {
             this.world.placeImage(id, iiifImage, 0, 0);
         } else {
-            this.world.placeImage(id, iiifImage, worldX, worldY);
+            this.world.placeImage(id, iiifImage, x, y);
         }
 
         // Pass renderer to TileManager if available
         const tileManager = new TileManager(id, iiifImage, 500, this.renderer, 0.35);
         this.tiles.set(id, tileManager);
-
-        if (focus) {
-            // Use camera to focus on the new image
-            this.camera.focusOnImage(id, 0.1, 500);
-        }
 
         // Request initial tiles for the viewport
         tileManager.requestTilesForViewport(this.viewport);
@@ -162,7 +175,7 @@ export class IIIFViewer {
         return cameraResult;
     }
 
-    listen(..._ids: string[]) {
+    private listen() {
         const mousedownHandler = (event: MouseEvent) => {
             event.preventDefault();
 
@@ -268,6 +281,8 @@ export class IIIFViewer {
             console.log('Render loop already active');
             return;
         }
+
+        this.listen();
 
         this.renderLoopActive = true;
         console.log('Starting render loop for image:', imageId);
