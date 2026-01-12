@@ -1,6 +1,6 @@
 import './style.scss'
 import { IIIFViewer } from './IIIF/iiif';
-import { gsap } from 'gsap';
+//import { gsap } from 'gsap';
 
 const container = document.getElementById('iiif-container');
 if (container) {
@@ -8,11 +8,10 @@ if (container) {
         toolbar: {
             zoom: true,
             annotations: true,
-            layers: true,
+            //layers: true,
             CVButton: true,
             fullscreen: true
         },
-        gsap: gsap
     });
 
     // Expose viewer globally for debugging/testing

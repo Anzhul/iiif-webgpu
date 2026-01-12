@@ -25,12 +25,36 @@ interface CameraAnimation {
     onComplete?: () => void;
 }
 
+interface PanState {
+    isDragging: boolean;
+    // Anchor point approach: track which image point should stay under cursor
+    anchorImageX?: number;  // The image point (in image pixels) we're anchored to
+    anchorImageY?: number;
+    targetCanvasX: number;  // Where the anchor should appear (in canvas pixels)
+    targetCanvasY: number;
+    currentCanvasX: number; // Smoothly interpolated position
+    currentCanvasY: number;
+    imageId?: string;
+}
+
 export class Camera {
     viewport: Viewport;
     tiles: Map<string, TileManager>;
     images: Map<string, IIIFImage>;
     private currentAnimation?: CameraAnimation;
     private animationFrameId?: number;
+    private panState: PanState = {
+        isDragging: false,
+        targetCanvasX: 0,
+        targetCanvasY: 0,
+        currentCanvasX: 0,
+        currentCanvasY: 0
+    };
+    private lastTileRequestTime: number = 0;
+    private readonly TILE_REQUEST_THROTTLE = 100; // Request tiles max once per 100ms
+    private lastZoomTime: number = 0;
+    private readonly ZOOM_THROTTLE = 80; // Minimum ms between zoom events
+    private readonly PAN_TRAILING_FACTOR = 0.15; // Lower = more trailing/lag (0.1-0.3 recommended)
 
     constructor(viewport: Viewport, images: Map<string, IIIFImage>, tiles: Map<string, TileManager>) {
         this.viewport = viewport;
@@ -361,5 +385,163 @@ export class Camera {
      */
     getAnimationType(): 'pan' | 'zoom' | 'to' | undefined {
         return this.currentAnimation?.type;
+    }
+
+    /**
+     * Update interactive pan animations (trailing effect)
+     * Should be called every frame when Camera is not running programmatic animations
+     * Returns true if tiles need to be updated
+     */
+    updateInteractivePanAnimation(): { needsUpdate: boolean; imageId?: string } {
+        const now = performance.now();
+        let needsTileUpdate = false;
+        let imageId: string | undefined;
+
+        // Handle interactive pan with trailing effect
+        if (this.panState.isDragging ||
+            Math.abs(this.panState.targetCanvasX - this.panState.currentCanvasX) > 0.5 ||
+            Math.abs(this.panState.targetCanvasY - this.panState.currentCanvasY) > 0.5) {
+
+            // Smoothly interpolate current canvas position towards target
+            this.panState.currentCanvasX += (this.panState.targetCanvasX - this.panState.currentCanvasX) * this.PAN_TRAILING_FACTOR;
+            this.panState.currentCanvasY += (this.panState.targetCanvasY - this.panState.currentCanvasY) * this.PAN_TRAILING_FACTOR;
+
+            // Update viewport using matrix-based transformation
+            if (this.panState.anchorImageX !== undefined &&
+                this.panState.anchorImageY !== undefined &&
+                this.panState.imageId) {
+
+                const image = this.images.get(this.panState.imageId);
+                if (image) {
+                    // Set viewport center so that anchorImagePoint appears at currentCanvasPoint
+                    let panTrailingDeltaX = this.panState.targetCanvasX - this.panState.currentCanvasX;
+                    let panTrailingDeltaY = this.panState.targetCanvasY - this.panState.currentCanvasY;
+                    if (panTrailingDeltaX < 0.5 && panTrailingDeltaX > -0.5) { panTrailingDeltaX = 0; }
+                    if (panTrailingDeltaY < 0.5 && panTrailingDeltaY > -0.5) { panTrailingDeltaY = 0; }
+
+                    this.viewport.setCenterFromImagePoint(
+                        this.panState.anchorImageX,
+                        this.panState.anchorImageY,
+                        this.panState.currentCanvasX,
+                        this.panState.currentCanvasY,
+                        image
+                    );
+
+                    needsTileUpdate = true;
+                    imageId = this.panState.imageId;
+                }
+            }
+
+            // Request tiles with throttling for pan updates
+            if (needsTileUpdate && imageId) {
+                const timeSinceLastRequest = now - this.lastTileRequestTime;
+                if (timeSinceLastRequest > this.TILE_REQUEST_THROTTLE) {
+                    const tiles = this.tiles.get(imageId);
+                    if (tiles) {
+                        tiles.requestTilesForViewport(this.viewport);
+                        this.lastTileRequestTime = now;
+                    }
+                }
+            }
+        }
+
+        return { needsUpdate: needsTileUpdate, imageId };
+    }
+
+    /**
+     * Start an interactive pan (mouse down)
+     */
+    startInteractivePan(canvasX: number, canvasY: number, imageId: string) {
+        const image = this.images.get(imageId);
+        if (!image) return;
+
+        this.panState.isDragging = true;
+        this.panState.imageId = imageId;
+
+        // Convert to image coordinates to establish anchor point
+        const imagePoint = this.viewport.canvasToImagePoint(canvasX, canvasY, image);
+        this.panState.anchorImageX = imagePoint.x;
+        this.panState.anchorImageY = imagePoint.y;
+
+        // Initialize both target and current to the starting position
+        this.panState.targetCanvasX = canvasX;
+        this.panState.targetCanvasY = canvasY;
+        this.panState.currentCanvasX = canvasX;
+        this.panState.currentCanvasY = canvasY;
+    }
+
+    /**
+     * Update pan target position (mouse move during drag)
+     */
+    updateInteractivePan(canvasX: number, canvasY: number) {
+        if (!this.panState.isDragging) return;
+
+        // Update target canvas position
+        this.panState.targetCanvasX = canvasX;
+        this.panState.targetCanvasY = canvasY;
+    }
+
+    /**
+     * End interactive pan (mouse up)
+     */
+    endInteractivePan() {
+        this.panState.isDragging = false;
+
+        // Let the animation continue to catch up to target position
+        // The updateInteractivePan loop will stop automatically when caught up
+
+        // Request tiles for final position
+        if (this.panState.imageId) {
+            const tiles = this.tiles.get(this.panState.imageId);
+            if (tiles) {
+                tiles.requestTilesForViewport(this.viewport);
+            }
+        }
+    }
+
+    /**
+     * Handle wheel event for zooming
+     */
+    handleWheel(event: WheelEvent, canvasX: number, canvasY: number, imageIds: string[]) {
+        // alt or shift key pressed
+        if (event.altKey || event.shiftKey) {
+            event.preventDefault();
+
+            // Throttle zoom events for smoother experience
+            const now = performance.now();
+            if (now - this.lastZoomTime < this.ZOOM_THROTTLE) {
+                return;
+            }
+            this.lastZoomTime = now;
+
+            // Use smaller zoom factor for smoother incremental zooming
+            const zoomFactor = 1.35;
+            const newScale = event.deltaY < 0 ? this.viewport.scale * zoomFactor : this.viewport.scale / zoomFactor;
+
+            // Calculate adaptive duration based on zoom distance
+            const zoomRatio = Math.abs(Math.log(newScale / this.viewport.scale));
+            const baseDuration = 700;
+            const maxDuration = 1000;
+            const duration = Math.min(baseDuration + (zoomRatio * 300), maxDuration);
+
+            imageIds.forEach(id => this.zoom(newScale, id, duration, undefined, canvasX, canvasY));
+        }
+    }
+
+    /**
+     * Check if interactive pan or programmatic animations are active
+     */
+    hasActiveAnimations(): boolean {
+        return this.isAnimating() ||
+               this.panState.isDragging ||
+               Math.abs(this.panState.targetCanvasX - this.panState.currentCanvasX) > 0.5 ||
+               Math.abs(this.panState.targetCanvasY - this.panState.currentCanvasY) > 0.5;
+    }
+
+    /**
+     * Get the current pan state (for debugging or external use)
+     */
+    getPanState(): Readonly<PanState> {
+        return this.panState;
     }
 }

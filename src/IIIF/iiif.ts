@@ -6,7 +6,6 @@ import { WebGPURenderer } from './iiif-webgpu';
 import { ToolBar } from './iiif-toolbar';
 import { AnnotationManager } from './iiif-annotations'
 import { GestureHandler } from './iiif-gesture';
-import { ViewportController } from './iiif-viewport-controller';
 import { Camera } from './iiif-camera';
 
 export class IIIFViewer {
@@ -16,7 +15,6 @@ export class IIIFViewer {
     tiles: Map<string, TileManager>;
     viewport: Viewport;
     camera: Camera;
-    viewportController: ViewportController;
     renderer?: WebGPURenderer;
     toolbar?: ToolBar;
     annotationManager?: AnnotationManager;
@@ -39,9 +37,6 @@ export class IIIFViewer {
 
         this.annotationManager = new AnnotationManager();
         this.eventListeners = [];
-
-        // Initialize viewport controller with camera for unified zoom/pan
-        this.viewportController = new ViewportController(this.viewport, this.images, this.tiles, this.camera);
 
         // Cache the container's bounding rect
         this.cachedContainerRect = container.getBoundingClientRect();
@@ -148,10 +143,10 @@ export class IIIFViewer {
 
 
     private updateAnimations() {
-        // Only update ViewportController animations if Camera is not animating
-        // This prevents conflicts between programmatic camera animations and interactive viewport animations
+        // Only update interactive pan animations if Camera is not running programmatic animations
+        // This prevents conflicts between programmatic camera animations and interactive pan
         if (!this.camera.isAnimating()) {
-            this.viewportController.updateAnimations();
+            this.camera.updateInteractivePanAnimation();
         }
     }
 
@@ -209,32 +204,21 @@ export class IIIFViewer {
             const canvasX = event.clientX - this.cachedContainerRect.left;
             const canvasY = event.clientY - this.cachedContainerRect.top;
 
-            // Start pan via controller
-            this.viewportController.startPan(canvasX, canvasY, ids[0]);
-
-            let prevCanvasX = canvasX;
-            let prevCanvasY = canvasY;
+            // Start pan via camera
+            this.camera.startInteractivePan(canvasX, canvasY, ids[0]);
 
             const onMouseMove = (moveEvent: MouseEvent) => {
                 // Update target canvas position
                 const newCanvasX = moveEvent.clientX - this.cachedContainerRect.left;
                 const newCanvasY = moveEvent.clientY - this.cachedContainerRect.top;
 
-                // Calculate incremental delta from previous position
-                const deltaX = newCanvasX - prevCanvasX;
-                const deltaY = newCanvasY - prevCanvasY;
-
-                // Update pan via controller
-                this.viewportController.updatePan(newCanvasX, newCanvasY, deltaX, deltaY);
-
-                // Update previous position for next move event
-                prevCanvasX = newCanvasX;
-                prevCanvasY = newCanvasY;
+                // Update pan via camera
+                this.camera.updateInteractivePan(newCanvasX, newCanvasY);
             };
 
             const onMouseUp = () => {
-                // End pan via controller
-                this.viewportController.endPan();
+                // End pan via camera
+                this.camera.endInteractivePan();
 
                 this.container.removeEventListener('mousemove', onMouseMove);
                 this.container.removeEventListener('mouseup', onMouseUp);
@@ -248,8 +232,8 @@ export class IIIFViewer {
             const canvasX = event.clientX - this.cachedContainerRect.left;
             const canvasY = event.clientY - this.cachedContainerRect.top;
 
-            // Handle wheel via controller
-            this.viewportController.handleWheel(event, canvasX, canvasY, ids);
+            // Handle wheel via camera
+            this.camera.handleWheel(event, canvasX, canvasY, ids);
         };
 
         this.container.addEventListener('mousedown', mousedownHandler);
