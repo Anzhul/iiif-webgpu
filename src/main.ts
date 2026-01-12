@@ -5,7 +5,7 @@ import { gsap } from 'gsap';
 const container = document.getElementById('iiif-container');
 if (container) {
     const viewer = new IIIFViewer(container, {
-        toolbar: { 
+        toolbar: {
             zoom: true,
             annotations: true,
             layers: true,
@@ -14,11 +14,16 @@ if (container) {
         },
         gsap: gsap
     });
+
+    // Expose viewer globally for debugging/testing
+    (window as any).viewer = viewer;
+
     //viewer.addControls();
     viewer.listen('test');
     viewer.addImage('test','https://free.iiifhosting.com/iiif/616bc3c8dc9a69d3e935139c8c77b76f32137cab7ce0e4fd2166507cdc948b/info.json', true)
         .then(() => {
             console.log('Image loaded successfully');
+            console.log('Viewer exposed on window.viewer - try: viewer.zoomByFactor(2, "test", 1000)');
             viewer.startRenderLoop('test');
         })
         .catch((error) => {

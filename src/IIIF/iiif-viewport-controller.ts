@@ -1,29 +1,7 @@
 import { Viewport } from './iiif-view';
 import { IIIFImage } from './iiif-image';
 import { TileManager } from './iiif-tile';
-import type { EasingFunction } from './easing';
-import { easeOutQuart, interpolate } from './easing';
-
-interface ViewportTransform {
-    scale: number;
-    centerX: number;
-    centerY: number;
-}
-
-interface Animation {
-    type: 'transform' | 'pan' | 'zoom';
-    startTime: number;
-    duration: number;
-    startTransform: ViewportTransform;
-    targetTransform: ViewportTransform;
-    easing: EasingFunction;
-    imageId: string;
-    // For zoom animations - store the canvas point and image point for anchor
-    zoomCanvasX?: number;
-    zoomCanvasY?: number;
-    zoomAnchorImageX?: number;  // The image point that should stay under the zoom canvas point
-    zoomAnchorImageY?: number;
-}
+import { Camera } from './iiif-camera';
 
 interface PanState {
     isDragging: boolean;
@@ -41,7 +19,7 @@ export class ViewportController {
     private viewport: Viewport;
     private images: Map<string, IIIFImage>;
     private tiles: Map<string, TileManager>;
-    private animations = new Map<string, Animation>();
+    private camera: Camera;
     private panState: PanState = {
         isDragging: false,
         targetCanvasX: 0,
@@ -58,21 +36,25 @@ export class ViewportController {
     constructor(
         viewport: Viewport,
         images: Map<string, IIIFImage>,
-        tiles: Map<string, TileManager>
+        tiles: Map<string, TileManager>,
+        camera: Camera
     ) {
         this.viewport = viewport;
         this.images = images;
         this.tiles = tiles;
+        this.camera = camera;
     }
 
     /**
      * Update all active animations and pan state
      * Should be called every frame
      * Returns true if tiles need to be updated
+     *
+     * Note: Zoom animations are now handled by Camera class.
+     * This only handles interactive pan with trailing effect.
      */
     updateAnimations(): { needsUpdate: boolean; imageId?: string } {
         const now = performance.now();
-        const completedKeys: string[] = [];
         let needsTileUpdate = false;
         let imageId: string | undefined;
 
@@ -110,88 +92,26 @@ export class ViewportController {
                     imageId = this.panState.imageId;
                 }
             }
-        }
 
-        // Apply zoom animation (if exists)
-        const zoomAnim = this.animations.get('zoom');
-        if (zoomAnim) {
-            const elapsed = now - zoomAnim.startTime;
-            const progress = Math.min(elapsed / zoomAnim.duration, 1);
-            const easedProgress = zoomAnim.easing(progress);
-
-            // Interpolate scale
-            const newScale = interpolate(
-                zoomAnim.startTransform.scale,
-                zoomAnim.targetTransform.scale,
-                easedProgress
-            );
-
-            // Adjust center to keep the zoom point fixed using matrix-based transformation
-            if (zoomAnim.zoomCanvasX !== undefined && zoomAnim.zoomCanvasY !== undefined &&
-                zoomAnim.zoomAnchorImageX !== undefined && zoomAnim.zoomAnchorImageY !== undefined) {
-                const image = this.images.get(zoomAnim.imageId);
-                if (image) {
-                    // Update scale first
-                    this.viewport.scale = newScale;
-
-                    // Account for pan trailing offset when positioning zoom anchor
-                    let adjustedZoomCanvasX = zoomAnim.zoomCanvasX;
-                    let adjustedZoomCanvasY = zoomAnim.zoomCanvasY;
-
-                    // If we're panning, offset the zoom canvas position by the trailing delta
-                    if (this.panState.imageId === zoomAnim.imageId) {
-                        const panTrailingDeltaX = this.panState.targetCanvasX - this.panState.currentCanvasX;
-                        const panTrailingDeltaY = this.panState.targetCanvasY - this.panState.currentCanvasY;
-                        adjustedZoomCanvasX += panTrailingDeltaX;
-                        adjustedZoomCanvasY += panTrailingDeltaY;
+            // Request tiles with throttling for pan updates
+            if (needsTileUpdate && imageId) {
+                const timeSinceLastRequest = now - this.lastTileRequestTime;
+                if (timeSinceLastRequest > this.TILE_REQUEST_THROTTLE) {
+                    const tiles = this.tiles.get(imageId);
+                    if (tiles) {
+                        tiles.requestTilesForViewport(this.viewport);
+                        this.lastTileRequestTime = now;
                     }
-
-                    // Set center so that the anchor image point stays under the adjusted canvas point
-                    this.viewport.setCenterFromImagePoint(
-                        zoomAnim.zoomAnchorImageX,
-                        zoomAnim.zoomAnchorImageY,
-                        adjustedZoomCanvasX,
-                        adjustedZoomCanvasY,
-                        image
-                    );
-                }
-            } else {
-                // If no zoom point specified, just update scale
-                this.viewport.scale = newScale;
-            }
-
-            needsTileUpdate = true;
-            imageId = zoomAnim.imageId;
-
-            if (progress >= 1) {
-                completedKeys.push('zoom');
-            }
-        }
-
-        // Request tiles with throttling, or immediately if animation is completing
-        const isAnimationCompleting = completedKeys.length > 0;
-
-        if (needsTileUpdate && imageId) {
-            const timeSinceLastRequest = now - this.lastTileRequestTime;
-
-            // Request tiles if: throttle window passed OR animation is completing
-            if (isAnimationCompleting || timeSinceLastRequest > this.TILE_REQUEST_THROTTLE) {
-                const tiles = this.tiles.get(imageId);
-                if (tiles) {
-                    tiles.requestTilesForViewport(this.viewport);
-                    this.lastTileRequestTime = now;
                 }
             }
         }
-
-        // Remove completed animations
-        completedKeys.forEach(key => this.animations.delete(key));
 
         return { needsUpdate: needsTileUpdate, imageId };
     }
 
     /**
      * Start a zoom animation to a new scale, anchored at a specific canvas point
+     * Now delegates to Camera for unified zoom behavior
      */
     zoom(newScale: number, canvasX: number, canvasY: number, imageId: string) {
         const image = this.images.get(imageId);
@@ -201,58 +121,14 @@ export class ViewportController {
             return;
         }
 
-        // Get current viewport state (might be mid-animation)
-        const currentScale = this.viewport.scale;
-        const currentCenterX = this.viewport.centerX;
-        const currentCenterY = this.viewport.centerY;
-
-        // Clamp new scale
-        newScale = Math.max(this.viewport.minScale, Math.min(this.viewport.maxScale, newScale));
-
-        // Calculate the image point at the zoom anchor (accounting for any pan offset)
-        let adjustedCanvasX = canvasX;
-        let adjustedCanvasY = canvasY;
-
-        // If we're currently panning, the viewport is positioned based on currentCanvasX/Y
-        // but the cursor is actually at targetCanvasX/Y, so we need to account for the delta
-        if (this.panState.imageId === imageId) {
-            const panTrailingDeltaX = this.panState.targetCanvasX - this.panState.currentCanvasX;
-            const panTrailingDeltaY = this.panState.targetCanvasY - this.panState.currentCanvasY;
-            adjustedCanvasX += panTrailingDeltaX;
-            adjustedCanvasY += panTrailingDeltaY;
-        }
-
-        // Calculate which image point is currently under the adjusted cursor position
-        const anchorImagePoint = this.viewport.canvasToImagePoint(adjustedCanvasX, adjustedCanvasY, image);
-
         // Calculate adaptive duration based on zoom distance
-        const zoomRatio = Math.abs(Math.log(newScale / currentScale));
-        const baseDuration = 700; // Base duration in ms
-        const maxDuration = 1000; // Maximum duration in ms
+        const zoomRatio = Math.abs(Math.log(newScale / this.viewport.scale));
+        const baseDuration = 700;
+        const maxDuration = 1000;
         const duration = Math.min(baseDuration + (zoomRatio * 300), maxDuration);
 
-        // Create zoom animation (can coexist with pan animation)
-        this.animations.set('zoom', {
-            type: 'zoom',
-            startTime: performance.now(),
-            duration: duration,
-            startTransform: {
-                scale: currentScale,
-                centerX: currentCenterX,
-                centerY: currentCenterY
-            },
-            targetTransform: {
-                scale: newScale,
-                centerX: currentCenterX,
-                centerY: currentCenterY
-            },
-            easing: easeOutQuart,
-            imageId: imageId,
-            zoomCanvasX: canvasX,
-            zoomCanvasY: canvasY,
-            zoomAnchorImageX: anchorImagePoint.x,
-            zoomAnchorImageY: anchorImagePoint.y
-        });
+        // Delegate to Camera for actual zoom with anchor point
+        this.camera.zoom(newScale, imageId, duration, undefined, canvasX, canvasY);
     }
 
     /**
@@ -312,14 +188,6 @@ export class ViewportController {
         // Update target canvas position
         this.panState.targetCanvasX = canvasX;
         this.panState.targetCanvasY = canvasY;
-
-        // If zoom animation is active, update its anchor point to follow the pan
-        const zoomAnim = this.animations.get('zoom');
-        if (zoomAnim && zoomAnim.zoomCanvasX !== undefined && zoomAnim.zoomCanvasY !== undefined) {
-            // Update the zoom animation's canvas anchor point by the incremental pan delta
-            zoomAnim.zoomCanvasX += deltaX;
-            zoomAnim.zoomCanvasY += deltaY;
-        }
     }
 
     /**
@@ -371,10 +239,10 @@ export class ViewportController {
 
     /**
      * Check if any animations are active
+     * Note: Zoom animations are tracked by Camera class
      */
     hasActiveAnimations(): boolean {
-        return this.animations.size > 0 ||
-               this.panState.isDragging ||
+        return this.panState.isDragging ||
                Math.abs(this.panState.targetCanvasX - this.panState.currentCanvasX) > 0.5 ||
                Math.abs(this.panState.targetCanvasY - this.panState.currentCanvasY) > 0.5;
     }

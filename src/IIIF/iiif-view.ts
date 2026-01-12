@@ -24,6 +24,18 @@ export class Viewport {
   far: number; // Far clipping plane
 
   scale: number; // Cached scale derived from cameraZ
+  minScale: number; // Minimum scale (maximum zoom out) derived from maxZ
+  maxScale: number; // Maximum scale (maximum zoom in) derived from minZ
+
+  // Cache for getImageBounds to avoid redundant calculations
+  private boundsCache: Map<string, {
+    bounds: { left: number; top: number; right: number; bottom: number; width: number; height: number };
+    centerX: number;
+    centerY: number;
+    scale: number;
+    containerWidth: number;
+    containerHeight: number;
+  }> = new Map();
 
   constructor(containerWidth: number, containerHeight: number) {
     this.containerWidth = containerWidth;
@@ -41,7 +53,15 @@ export class Viewport {
     this.near = 0.1; // Near clipping plane
     this.far = 10000; // Far clipping plane
 
+    // Initialize scale properties
     this.scale = this.calculateScale();
+
+    // Initialize scale limits (will be properly calculated in updateScaleLimits)
+    const fovRadians = (this.fov * Math.PI) / 180;
+    const visibleHeightAtMaxZ = 2 * this.maxZ * Math.tan(fovRadians / 2);
+    this.minScale = this.containerHeight / visibleHeightAtMaxZ;
+    const visibleHeightAtMinZ = 2 * this.minZ * Math.tan(fovRadians / 2);
+    this.maxScale = this.containerHeight / visibleHeightAtMinZ;
   }
 
   private calculateScale(): number {
@@ -50,8 +70,30 @@ export class Viewport {
     return this.containerHeight / visibleHeight;
   }
 
-  private updateScale(): void {
+  updateScale(): void {
     this.scale = this.calculateScale();
+    this.updateScaleLimits();
+    this.invalidateBoundsCache();
+  }
+
+  /**
+   * Invalidate the bounds cache when viewport state changes
+   */
+  private invalidateBoundsCache(): void {
+    this.boundsCache.clear();
+  }
+
+  private updateScaleLimits(): void {
+    // Calculate scale limits based on Z limits
+    const fovRadians = (this.fov * Math.PI) / 180;
+
+    // When camera is at maxZ (far away), scale is at minimum (zoomed out)
+    const visibleHeightAtMaxZ = 2 * this.maxZ * Math.tan(fovRadians / 2);
+    this.minScale = this.containerHeight / visibleHeightAtMaxZ;
+
+    // When camera is at minZ (close), scale is at maximum (zoomed in)
+    const visibleHeightAtMinZ = 2 * this.minZ * Math.tan(fovRadians / 2);
+    this.maxScale = this.containerHeight / visibleHeightAtMinZ;
   }
 
   getScale(): number {
@@ -105,6 +147,20 @@ export class Viewport {
 
   // Get visible bounds in image coordinates
   getImageBounds(image: IIIFImage) {
+    // Check cache first
+    const cached = this.boundsCache.get(image.id);
+
+    if (cached &&
+        cached.centerX === this.centerX &&
+        cached.centerY === this.centerY &&
+        cached.scale === this.scale &&
+        cached.containerWidth === this.containerWidth &&
+        cached.containerHeight === this.containerHeight) {
+      // Cache hit - return cached bounds without recalculation
+      return cached.bounds;
+    }
+
+    // Cache miss - calculate bounds
     // How many pixels of the original image are visible in the viewport
     const scaledWidth = this.containerWidth / this.scale;
     const scaledHeight = this.containerHeight / this.scale;
@@ -112,7 +168,7 @@ export class Viewport {
     const left = (this.centerX * image.width) - (scaledWidth / 2);
     const top = (this.centerY * image.height) - (scaledHeight / 2);
 
-    return {
+    const bounds = {
       left: Math.max(0, left),
       top: Math.max(0, top),
       right: Math.min(image.width, left + scaledWidth),
@@ -120,32 +176,51 @@ export class Viewport {
       width: scaledWidth,
       height: scaledHeight
     };
+
+    // Store in cache
+    this.boundsCache.set(image.id, {
+      bounds,
+      centerX: this.centerX,
+      centerY: this.centerY,
+      scale: this.scale,
+      containerWidth: this.containerWidth,
+      containerHeight: this.containerHeight
+    });
+
+    return bounds;
   }
 
   constrainCenter(image?: IIIFImage) {
+    const oldCenterX = this.centerX;
+    const oldCenterY = this.centerY;
+
     if (!image) {
       // Basic constraint to 0-1 range
       this.centerX = Math.max(0, Math.min(1, this.centerX));
       this.centerY = Math.max(0, Math.min(1, this.centerY));
-      return;
+    } else {
+      // Advanced constraint considering zoom level and image bounds
+      const scaledWidth = this.containerWidth / this.scale;
+      const scaledHeight = this.containerHeight / this.scale;
+
+      // When viewport is larger than image, don't constrain (allow free positioning for zoom-to-cursor)
+      // When viewport is smaller than image, constrain to keep image visible
+      if (scaledWidth < image.width) {
+        const minCenterX = (scaledWidth / 2) / image.width;
+        const maxCenterX = 1 - (scaledWidth / 2) / image.width;
+        this.centerX = Math.max(minCenterX, Math.min(maxCenterX, this.centerX));
+      }
+
+      if (scaledHeight < image.height) {
+        const minCenterY = (scaledHeight / 2) / image.height;
+        const maxCenterY = 1 - (scaledHeight / 2) / image.height;
+        this.centerY = Math.max(minCenterY, Math.min(maxCenterY, this.centerY));
+      }
     }
 
-    // Advanced constraint considering zoom level and image bounds
-    const scaledWidth = this.containerWidth / this.scale;
-    const scaledHeight = this.containerHeight / this.scale;
-
-    // When viewport is larger than image, don't constrain (allow free positioning for zoom-to-cursor)
-    // When viewport is smaller than image, constrain to keep image visible
-    if (scaledWidth < image.width) {
-      const minCenterX = (scaledWidth / 2) / image.width;
-      const maxCenterX = 1 - (scaledWidth / 2) / image.width;
-      this.centerX = Math.max(minCenterX, Math.min(maxCenterX, this.centerX));
-    }
-
-    if (scaledHeight < image.height) {
-      const minCenterY = (scaledHeight / 2) / image.height;
-      const maxCenterY = 1 - (scaledHeight / 2) / image.height;
-      this.centerY = Math.max(minCenterY, Math.min(maxCenterY, this.centerY));
+    // Only invalidate cache if center actually changed
+    if (oldCenterX !== this.centerX || oldCenterY !== this.centerY) {
+      this.invalidateBoundsCache();
     }
   }
 
@@ -175,6 +250,9 @@ export class Viewport {
     // Calculate what center would place imagePoint at canvasPosition
     this.centerX = (imageX - (canvasX / this.scale) + (viewportWidth / 2)) / image.width;
     this.centerY = (imageY - (canvasY / this.scale) + (viewportHeight / 2)) / image.height;
+
+    // Invalidate bounds cache since center changed
+    this.invalidateBoundsCache();
   }
 
 

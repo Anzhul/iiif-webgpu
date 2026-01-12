@@ -18,6 +18,16 @@ export class TileManager {
     // Permanent low-resolution thumbnail for background
     private thumbnail: any = null;
 
+    // Cache for tile boundary calculations to avoid redundant computation every frame
+    private cachedNeededTileIds: Set<string> | null = null;
+    private cachedViewportState: {
+        centerX: number;
+        centerY: number;
+        scale: number;
+        containerWidth: number;
+        containerHeight: number;
+    } | null = null;
+
   constructor(id: string, iiifImage: IIIFImage, maxCacheSize: number = 500, renderer?: WebGPURenderer, distanceDetail: number = 0.35) {
     this.id = id;
     this.image = iiifImage;
@@ -42,6 +52,49 @@ export class TileManager {
     }
 
     return Math.max(0, Math.min(bestLevel, this.image.maxZoomLevel));
+  }
+
+  /**
+   * Check if viewport has changed significantly enough to invalidate tile cache
+   * Uses a small threshold to avoid recalculating on tiny movements
+   */
+  private hasViewportChanged(viewport: any): boolean {
+    if (!this.cachedViewportState) {
+      return true;
+    }
+
+    const state = this.cachedViewportState;
+    const threshold = 0.001; // ~0.1% movement threshold
+
+    // Check if any viewport parameter changed beyond threshold
+    return (
+      Math.abs(viewport.centerX - state.centerX) > threshold ||
+      Math.abs(viewport.centerY - state.centerY) > threshold ||
+      Math.abs(viewport.scale - state.scale) > threshold ||
+      viewport.containerWidth !== state.containerWidth ||
+      viewport.containerHeight !== state.containerHeight
+    );
+  }
+
+  /**
+   * Update cached viewport state
+   */
+  private updateViewportCache(viewport: any): void {
+    this.cachedViewportState = {
+      centerX: viewport.centerX,
+      centerY: viewport.centerY,
+      scale: viewport.scale,
+      containerWidth: viewport.containerWidth,
+      containerHeight: viewport.containerHeight
+    };
+  }
+
+  /**
+   * Invalidate the tile calculation cache
+   * Call this when tiles are loaded or viewport changes significantly
+   */
+  private invalidateTileCache(): void {
+    this.cachedNeededTileIds = null;
   }
 
 
@@ -145,6 +198,9 @@ export class TileManager {
         this.renderer.uploadTextureFromBitmap(tile.id, loadedBitmap);
       }
 
+      // Invalidate cache so next render picks up the newly loaded tile
+      this.invalidateTileCache();
+
       this.evictOldTiles();
       return cachedTile;
 
@@ -202,6 +258,9 @@ export class TileManager {
       }
     }
 
+    // Invalidate the render cache since viewport changed
+    this.invalidateTileCache();
+
     // Load all tiles in parallel (non-blocking)
     this.loadTilesBatch(tiles);
   }
@@ -209,39 +268,54 @@ export class TileManager {
   // Get loaded tiles for rendering with fallback to previous tiles (optimized for WebGPU)
   // This is called every render frame and should NOT trigger new tile requests
   getLoadedTilesForRender(viewport: any) {
-    const zoomLevel = this.getOptimalZoomLevel(viewport.scale);
-    const scaleFactor = this.image.scaleFactors[zoomLevel];
-    const bounds = viewport.getImageBounds(this.image);
+    // Check if viewport has changed significantly - if not, use cached tile IDs
+    const viewportChanged = this.hasViewportChanged(viewport);
 
-    // Scale bounds to the resolution level
-    const levelBounds = {
-      left: Math.floor(bounds.left / scaleFactor),
-      top: Math.floor(bounds.top / scaleFactor),
-      right: Math.ceil(bounds.right / scaleFactor),
-      bottom: Math.ceil(bounds.bottom / scaleFactor)
-    };
+    let neededTileIds: Set<string>;
 
-    const tileSize = this.image.tileSize;
-    const startTileX = Math.floor(levelBounds.left / tileSize);
-    const startTileY = Math.floor(levelBounds.top / tileSize);
-    const endTileX = Math.floor(levelBounds.right / tileSize);
-    const endTileY = Math.floor(levelBounds.bottom / tileSize);
+    if (viewportChanged || !this.cachedNeededTileIds) {
+      // Viewport changed or no cache - recalculate tile boundaries
+      const zoomLevel = this.getOptimalZoomLevel(viewport.scale);
+      const scaleFactor = this.image.scaleFactors[zoomLevel];
+      const bounds = viewport.getImageBounds(this.image);
 
-    // Build list of tile IDs we need for current viewport
-    const neededTileIds = new Set<string>();
-    for (let tileY = startTileY; tileY <= endTileY; tileY++) {
-      for (let tileX = startTileX; tileX <= endTileX; tileX++) {
-        const x = tileX * tileSize * scaleFactor;
-        const y = tileY * tileSize * scaleFactor;
+      // Scale bounds to the resolution level
+      const levelBounds = {
+        left: Math.floor(bounds.left / scaleFactor),
+        top: Math.floor(bounds.top / scaleFactor),
+        right: Math.ceil(bounds.right / scaleFactor),
+        bottom: Math.ceil(bounds.bottom / scaleFactor)
+      };
 
-        // Don't create tiles outside image bounds
-        if (x >= this.image.width || y >= this.image.height) {
-          continue;
+      const tileSize = this.image.tileSize;
+      const startTileX = Math.floor(levelBounds.left / tileSize);
+      const startTileY = Math.floor(levelBounds.top / tileSize);
+      const endTileX = Math.floor(levelBounds.right / tileSize);
+      const endTileY = Math.floor(levelBounds.bottom / tileSize);
+
+      // Build list of tile IDs we need for current viewport
+      neededTileIds = new Set<string>();
+      for (let tileY = startTileY; tileY <= endTileY; tileY++) {
+        for (let tileX = startTileX; tileX <= endTileX; tileX++) {
+          const x = tileX * tileSize * scaleFactor;
+          const y = tileY * tileSize * scaleFactor;
+
+          // Don't create tiles outside image bounds
+          if (x >= this.image.width || y >= this.image.height) {
+            continue;
+          }
+
+          const tileId = `${zoomLevel}-${tileX}-${tileY}`;
+          neededTileIds.add(tileId);
         }
-
-        const tileId = `${zoomLevel}-${tileX}-${tileY}`;
-        neededTileIds.add(tileId);
       }
+
+      // Cache the results for next frame
+      this.cachedNeededTileIds = neededTileIds;
+      this.updateViewportCache(viewport);
+    } else {
+      // Viewport hasn't changed - reuse cached tile IDs (avoids expensive calculations)
+      neededTileIds = this.cachedNeededTileIds;
     }
 
     // Get only loaded tiles from cache (no network requests)

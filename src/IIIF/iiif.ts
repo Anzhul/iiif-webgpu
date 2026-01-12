@@ -16,6 +16,7 @@ export class IIIFViewer {
     tiles: Map<string, TileManager>;
     viewport: Viewport;
     camera: Camera;
+    viewportController: ViewportController;
     renderer?: WebGPURenderer;
     toolbar?: ToolBar;
     annotationManager?: AnnotationManager;
@@ -33,14 +34,14 @@ export class IIIFViewer {
         this.tiles = new Map();
         this.viewport = new Viewport(container.clientWidth, container.clientHeight);
         this.toolbar = new ToolBar(container, options.toolbar);
-        this.camera = new Camera(this.viewport, this.tiles);
+        this.camera = new Camera(this.viewport, this.images, this.tiles);
         this.gsap = options.gsap || undefined;
 
         this.annotationManager = new AnnotationManager();
         this.eventListeners = [];
 
-        // Initialize viewport controller
-        this.viewportController = new ViewportController(this.viewport, this.images, this.tiles);
+        // Initialize viewport controller with camera for unified zoom/pan
+        this.viewportController = new ViewportController(this.viewport, this.images, this.tiles, this.camera);
 
         // Cache the container's bounding rect
         this.cachedContainerRect = container.getBoundingClientRect();
@@ -147,17 +148,54 @@ export class IIIFViewer {
 
 
     private updateAnimations() {
-        this.viewportController.updateAnimations();
+        // Only update ViewportController animations if Camera is not animating
+        // This prevents conflicts between programmatic camera animations and interactive viewport animations
+        if (!this.camera.isAnimating()) {
+            this.viewportController.updateAnimations();
+        }
     }
 
-    zoom(newScale: number, imageX: number, imageY: number, id: string) {
-        //this.viewportController.zoom(newScale, imageX, imageY, id);
-        console.log(`zooming!`);
+    /**
+     * Zoom to a specific scale value
+     * @param targetScale - The target scale to zoom to (same as ViewportController)
+     * @param imageId - ID of the image
+     * @param duration - Animation duration in milliseconds
+     */
+    zoom(targetScale: number, imageId: string, duration = 500) {
+        this.camera.zoom(targetScale, imageId, duration);
     }
 
-    pan(deltaX: number, deltaY: number, imageId: string) {
-        //this.viewportController.pan(deltaX, deltaY, imageId);
-        console.log(`panning!`);
+    /**
+     * Zoom by a factor
+     * @param factor - Zoom factor (>1 = zoom in, <1 = zoom out)
+     * @param imageId - ID of the image
+     * @param duration - Animation duration in milliseconds
+     */
+    zoomByFactor(factor: number, imageId: string, duration = 500) {
+        this.camera.zoomByFactor(factor, imageId, duration);
+    }
+
+    /**
+     * Pan by delta amounts in image pixel coordinates
+     * @param deltaX - X delta in image pixels
+     * @param deltaY - Y delta in image pixels
+     * @param imageId - ID of the image
+     * @param duration - Animation duration in milliseconds
+     */
+    pan(deltaX: number, deltaY: number, imageId: string, duration = 500) {
+        this.camera.pan(deltaX, deltaY, imageId, duration);
+    }
+
+    /**
+     * Navigate to a specific position in the image
+     * @param imageX - X coordinate in image pixel space
+     * @param imageY - Y coordinate in image pixel space
+     * @param imageZ - Camera Z distance from image plane
+     * @param imageId - ID of the image
+     * @param duration - Animation duration in milliseconds
+     */
+    to(imageX: number, imageY: number, imageZ: number, imageId: string, duration = 500) {
+        this.camera.to(imageX, imageY, imageZ, imageId, duration);
     }
     
     listen(...ids: string[]) {
@@ -237,7 +275,7 @@ export class IIIFViewer {
 
     render(imageId?: string) {
         // Update animations first (this modifies viewport state)
-        //this.updateAnimations();
+        this.updateAnimations();
 
         // Check renderer availability synchronously
         if (!this.renderer) {
