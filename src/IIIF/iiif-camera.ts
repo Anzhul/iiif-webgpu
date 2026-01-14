@@ -25,7 +25,7 @@ interface CameraAnimation {
     onComplete?: () => void;
 }
 
-interface PanState {
+interface InteractiveState {
     isDragging: boolean;
     // Anchor point approach: track which image point should stay under cursor
     anchorImageX?: number;  // The image point (in image pixels) we're anchored to
@@ -34,6 +34,9 @@ interface PanState {
     targetCanvasY: number;
     currentCanvasX: number; // Smoothly interpolated position
     currentCanvasY: number;
+    // Zoom state with trailing
+    targetCameraZ: number;  // Target camera Z position
+    currentCameraZ: number; // Smoothly interpolated Z position
     imageId?: string;
 }
 
@@ -43,18 +46,20 @@ export class Camera {
     images: Map<string, IIIFImage>;
     private currentAnimation?: CameraAnimation;
     private animationFrameId?: number;
-    private panState: PanState = {
+    private interactiveState: InteractiveState = {
         isDragging: false,
         targetCanvasX: 0,
         targetCanvasY: 0,
         currentCanvasX: 0,
-        currentCanvasY: 0
+        currentCanvasY: 0,
+        targetCameraZ: 0,
+        currentCameraZ: 0
     };
     private lastTileRequestTime: number = 0;
     private readonly TILE_REQUEST_THROTTLE = 100; // Request tiles max once per 100ms
     private lastZoomTime: number = 0;
     private readonly ZOOM_THROTTLE = 80; // Minimum ms between zoom events
-    private readonly PAN_TRAILING_FACTOR = 0.15; // Lower = more trailing/lag (0.1-0.3 recommended)
+    private readonly PAN_TRAILING_FACTOR = 0.1; // Lower = more trailing/lag (0.1-0.3 recommended)
 
     constructor(viewport: Viewport, images: Map<string, IIIFImage>, tiles: Map<string, TileManager>) {
         this.viewport = viewport;
@@ -388,51 +393,68 @@ export class Camera {
     }
 
     /**
-     * Update interactive pan animations (trailing effect)
+     * Update interactive animations (trailing effect for both pan and zoom)
      * Should be called every frame when Camera is not running programmatic animations
      * Returns true if tiles need to be updated
      */
-    updateInteractivePanAnimation(): { needsUpdate: boolean; imageId?: string } {
+    updateInteractiveAnimation(): { needsUpdate: boolean; imageId?: string } {
         const now = performance.now();
         let needsTileUpdate = false;
         let imageId: string | undefined;
 
-        // Handle interactive pan with trailing effect
-        if (this.panState.isDragging ||
-            Math.abs(this.panState.targetCanvasX - this.panState.currentCanvasX) > 0.5 ||
-            Math.abs(this.panState.targetCanvasY - this.panState.currentCanvasY) > 0.5) {
+        // Check if there's any active pan animation
+        const hasPanAnimation = this.interactiveState.isDragging ||
+            Math.abs(this.interactiveState.targetCanvasX - this.interactiveState.currentCanvasX) > 0.5 ||
+            Math.abs(this.interactiveState.targetCanvasY - this.interactiveState.currentCanvasY) > 0.5;
 
-            // Smoothly interpolate current canvas position towards target
-            this.panState.currentCanvasX += (this.panState.targetCanvasX - this.panState.currentCanvasX) * this.PAN_TRAILING_FACTOR;
-            this.panState.currentCanvasY += (this.panState.targetCanvasY - this.panState.currentCanvasY) * this.PAN_TRAILING_FACTOR;
+        // Check if there's any active zoom animation
+        const hasZoomAnimation = Math.abs(this.interactiveState.targetCameraZ - this.interactiveState.currentCameraZ) > 0.01;
 
-            // Update viewport using matrix-based transformation
-            if (this.panState.anchorImageX !== undefined &&
-                this.panState.anchorImageY !== undefined &&
-                this.panState.imageId) {
+        // Handle interactive animations with trailing effect
+        if (hasPanAnimation || hasZoomAnimation) {
 
-                const image = this.images.get(this.panState.imageId);
+            // Smoothly interpolate current canvas position towards target (pan)
+            if (hasPanAnimation) {
+                this.interactiveState.currentCanvasX += (this.interactiveState.targetCanvasX - this.interactiveState.currentCanvasX) * this.PAN_TRAILING_FACTOR;
+                this.interactiveState.currentCanvasY += (this.interactiveState.targetCanvasY - this.interactiveState.currentCanvasY) * this.PAN_TRAILING_FACTOR;
+            }
+
+            // Smoothly interpolate current camera Z towards target (zoom)
+            if (hasZoomAnimation) {
+                this.interactiveState.currentCameraZ += (this.interactiveState.targetCameraZ - this.interactiveState.currentCameraZ) * this.PAN_TRAILING_FACTOR;
+
+                // Update viewport camera Z
+                this.viewport.cameraZ = this.interactiveState.currentCameraZ;
+                this.viewport.updateScale();
+
+                needsTileUpdate = true;
+                imageId = this.interactiveState.imageId;
+            }
+
+            // Update viewport using anchor point transformation (applies to both pan and zoom)
+            // The anchor point keeps a specific image coordinate fixed at a canvas position
+            if (this.interactiveState.anchorImageX !== undefined &&
+                this.interactiveState.anchorImageY !== undefined &&
+                this.interactiveState.imageId) {
+
+                const image = this.images.get(this.interactiveState.imageId);
                 if (image) {
                     // Set viewport center so that anchorImagePoint appears at currentCanvasPoint
-                    let panTrailingDeltaX = this.panState.targetCanvasX - this.panState.currentCanvasX;
-                    let panTrailingDeltaY = this.panState.targetCanvasY - this.panState.currentCanvasY;
-                    if (panTrailingDeltaX < 0.5 && panTrailingDeltaX > -0.5) { panTrailingDeltaX = 0; }
-                    if (panTrailingDeltaY < 0.5 && panTrailingDeltaY > -0.5) { panTrailingDeltaY = 0; }
-
+                    // This works for both pan (moving the anchor point) and zoom (keeping anchor fixed)
                     this.viewport.setCenterFromImagePoint(
-                        this.panState.anchorImageX,
-                        this.panState.anchorImageY,
-                        this.panState.currentCanvasX,
-                        this.panState.currentCanvasY,
+                        this.interactiveState.anchorImageX,
+                        this.interactiveState.anchorImageY,
+                        this.interactiveState.currentCanvasX,
+                        this.interactiveState.currentCanvasY,
                         image
                     );
 
                     needsTileUpdate = true;
-                    imageId = this.panState.imageId;
+                    imageId = this.interactiveState.imageId;
                 }
             }
 
-            // Request tiles with throttling for pan updates
+            // Request tiles with throttling for updates
             if (needsTileUpdate && imageId) {
                 const timeSinceLastRequest = now - this.lastTileRequestTime;
                 if (timeSinceLastRequest > this.TILE_REQUEST_THROTTLE) {
@@ -455,44 +477,48 @@ export class Camera {
         const image = this.images.get(imageId);
         if (!image) return;
 
-        this.panState.isDragging = true;
-        this.panState.imageId = imageId;
+        this.interactiveState.isDragging = true;
+        this.interactiveState.imageId = imageId;
 
         // Convert to image coordinates to establish anchor point
         const imagePoint = this.viewport.canvasToImagePoint(canvasX, canvasY, image);
-        this.panState.anchorImageX = imagePoint.x;
-        this.panState.anchorImageY = imagePoint.y;
+        this.interactiveState.anchorImageX = imagePoint.x;
+        this.interactiveState.anchorImageY = imagePoint.y;
 
         // Initialize both target and current to the starting position
-        this.panState.targetCanvasX = canvasX;
-        this.panState.targetCanvasY = canvasY;
-        this.panState.currentCanvasX = canvasX;
-        this.panState.currentCanvasY = canvasY;
+        this.interactiveState.targetCanvasX = canvasX;
+        this.interactiveState.targetCanvasY = canvasY;
+        this.interactiveState.currentCanvasX = canvasX;
+        this.interactiveState.currentCanvasY = canvasY;
+
+        // Initialize zoom state to current viewport state
+        this.interactiveState.targetCameraZ = this.viewport.cameraZ;
+        this.interactiveState.currentCameraZ = this.viewport.cameraZ;
     }
 
     /**
      * Update pan target position (mouse move during drag)
      */
     updateInteractivePan(canvasX: number, canvasY: number) {
-        if (!this.panState.isDragging) return;
+        if (!this.interactiveState.isDragging) return;
 
         // Update target canvas position
-        this.panState.targetCanvasX = canvasX;
-        this.panState.targetCanvasY = canvasY;
+        this.interactiveState.targetCanvasX = canvasX;
+        this.interactiveState.targetCanvasY = canvasY;
     }
 
     /**
      * End interactive pan (mouse up)
      */
     endInteractivePan() {
-        this.panState.isDragging = false;
+        this.interactiveState.isDragging = false;
 
         // Let the animation continue to catch up to target position
         // The updateInteractivePan loop will stop automatically when caught up
 
         // Request tiles for final position
-        if (this.panState.imageId) {
-            const tiles = this.tiles.get(this.panState.imageId);
+        if (this.interactiveState.imageId) {
+            const tiles = this.tiles.get(this.interactiveState.imageId);
             if (tiles) {
                 tiles.requestTilesForViewport(this.viewport);
             }
@@ -500,11 +526,11 @@ export class Camera {
     }
 
     /**
-     * Handle wheel event for zooming
+     * Handle wheel event for zooming with trailing effect
      */
     handleWheel(event: WheelEvent, canvasX: number, canvasY: number, imageIds: string[]) {
         // alt or shift key pressed
-        if (event.altKey || event.shiftKey) {
+        //if (event.altKey || event.shiftKey) {
             event.preventDefault();
 
             // Throttle zoom events for smoother experience
@@ -514,34 +540,85 @@ export class Camera {
             }
             this.lastZoomTime = now;
 
-            // Use smaller zoom factor for smoother incremental zooming
-            const zoomFactor = 1.35;
+            // Zoom factor for each scroll increment
+            const zoomFactor = 1.3; // Higher factor for more dramatic zoom per scroll
             const newScale = event.deltaY < 0 ? this.viewport.scale * zoomFactor : this.viewport.scale / zoomFactor;
 
-            // Calculate adaptive duration based on zoom distance
-            const zoomRatio = Math.abs(Math.log(newScale / this.viewport.scale));
-            const baseDuration = 700;
-            const maxDuration = 1000;
-            const duration = Math.min(baseDuration + (zoomRatio * 300), maxDuration);
+            // Clamp to valid scale range
+            const clampedScale = Math.max(
+                this.viewport.minScale,
+                Math.min(this.viewport.maxScale, newScale)
+            );
 
-            imageIds.forEach(id => this.zoom(newScale, id, duration, undefined, canvasX, canvasY));
-        }
+            // Convert scale to camera Z
+            const fovRadians = (this.viewport.fov * Math.PI) / 180;
+            const targetCameraZ = (this.viewport.containerHeight / clampedScale) / (2 * Math.tan(fovRadians / 2));
+
+            // Clamp to valid Z range
+            const clampedCameraZ = Math.max(
+                this.viewport.minZ,
+                Math.min(this.viewport.maxZ, targetCameraZ)
+            );
+
+            // Update target zoom for trailing animation
+            this.interactiveState.targetCameraZ = clampedCameraZ;
+
+            // Check if this is the first interactive action
+            const isFirstInteraction = this.interactiveState.anchorImageX === undefined;
+
+            // On first interaction, initialize current Z to viewport Z to prevent jump
+            if (isFirstInteraction) {
+                this.interactiveState.currentCameraZ = this.viewport.cameraZ;
+            }
+
+            // Initialize imageId if not already set
+            if (!this.interactiveState.imageId && imageIds.length > 0) {
+                this.interactiveState.imageId = imageIds[0];
+            }
+
+            // Always update anchor point to current cursor position for zoom-to-cursor behavior
+            if (this.interactiveState.imageId && imageIds.length > 0) {
+                const image = this.images.get(imageIds[0]);
+                if (image) {
+                    // Get the image point under the current cursor position
+                    const imagePoint = this.viewport.canvasToImagePoint(canvasX, canvasY, image);
+
+                    // Update anchor to keep this image point under the cursor as we zoom
+                    this.interactiveState.anchorImageX = imagePoint.x;
+                    this.interactiveState.anchorImageY = imagePoint.y;
+                    this.interactiveState.targetCanvasX = canvasX;
+                    this.interactiveState.targetCanvasY = canvasY;
+
+                    // On first interaction or when not dragging, snap current position to avoid jump
+                    if (isFirstInteraction || !this.interactiveState.isDragging) {
+                        this.interactiveState.currentCanvasX = canvasX;
+                        this.interactiveState.currentCanvasY = canvasY;
+                    }
+                }
+            }
+
+            // Keep current Z in sync when not actively zooming
+            if (!this.interactiveState.isDragging && Math.abs(this.interactiveState.currentCameraZ - this.viewport.cameraZ) < 0.01) {
+                this.interactiveState.currentCameraZ = this.viewport.cameraZ;
+            }
+        //}
     }
 
     /**
-     * Check if interactive pan or programmatic animations are active
+     * Check if interactive or programmatic animations are active
      */
     hasActiveAnimations(): boolean {
         return this.isAnimating() ||
-               this.panState.isDragging ||
-               Math.abs(this.panState.targetCanvasX - this.panState.currentCanvasX) > 0.5 ||
-               Math.abs(this.panState.targetCanvasY - this.panState.currentCanvasY) > 0.5;
+               this.interactiveState.isDragging ||
+               Math.abs(this.interactiveState.targetCanvasX - this.interactiveState.currentCanvasX) > 0.5 ||
+               Math.abs(this.interactiveState.targetCanvasY - this.interactiveState.currentCanvasY) > 0.5 ||
+               Math.abs(this.interactiveState.targetCameraZ - this.interactiveState.currentCameraZ) > 0.01;
     }
 
     /**
-     * Get the current pan state (for debugging or external use)
+     * Get the current interactive state (for debugging or external use)
      */
-    getPanState(): Readonly<PanState> {
-        return this.panState;
+    getInteractiveState(): Readonly<InteractiveState> {
+        return this.interactiveState;
     }
 }

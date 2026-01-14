@@ -143,10 +143,10 @@ export class IIIFViewer {
 
 
     private updateAnimations() {
-        // Only update interactive pan animations if Camera is not running programmatic animations
-        // This prevents conflicts between programmatic camera animations and interactive pan
+        // Only update interactive animations if Camera is not running programmatic animations
+        // This prevents conflicts between programmatic camera animations and interactive movements
         if (!this.camera.isAnimating()) {
-            this.camera.updateInteractivePanAnimation();
+            this.camera.updateInteractiveAnimation();
         }
     }
 
