@@ -25,6 +25,7 @@ export class IIIFImage {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
             this.manifest = await response.json();
+            return this.manifest;
         } catch (error) {
             console.error('Error fetching manifest:', error);
             throw error;
