@@ -28,6 +28,10 @@ export class TileManager {
         containerHeight: number;
     } | null = null;
 
+    // Cache for z-sorted tiles to avoid redundant sorting every frame
+    private cachedSortedTiles: any[] | null = null;
+    private cachedTileSetHash: string | null = null;
+
   constructor(id: string, iiifImage: IIIFImage, maxCacheSize: number = 500, renderer?: WebGPURenderer, distanceDetail: number = 0.35) {
     this.id = id;
     this.image = iiifImage;
@@ -41,7 +45,9 @@ export class TileManager {
 
   // Determine optimal zoom level for current scale
   getOptimalZoomLevel(scale: number) {
-    const imageScale = this.distanceDetail / scale;
+    // Round scale to 3 decimal places (0.001 precision) to reduce cache invalidations
+    const roundedScale = Math.round(scale * 1000) / 1000;
+    const imageScale = this.distanceDetail / roundedScale;
     let bestLevel = this.image.maxZoomLevel;
 
     for (let i = 0; i < this.image.scaleFactors.length; i++) {
@@ -51,7 +57,8 @@ export class TileManager {
       }
     }
 
-    return Math.max(0, Math.min(bestLevel, this.image.maxZoomLevel));
+    const finalLevel = Math.max(0, Math.min(bestLevel, this.image.maxZoomLevel));
+    return finalLevel;
   }
 
   /**
@@ -95,6 +102,51 @@ export class TileManager {
    */
   private invalidateTileCache(): void {
     this.cachedNeededTileIds = null;
+    // Also invalidate sort cache since tile set may have changed
+    this.cachedSortedTiles = null;
+    this.cachedTileSetHash = null;
+  }
+
+  /**
+   * Shared method to calculate tile boundaries for a given viewport
+   * Returns tile coordinate ranges and related metadata
+   * @param viewport - The viewport to calculate boundaries for
+   * @param includeMargin - Whether to include margin for preloading (default: false)
+   */
+  private calculateTileBoundaries(viewport: any, includeMargin: boolean = false) {
+    const zoomLevel = this.getOptimalZoomLevel(viewport.scale);
+    const scaleFactor = this.image.scaleFactors[zoomLevel];
+    const bounds = viewport.getImageBounds(this.image);
+    const tileSize = this.image.tileSize;
+
+    // Add margin if requested (for preloading adjacent tiles)
+    const margin = includeMargin ? tileSize * scaleFactor : 0;
+
+    // Scale bounds to the resolution level with optional margin
+    const levelBounds = {
+      left: Math.floor((bounds.left - margin) / scaleFactor),
+      top: Math.floor((bounds.top - margin) / scaleFactor),
+      right: Math.ceil((bounds.right + margin) / scaleFactor),
+      bottom: Math.ceil((bounds.bottom + margin) / scaleFactor)
+    };
+
+    const startTileX = Math.floor(levelBounds.left / tileSize);
+    const startTileY = Math.floor(levelBounds.top / tileSize);
+    const endTileX = Math.floor(levelBounds.right / tileSize);
+    const endTileY = Math.floor(levelBounds.bottom / tileSize);
+
+    return {
+      zoomLevel,
+      scaleFactor,
+      tileSize,
+      startTileX,
+      startTileY,
+      endTileX,
+      endTileY,
+      // Calculate viewport center in tile coordinates for distance calculations
+      centerTileX: (viewport.centerX * this.image.width) / (tileSize * scaleFactor),
+      centerTileY: (viewport.centerY * this.image.height) / (tileSize * scaleFactor)
+    };
   }
 
 
@@ -123,7 +175,7 @@ export class TileManager {
         id: tileId,
         x: x,
         y: y,
-        z: 0,  // Tiles are on the image plane at Z=0
+        z: zoomLevel,  // Higher zoom levels (more detail) render closer
         width: Math.min(tileSize * scaleFactor, this.image.width - x),
         height: Math.min(tileSize * scaleFactor, this.image.height - y),
         tileX: tileX,
@@ -143,7 +195,7 @@ export class TileManager {
       url: url,
       x: x,
       y: y,
-      z: 0,  // Tiles are on the image plane at Z=0
+      z: zoomLevel,  // Higher zoom levels (more detail) render closer
       width: width,
       height: height,
       tileX: tileX,
@@ -153,7 +205,7 @@ export class TileManager {
     };
   }
 
-  // Load tiles in parallel batches
+  // Load tiles in parallel batches with priority ordering
   loadTilesBatch(tiles: any[]) {
     const tilesToLoad = tiles.filter(tile =>
       !this.tileCache.has(tile.id) && !this.loadingTiles.has(tile.id)
@@ -161,7 +213,15 @@ export class TileManager {
 
     if (tilesToLoad.length === 0) return;
 
-    // Load tiles in parallel
+    // Sort tiles by priority (closest to viewport center first)
+    // Tiles with lower priority values are closer to the center
+    tilesToLoad.sort((a, b) => {
+      const aPriority = a.priority !== undefined ? a.priority : Infinity;
+      const bPriority = b.priority !== undefined ? b.priority : Infinity;
+      return aPriority - bPriority;
+    });
+
+    // Load tiles in priority order (still parallel, but browser may prioritize earlier requests)
     Promise.allSettled(tilesToLoad.map(tile => this.loadTile(tile)));
   }
 
@@ -228,40 +288,37 @@ export class TileManager {
   // Request tiles for viewport (triggers loading but doesn't wait)
   // This should be called when viewport changes (pan/zoom)
   requestTilesForViewport(viewport: any) {
-    const zoomLevel = this.getOptimalZoomLevel(viewport.scale);
-    const scaleFactor = this.image.scaleFactors[zoomLevel];
-    const bounds = viewport.getImageBounds(this.image);
+    // Skip if viewport hasn't changed significantly
+    if (!this.hasViewportChanged(viewport)) {
+      return;
+    }
 
-    // Add a small margin to prevent edge clipping (1 extra tile on each side)
-    const tileSize = this.image.tileSize;
-    const margin = tileSize * scaleFactor;
-
-    // Scale bounds to the resolution level with margin
-    const levelBounds = {
-      left: Math.floor((bounds.left - margin) / scaleFactor),
-      top: Math.floor((bounds.top - margin) / scaleFactor),
-      right: Math.ceil((bounds.right + margin) / scaleFactor),
-      bottom: Math.ceil((bounds.bottom + margin) / scaleFactor)
-    };
+    // Use shared calculation with margin for preloading
+    const tileBounds = this.calculateTileBoundaries(viewport, true);
+    const { zoomLevel, scaleFactor, startTileX, startTileY, endTileX, endTileY, centerTileX, centerTileY } = tileBounds;
 
     const tiles = [];
-
-    const startTileX = Math.floor(levelBounds.left / tileSize);
-    const startTileY = Math.floor(levelBounds.top / tileSize);
-    const endTileX = Math.floor(levelBounds.right / tileSize);
-    const endTileY = Math.floor(levelBounds.bottom / tileSize);
 
     for (let tileY = startTileY; tileY <= endTileY; tileY++) {
       for (let tileX = startTileX; tileX <= endTileX; tileX++) {
         const tile = this.createTile(tileX, tileY, zoomLevel, scaleFactor);
-        if (tile) tiles.push(tile);
+        if (tile) {
+          // Calculate distance from viewport center for priority sorting
+          const distX = tileX - centerTileX;
+          const distY = tileY - centerTileY;
+          tile.priority = Math.sqrt(distX * distX + distY * distY);
+          tiles.push(tile);
+        }
       }
     }
+
+    // Update viewport cache for next change detection
+    this.updateViewportCache(viewport);
 
     // Invalidate the render cache since viewport changed
     this.invalidateTileCache();
 
-    // Load all tiles in parallel (non-blocking)
+    // Load tiles with priority-based ordering (non-blocking)
     this.loadTilesBatch(tiles);
   }
 
@@ -274,24 +331,9 @@ export class TileManager {
     let neededTileIds: Set<string>;
 
     if (viewportChanged || !this.cachedNeededTileIds) {
-      // Viewport changed or no cache - recalculate tile boundaries
-      const zoomLevel = this.getOptimalZoomLevel(viewport.scale);
-      const scaleFactor = this.image.scaleFactors[zoomLevel];
-      const bounds = viewport.getImageBounds(this.image);
-
-      // Scale bounds to the resolution level
-      const levelBounds = {
-        left: Math.floor(bounds.left / scaleFactor),
-        top: Math.floor(bounds.top / scaleFactor),
-        right: Math.ceil(bounds.right / scaleFactor),
-        bottom: Math.ceil(bounds.bottom / scaleFactor)
-      };
-
-      const tileSize = this.image.tileSize;
-      const startTileX = Math.floor(levelBounds.left / tileSize);
-      const startTileY = Math.floor(levelBounds.top / tileSize);
-      const endTileX = Math.floor(levelBounds.right / tileSize);
-      const endTileY = Math.floor(levelBounds.bottom / tileSize);
+      // Viewport changed or no cache - recalculate tile boundaries (no margin for rendering)
+      const tileBounds = this.calculateTileBoundaries(viewport, false);
+      const { zoomLevel, scaleFactor, tileSize, startTileX, startTileY, endTileX, endTileY } = tileBounds;
 
       // Build list of tile IDs we need for current viewport
       neededTileIds = new Set<string>();
@@ -327,10 +369,41 @@ export class TileManager {
       }
     }
 
-    // If we got all tiles, update cache and return
+    // Generate a hash of the tile set to detect if tiles have changed
+    // Use Set size + first/last IDs as a fast approximation instead of expensive sort+join
+    // This is much faster and sufficient for detecting tile set changes
+    let tileSetHash = `${neededTileIds.size}`;
+    if (neededTileIds.size > 0) {
+      // Add a few sample IDs for better uniqueness (first and last when sorted)
+      const idsArray = Array.from(neededTileIds);
+      tileSetHash += `_${idsArray[0]}_${idsArray[idsArray.length - 1]}`;
+    }
+
+    // Check if we can use cached sorted tiles (same tile set as last frame)
+    if (this.cachedTileSetHash === tileSetHash && this.cachedSortedTiles) {
+      // Filter cached sorted tiles to only include currently loaded ones
+      const stillValid = this.cachedSortedTiles.filter(tile =>
+        neededTileIds.has(tile.id) && this.tileCache.has(tile.id)
+      );
+
+      // If all needed tiles are present in cache, return cached sorted result
+      if (stillValid.length === neededTileIds.size) {
+        return stillValid;
+      }
+    }
+
+    // If we got all tiles, sort and cache the result
     if (loadedTiles.length === neededTileIds.size) {
-      this.lastRenderedTiles = loadedTiles;
-      return loadedTiles;
+      // CRITICAL: Always sort by z-depth for consistent render order
+      // Sort back to front: lower z (farther) renders first, higher z (closer) renders last
+      const sortedTiles = loadedTiles.sort((a, b) => a.z - b.z);
+
+      // Cache the sorted result
+      this.cachedSortedTiles = sortedTiles;
+      this.cachedTileSetHash = tileSetHash;
+      this.lastRenderedTiles = sortedTiles;
+
+      return sortedTiles;
     }
 
     // Some tiles are missing - use previous tiles as fallback
@@ -345,11 +418,22 @@ export class TileManager {
         }
       }
 
-      return Array.from(tileMap.values());
+      // CRITICAL: Always sort by z-depth for consistent render order
+      // Sort back to front: lower z (farther) renders first, higher z (closer) renders last
+      const sortedTiles = Array.from(tileMap.values()).sort((a, b) => a.z - b.z);
+
+      // Don't cache this result as it's a fallback mix
+      return sortedTiles;
     }
 
-    // No previous tiles available, just return what we have
-    return loadedTiles;
+    // No previous tiles available, sort what we have
+    const sortedTiles = loadedTiles.sort((a, b) => a.z - b.z);
+
+    // Cache the sorted result
+    this.cachedSortedTiles = sortedTiles;
+    this.cachedTileSetHash = tileSetHash;
+
+    return sortedTiles;
   }
 
   // Set renderer reference (useful if renderer is created after TileManager)
@@ -375,7 +459,7 @@ export class TileManager {
         image: loadedBitmap,
         x: 0,
         y: 0,
-        z: -1,  // Just behind the image plane so tiles at z=0 render on top
+        z: -1,  // Render behind all tiles
         width: this.image.width,
         height: this.image.height,
         url: thumbnailUrl

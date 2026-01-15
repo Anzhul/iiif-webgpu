@@ -216,16 +216,21 @@ export class IIIFViewer {
                 this.camera.updateInteractivePan(newCanvasX, newCanvasY);
             };
 
-            const onMouseUp = () => {
+            const cleanup = () => {
                 // End pan via camera
                 this.camera.endInteractivePan();
 
-                this.container.removeEventListener('mousemove', onMouseMove);
-                this.container.removeEventListener('mouseup', onMouseUp);
+                // Remove all drag-related listeners
+                document.removeEventListener('mousemove', onMouseMove);
+                document.removeEventListener('mouseup', cleanup);
+                document.removeEventListener('mouseleave', cleanup);
             };
 
-            this.container.addEventListener('mousemove', onMouseMove);
-            this.container.addEventListener('mouseup', onMouseUp);
+            // Listen on document to catch mouse events outside the container
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', cleanup);
+            // Also listen for mouse leaving the page entirely
+            document.addEventListener('mouseleave', cleanup);
         };
 
         const wheelHandler = (event: WheelEvent) => {
@@ -284,7 +289,7 @@ export class IIIFViewer {
         // Get loaded tiles for rendering
         const tiles = tileManager.getLoadedTilesForRender(this.viewport);
 
-        // Get thumbnail for background layer
+        // Get thumbnail for background rendering
         const thumbnail = tileManager.getThumbnail();
 
         // Render with WebGPU

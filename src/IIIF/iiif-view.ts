@@ -27,6 +27,10 @@ export class Viewport {
   minScale: number; // Minimum scale (maximum zoom out) derived from maxZ
   maxScale: number; // Maximum scale (maximum zoom in) derived from minZ
 
+  // Cached FOV trigonometric values to avoid repeated calculations
+  private fovRadians: number;
+  private tanHalfFov: number;
+
   // Cache for getImageBounds to avoid redundant calculations
   private boundsCache: Map<string, {
     bounds: { left: number; top: number; right: number; bottom: number; width: number; height: number };
@@ -53,20 +57,33 @@ export class Viewport {
     this.near = 0.1; // Near clipping plane
     this.far = 10000; // Far clipping plane
 
+    // Initialize cached FOV trigonometric values
+    this.fovRadians = (this.fov * Math.PI) / 180;
+    this.tanHalfFov = Math.tan(this.fovRadians / 2);
+
     // Initialize scale properties
     this.scale = this.calculateScale();
 
     // Initialize scale limits (will be properly calculated in updateScaleLimits)
-    const fovRadians = (this.fov * Math.PI) / 180;
-    const visibleHeightAtMaxZ = 2 * this.maxZ * Math.tan(fovRadians / 2);
+    const visibleHeightAtMaxZ = 2 * this.maxZ * this.tanHalfFov;
     this.minScale = this.containerHeight / visibleHeightAtMaxZ;
-    const visibleHeightAtMinZ = 2 * this.minZ * Math.tan(fovRadians / 2);
+    const visibleHeightAtMinZ = 2 * this.minZ * this.tanHalfFov;
     this.maxScale = this.containerHeight / visibleHeightAtMinZ;
   }
 
+  /**
+   * Update cached FOV trigonometric constants
+   * Call this whenever FOV changes dynamically
+   * @internal Reserved for future use when FOV becomes mutable
+   */
+  // @ts-ignore - Reserved for future use when FOV becomes mutable
+  private updateFovConstants(): void {
+    this.fovRadians = (this.fov * Math.PI) / 180;
+    this.tanHalfFov = Math.tan(this.fovRadians / 2);
+  }
+
   private calculateScale(): number {
-    const fovRadians = (this.fov * Math.PI) / 180;
-    const visibleHeight = 2 * this.cameraZ * Math.tan(fovRadians / 2);
+    const visibleHeight = 2 * this.cameraZ * this.tanHalfFov;
     return this.containerHeight / visibleHeight;
   }
 
@@ -85,19 +102,31 @@ export class Viewport {
 
   private updateScaleLimits(): void {
     // Calculate scale limits based on Z limits
-    const fovRadians = (this.fov * Math.PI) / 180;
-
     // When camera is at maxZ (far away), scale is at minimum (zoomed out)
-    const visibleHeightAtMaxZ = 2 * this.maxZ * Math.tan(fovRadians / 2);
+    const visibleHeightAtMaxZ = 2 * this.maxZ * this.tanHalfFov;
     this.minScale = this.containerHeight / visibleHeightAtMaxZ;
 
     // When camera is at minZ (close), scale is at maximum (zoomed in)
-    const visibleHeightAtMinZ = 2 * this.minZ * Math.tan(fovRadians / 2);
+    const visibleHeightAtMinZ = 2 * this.minZ * this.tanHalfFov;
     this.maxScale = this.containerHeight / visibleHeightAtMinZ;
   }
 
   getScale(): number {
     return this.scale;
+  }
+
+  /**
+   * Get cached FOV in radians
+   */
+  getFovRadians(): number {
+    return this.fovRadians;
+  }
+
+  /**
+   * Get cached tan(fov/2) value
+   */
+  getTanHalfFov(): number {
+    return this.tanHalfFov;
   }
     
 
@@ -105,8 +134,7 @@ export class Viewport {
 
     const targetScale = this.containerWidth / image.width;
 
-    const fovRadians = (this.fov * Math.PI) / 180;
-    this.cameraZ = this.containerHeight / (2 * targetScale * Math.tan(fovRadians / 2));
+    this.cameraZ = this.containerHeight / (2 * targetScale * this.tanHalfFov);
 
     // Set max zoom out to 5x farther, max zoom in to 10x closer
     this.maxZ = this.cameraZ * 5;
@@ -128,8 +156,7 @@ export class Viewport {
     const imageHeight = image.height;
     const targetScale = this.containerHeight / imageHeight;
     // Calculate camera Z for this scale
-    const fovRadians = (this.fov * Math.PI) / 180;
-    this.cameraZ = this.containerHeight / (2 * targetScale * Math.tan(fovRadians / 2));
+    this.cameraZ = this.containerHeight / (2 * targetScale * this.tanHalfFov);
     // Set max zoom out to 5x farther, max zoom in to 10x closer
     this.maxZ = this.cameraZ * 5;
     this.minZ = this.cameraZ * 0.1;
@@ -150,10 +177,13 @@ export class Viewport {
     // Check cache first
     const cached = this.boundsCache.get(image.id);
 
+    // Round scale to 3 decimal places for cache comparison (matching tile manager precision)
+    const roundedScale = Math.round(this.scale * 1000) / 1000;
+
     if (cached &&
         cached.centerX === this.centerX &&
         cached.centerY === this.centerY &&
-        cached.scale === this.scale &&
+        cached.scale === roundedScale &&
         cached.containerWidth === this.containerWidth &&
         cached.containerHeight === this.containerHeight) {
       // Cache hit - return cached bounds without recalculation
@@ -177,16 +207,15 @@ export class Viewport {
       height: scaledHeight
     };
 
-    // Store in cache
+    // Store in cache (using rounded scale for consistency)
     this.boundsCache.set(image.id, {
       bounds,
       centerX: this.centerX,
       centerY: this.centerY,
-      scale: this.scale,
+      scale: roundedScale,
       containerWidth: this.containerWidth,
       containerHeight: this.containerHeight
     });
-
     return bounds;
   }
 

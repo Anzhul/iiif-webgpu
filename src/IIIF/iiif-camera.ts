@@ -56,10 +56,10 @@ export class Camera {
         currentCameraZ: 0
     };
     private lastTileRequestTime: number = 0;
-    private readonly TILE_REQUEST_THROTTLE = 100; // Request tiles max once per 100ms
+    private readonly TILE_REQUEST_THROTTLE = 16; // Request tiles every ~1 frame (60fps = 16.67ms)
     private lastZoomTime: number = 0;
     private readonly ZOOM_THROTTLE = 80; // Minimum ms between zoom events
-    private readonly PAN_TRAILING_FACTOR = 0.1; // Lower = more trailing/lag (0.1-0.3 recommended)
+    private readonly PAN_TRAILING_FACTOR = 0.08; // Lower = more trailing/smoothness (0.05-0.15 recommended)
 
     constructor(viewport: Viewport, images: Map<string, IIIFImage>, tiles: Map<string, TileManager>) {
         this.viewport = viewport;
@@ -192,8 +192,7 @@ export class Camera {
         // scale = containerHeight / visibleHeight
         // visibleHeight = 2 * cameraZ * tan(fov/2)
         // Therefore: cameraZ = (containerHeight / scale) / (2 * tan(fov/2))
-        const fovRadians = (this.viewport.fov * Math.PI) / 180;
-        const targetCameraZ = (this.viewport.containerHeight / targetScale) / (2 * Math.tan(fovRadians / 2));
+        const targetCameraZ = (this.viewport.containerHeight / targetScale) / (2 * this.viewport.getTanHalfFov());
 
         // Clamp to valid Z range
         const clampedCameraZ = Math.max(
@@ -351,8 +350,12 @@ export class Camera {
             }
         }
 
-        // Request tiles for new position
-        this.requestTiles(this.currentAnimation.imageId);
+        // Request tiles for new position (with throttling)
+        const timeSinceLastRequest = now - this.lastTileRequestTime;
+        if (timeSinceLastRequest > this.TILE_REQUEST_THROTTLE) {
+            this.requestTiles(this.currentAnimation.imageId);
+            this.lastTileRequestTime = now;
+        }
 
         // Call update callback if provided
         if (this.currentAnimation.onUpdate) {
@@ -402,25 +405,30 @@ export class Camera {
         let needsTileUpdate = false;
         let imageId: string | undefined;
 
-        // Check if there's any active pan animation
-        const hasPanAnimation = this.interactiveState.isDragging ||
-            Math.abs(this.interactiveState.targetCanvasX - this.interactiveState.currentCanvasX) > 0.5 ||
-            Math.abs(this.interactiveState.targetCanvasY - this.interactiveState.currentCanvasY) > 0.5;
+        // Calculate deltas for both pan and zoom
+        const panDeltaX = this.interactiveState.targetCanvasX - this.interactiveState.currentCanvasX;
+        const panDeltaY = this.interactiveState.targetCanvasY - this.interactiveState.currentCanvasY;
+        const panDistance = Math.sqrt(panDeltaX * panDeltaX + panDeltaY * panDeltaY);
+        const zoomDelta = Math.abs(this.interactiveState.targetCameraZ - this.interactiveState.currentCameraZ);
 
-        // Check if there's any active zoom animation
-        const hasZoomAnimation = Math.abs(this.interactiveState.targetCameraZ - this.interactiveState.currentCameraZ) > 0.01;
+        // Check if there's any active animation
+        // Use very small thresholds to avoid visible snapping - let exponential decay naturally approach zero
+        const hasPanAnimation = this.interactiveState.isDragging || panDistance > 0.05;
+        const hasZoomAnimation = zoomDelta > 0.01;
 
         // Handle interactive animations with trailing effect
         if (hasPanAnimation || hasZoomAnimation) {
 
             // Smoothly interpolate current canvas position towards target (pan)
             if (hasPanAnimation) {
-                this.interactiveState.currentCanvasX += (this.interactiveState.targetCanvasX - this.interactiveState.currentCanvasX) * this.PAN_TRAILING_FACTOR;
-                this.interactiveState.currentCanvasY += (this.interactiveState.targetCanvasY - this.interactiveState.currentCanvasY) * this.PAN_TRAILING_FACTOR;
+                // Pure exponential decay - no snapping, smooth all the way
+                this.interactiveState.currentCanvasX += panDeltaX * this.PAN_TRAILING_FACTOR;
+                this.interactiveState.currentCanvasY += panDeltaY * this.PAN_TRAILING_FACTOR;
             }
 
             // Smoothly interpolate current camera Z towards target (zoom)
             if (hasZoomAnimation) {
+                // Pure exponential decay for zoom too
                 this.interactiveState.currentCameraZ += (this.interactiveState.targetCameraZ - this.interactiveState.currentCameraZ) * this.PAN_TRAILING_FACTOR;
 
                 // Update viewport camera Z
@@ -551,8 +559,7 @@ export class Camera {
             );
 
             // Convert scale to camera Z
-            const fovRadians = (this.viewport.fov * Math.PI) / 180;
-            const targetCameraZ = (this.viewport.containerHeight / clampedScale) / (2 * Math.tan(fovRadians / 2));
+            const targetCameraZ = (this.viewport.containerHeight / clampedScale) / (2 * this.viewport.getTanHalfFov());
 
             // Clamp to valid Z range
             const clampedCameraZ = Math.max(
