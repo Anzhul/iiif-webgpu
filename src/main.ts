@@ -1,6 +1,5 @@
 import './style.scss'
 import { IIIFViewer } from './IIIF/iiif';
-//import { gsap } from 'gsap';
 
 const container = document.getElementById('iiif-container');
 if (container) {

@@ -15,7 +15,6 @@
     "vite": "^7.1.2"
   },
   "dependencies": {
-    "gl-matrix": "^3.4.4",
-    "gsap": "^3.13.0"
+    "gl-matrix": "^3.4.4"
   }
 }

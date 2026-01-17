@@ -32,27 +32,46 @@ export class WebGPURenderer {
     private depthTexture?: GPUTexture;
     private depthFormat: GPUTextureFormat = 'depth24plus';
 
-    // Mipmap generation pipeline
-    private mipmapPipeline?: GPURenderPipeline;
-    private mipmapSampler?: GPUSampler;
-
     // Shared storage buffer for all tile uniforms
     private storageBuffer?: GPUBuffer;
-    private storageBufferSize: number = 160 * 1000; // Support up to 1000 tiles (160 bytes per tile)
+    private storageBufferSize: number = 64 * 1000; // Support up to 1000 tiles (64 bytes per tile)
+
+    // Reusable buffer for uniform data to avoid per-frame allocations
+    private uniformDataBuffer: Float32Array = new Float32Array(new ArrayBuffer(1000 * 16 * 4)); // Pre-allocate for 1000 tiles × 16 floats × 4 bytes
 
     // Texture cache: tileId -> GPUTexture
     private textureCache: Map<string, GPUTexture> = new Map();
     private bindGroupCache: Map<string, GPUBindGroup> = new Map();
 
-    // Matrix caching for performance
+    // Matrix caching for performance - using numeric comparison instead of string keys
     private cachedMVPMatrix?: Float32Array;
     private cachedPerspectiveMatrix?: Float32Array;
-    private mvpCacheKey: string = '';
-    private perspectiveCacheKey: string = '';
+
+    // Cache keys using direct value comparison (faster than string concatenation)
+    private mvpCache = {
+        centerX: NaN,
+        centerY: NaN,
+        imageWidth: NaN,
+        imageHeight: NaN,
+        canvasWidth: NaN,
+        canvasHeight: NaN,
+        cameraZ: NaN,
+        fov: NaN,
+        near: NaN,
+        far: NaN
+    };
+
+    private perspectiveCache = {
+        fov: NaN,
+        aspectRatio: NaN,
+        near: NaN,
+        far: NaN
+    };
 
     // Reusable matrix objects to avoid allocations
     private reusableVP: mat4 = mat4.create();
     private reusableModelMatrix: mat4 = mat4.create();
+    private reusableCombinedMatrix: mat4 = mat4.create();
 
     constructor(container: HTMLElement) {
 
@@ -160,8 +179,9 @@ export class WebGPURenderer {
         this.createDepthTexture();
 
         // Invalidate matrix caches since canvas size changed
-        this.mvpCacheKey = '';
-        this.perspectiveCacheKey = '';
+        this.mvpCache.canvasWidth = NaN;
+        this.mvpCache.canvasHeight = NaN;
+        this.perspectiveCache.aspectRatio = NaN;
     }
 
     private async createPipeline() {
@@ -266,11 +286,15 @@ export class WebGPURenderer {
     /**
      * Get or create cached perspective matrix
      * Only recalculates when canvas size or FOV changes
+     * Optimized: uses direct numeric comparison instead of string concatenation
      */
     private getPerspectiveMatrix(fov: number, aspectRatio: number, near: number, far: number): Float32Array {
-        const cacheKey = `${fov}_${aspectRatio}_${near}_${far}`;
-
-        if (this.perspectiveCacheKey === cacheKey && this.cachedPerspectiveMatrix) {
+        // Fast cache check using direct value comparison (no string allocation)
+        if (this.perspectiveCache.fov === fov &&
+            this.perspectiveCache.aspectRatio === aspectRatio &&
+            this.perspectiveCache.near === near &&
+            this.perspectiveCache.far === far &&
+            this.cachedPerspectiveMatrix) {
             return this.cachedPerspectiveMatrix;
         }
 
@@ -280,7 +304,12 @@ export class WebGPURenderer {
         mat4.perspective(projection, fovRadians, aspectRatio, near, far);
 
         this.cachedPerspectiveMatrix = projection as Float32Array;
-        this.perspectiveCacheKey = cacheKey;
+
+        // Update cache keys
+        this.perspectiveCache.fov = fov;
+        this.perspectiveCache.aspectRatio = aspectRatio;
+        this.perspectiveCache.near = near;
+        this.perspectiveCache.far = far;
 
         return this.cachedPerspectiveMatrix;
     }
@@ -288,6 +317,7 @@ export class WebGPURenderer {
     /**
      * Get or create cached MVP matrix
      * Only recalculates when viewport parameters change
+     * Optimized: uses direct numeric comparison instead of expensive string concatenation with toFixed()
      */
     private getMVPMatrix(
         centerX: number,
@@ -301,11 +331,23 @@ export class WebGPURenderer {
         near: number,
         far: number
     ): Float32Array {
-        // Create cache key from all parameters that affect the MVP matrix
-        // Round to 6 decimals for smooth animations while avoiding float precision issues
-        const cacheKey = `${centerX.toFixed(6)}_${centerY.toFixed(6)}_${imageWidth}_${imageHeight}_${canvasWidth}_${canvasHeight}_${cameraZ.toFixed(2)}_${fov}_${near}_${far}`;
+        // Fast cache check using direct value comparison (no string allocation or toFixed() calls)
+        // Round centerX/centerY to avoid cache misses from floating point precision
+        const roundedCenterX = Math.round(centerX * 1000000) / 1000000;  // 6 decimals
+        const roundedCenterY = Math.round(centerY * 1000000) / 1000000;
+        const roundedCameraZ = Math.round(cameraZ * 10000) / 10000;      // 4 decimals
 
-        if (this.mvpCacheKey === cacheKey && this.cachedMVPMatrix) {
+        if (this.mvpCache.centerX === roundedCenterX &&
+            this.mvpCache.centerY === roundedCenterY &&
+            this.mvpCache.imageWidth === imageWidth &&
+            this.mvpCache.imageHeight === imageHeight &&
+            this.mvpCache.canvasWidth === canvasWidth &&
+            this.mvpCache.canvasHeight === canvasHeight &&
+            this.mvpCache.cameraZ === roundedCameraZ &&
+            this.mvpCache.fov === fov &&
+            this.mvpCache.near === near &&
+            this.mvpCache.far === far &&
+            this.cachedMVPMatrix) {
             return this.cachedMVPMatrix;
         }
 
@@ -328,7 +370,18 @@ export class WebGPURenderer {
 
         // Store in cache
         this.cachedMVPMatrix = new Float32Array(this.reusableVP);
-        this.mvpCacheKey = cacheKey;
+
+        // Update cache keys
+        this.mvpCache.centerX = roundedCenterX;
+        this.mvpCache.centerY = roundedCenterY;
+        this.mvpCache.imageWidth = imageWidth;
+        this.mvpCache.imageHeight = imageHeight;
+        this.mvpCache.canvasWidth = canvasWidth;
+        this.mvpCache.canvasHeight = canvasHeight;
+        this.mvpCache.cameraZ = roundedCameraZ;
+        this.mvpCache.fov = fov;
+        this.mvpCache.near = near;
+        this.mvpCache.far = far;
 
         return this.cachedMVPMatrix;
     }
@@ -339,7 +392,6 @@ export class WebGPURenderer {
         this.sampler = this.device.createSampler({
             magFilter: 'linear',
             minFilter: 'linear',
-            mipmapFilter: 'linear',
             addressModeU: 'clamp-to-edge',
             addressModeV: 'clamp-to-edge',
         });
@@ -354,89 +406,6 @@ export class WebGPURenderer {
         });
     }
 
-    private createMipmapPipeline() {
-        if (!this.device) return;
-
-        // Create sampler for mipmap generation (linear filtering)
-        this.mipmapSampler = this.device.createSampler({
-            magFilter: 'linear',
-            minFilter: 'linear',
-            mipmapFilter: 'linear',
-        });
-
-        // Simple shader for downsampling (blit with linear filtering)
-        const mipmapShader = `
-            struct VertexOutput {
-                @builtin(position) position: vec4f,
-                @location(0) texCoord: vec2f,
-            }
-
-            @vertex
-            fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
-                var output: VertexOutput;
-
-                // Full-screen triangle
-                let x = f32((vertexIndex & 1u) << 2u);
-                let y = f32((vertexIndex & 2u) << 1u);
-
-                output.position = vec4f(x - 1.0, 1.0 - y, 0.0, 1.0);
-                output.texCoord = vec2f(x * 0.5, y * 0.5);
-
-                return output;
-            }
-
-            @group(0) @binding(0) var mipSampler: sampler;
-            @group(0) @binding(1) var mipTexture: texture_2d<f32>;
-
-            @fragment
-            fn fs_main(input: VertexOutput) -> @location(0) vec4f {
-                return textureSample(mipTexture, mipSampler, input.texCoord);
-            }
-        `;
-
-        const shaderModule = this.device.createShaderModule({
-            label: 'Mipmap Generation Shader',
-            code: mipmapShader,
-        });
-
-        const pipelineLayout = this.device.createPipelineLayout({
-            bindGroupLayouts: [
-                this.device.createBindGroupLayout({
-                    entries: [
-                        {
-                            binding: 0,
-                            visibility: GPUShaderStage.FRAGMENT,
-                            sampler: { type: 'filtering' }
-                        },
-                        {
-                            binding: 1,
-                            visibility: GPUShaderStage.FRAGMENT,
-                            texture: { sampleType: 'float' }
-                        }
-                    ]
-                })
-            ]
-        });
-
-        this.mipmapPipeline = this.device.createRenderPipeline({
-            layout: pipelineLayout,
-            vertex: {
-                module: shaderModule,
-                entryPoint: 'vs_main',
-            },
-            fragment: {
-                module: shaderModule,
-                entryPoint: 'fs_main',
-                targets: [{
-                    format: this.format,
-                }]
-            },
-            primitive: {
-                topology: 'triangle-list',
-            },
-        });
-    }
-
     uploadTextureFromBitmap(tileId: string, bitmap: ImageBitmap): GPUTexture | undefined {
         if (!this.device || !this.pipeline || !this.sampler || !this.storageBuffer) return undefined;
 
@@ -445,137 +414,73 @@ export class WebGPURenderer {
             return this.textureCache.get(tileId)!;
         }
 
-        // Calculate mipmap levels for the texture
-        const mipLevelCount = Math.floor(Math.log2(Math.max(bitmap.width, bitmap.height))) + 1;
-
-        // Create texture with mipmaps
+        // Create texture without mipmaps (single level only for performance)
+        // Mipmaps disabled: IIIF provides multi-resolution tiles, so GPU downsampling not needed
         const texture = this.device.createTexture({
             size: [bitmap.width, bitmap.height, 1],
             format: this.format,
-            mipLevelCount: mipLevelCount,
+            mipLevelCount: 1,  // No mipmaps - single level only
             usage: GPUTextureUsage.TEXTURE_BINDING |
                    GPUTextureUsage.COPY_DST |
-                   GPUTextureUsage.RENDER_ATTACHMENT,
+                   GPUTextureUsage.RENDER_ATTACHMENT,  // Required for copyExternalImageToTexture
         });
 
-        // Upload bitmap to texture (base level only)
+        // Upload bitmap to texture
         this.device.queue.copyExternalImageToTexture(
             { source: bitmap },
             { texture: texture, mipLevel: 0 },
             [bitmap.width, bitmap.height]
         );
 
-        // Generate mipmaps using GPU rendering
-        this.generateMipmaps(texture, bitmap.width, bitmap.height, mipLevelCount);
-
         // Cache the texture
         this.textureCache.set(tileId, texture);
 
-        // Pre-create bind group for this texture
-        const bindGroup = this.device.createBindGroup({
-            layout: this.pipeline.getBindGroupLayout(0),
-            entries: [
-                {
-                    binding: 0,
-                    resource: { buffer: this.storageBuffer }
-                },
-                {
-                    binding: 1,
-                    resource: this.sampler
-                },
-                {
-                    binding: 2,
-                    resource: texture.createView()
-                }
-            ]
-        });
-        this.bindGroupCache.set(tileId, bindGroup);
+        // Bind group will be created lazily in renderTile() on first use
+        // This spreads GPU object creation across frames instead of blocking upload
 
         return texture;
     }
-
-    /**
-     * Generate mipmaps for a texture by rendering progressively smaller levels
-     * Uses GPU downsampling for high-quality mipmaps
-     */
-    private generateMipmaps(texture: GPUTexture, _width: number, _height: number, mipLevelCount: number) {
-        if (!this.device || mipLevelCount <= 1) return;
-
-        // Create a simple blit pipeline for mipmap generation if not already created
-        if (!this.mipmapPipeline) {
-            this.createMipmapPipeline();
-        }
-
-        if (!this.mipmapPipeline || !this.mipmapSampler) return;
-
-        const commandEncoder = this.device.createCommandEncoder({
-            label: 'Mipmap Generator'
-        });
-
-        // Generate each mip level by downsampling the previous level
-        for (let mipLevel = 1; mipLevel < mipLevelCount; mipLevel++) {
-            const srcView = texture.createView({
-                baseMipLevel: mipLevel - 1,
-                mipLevelCount: 1
-            });
-
-            const dstView = texture.createView({
-                baseMipLevel: mipLevel,
-                mipLevelCount: 1
-            });
-
-            // Create bind group for this mip level
-            const bindGroup = this.device.createBindGroup({
-                layout: this.mipmapPipeline.getBindGroupLayout(0),
-                entries: [
-                    {
-                        binding: 0,
-                        resource: this.mipmapSampler
-                    },
-                    {
-                        binding: 1,
-                        resource: srcView
-                    }
-                ]
-            });
-
-            // Render pass to generate this mip level
-            const renderPass = commandEncoder.beginRenderPass({
-                colorAttachments: [{
-                    view: dstView,
-                    loadOp: 'clear',
-                    storeOp: 'store',
-                    clearValue: { r: 0, g: 0, b: 0, a: 0 }
-                }]
-            });
-
-            renderPass.setPipeline(this.mipmapPipeline);
-            renderPass.setBindGroup(0, bindGroup);
-            renderPass.draw(6, 1, 0, 0); // Full-screen quad
-            renderPass.end();
-        }
-
-        this.device.queue.submit([commandEncoder.finish()]);
-    }
-
 
     private renderTile(
         renderPass: GPURenderPassEncoder,
         tile: TileRenderData,
         tileIndex: number
     ) {
-        if (!this.device) return;
+        if (!this.device || !this.pipeline || !this.sampler || !this.storageBuffer) return;
 
-        // Get bind group from cache (should already be created during texture upload)
+        // Get or create bind group lazily (created on first render instead of during upload)
         let bindGroup = this.bindGroupCache.get(tile.id);
 
         if (!bindGroup) {
-            // Fallback: upload texture and create bind group if not found (shouldn't normally happen)
-            this.uploadTextureFromBitmap(tile.id, tile.image);
-            bindGroup = this.bindGroupCache.get(tile.id);
-            if (!bindGroup) {
-                return;
+            // Get texture from cache
+            const texture = this.textureCache.get(tile.id);
+            if (!texture) {
+                // Texture not uploaded yet, try to upload
+                this.uploadTextureFromBitmap(tile.id, tile.image);
+                const uploadedTexture = this.textureCache.get(tile.id);
+                if (!uploadedTexture) return;
             }
+
+            // Create bind group on first use (lazy creation)
+            const cachedTexture = this.textureCache.get(tile.id)!;
+            bindGroup = this.device.createBindGroup({
+                layout: this.pipeline.getBindGroupLayout(0),
+                entries: [
+                    {
+                        binding: 0,
+                        resource: { buffer: this.storageBuffer }
+                    },
+                    {
+                        binding: 1,
+                        resource: this.sampler
+                    },
+                    {
+                        binding: 2,
+                        resource: cachedTexture.createView()
+                    }
+                ]
+            });
+            this.bindGroupCache.set(tile.id, bindGroup);
         }
 
         // Draw the tile using instanced rendering with tileIndex
@@ -613,24 +518,23 @@ export class WebGPURenderer {
             allTiles = tiles;
         }
 
-        // Batch write all tile uniforms to storage buffer ONCE
-        // WGSL struct layout (with proper alignment):
-        // mat4x4<f32> mvpMatrix:      64 bytes (16 floats) - offset 0
-        // mat4x4<f32> modelMatrix:    64 bytes (16 floats) - offset 64
-        // vec2<f32> tilePosition:     8 bytes (2 floats)   - offset 128
-        // vec2<f32> _padding0:        8 bytes (2 floats)   - offset 136
-        // vec2<f32> tileSize:         8 bytes (2 floats)   - offset 144
-        // vec2<f32> _padding1:        8 bytes (2 floats)   - offset 152
-        // Total per tile: 160 bytes = 40 floats
-        const floatsPerTile = 40;
-        const uniformData = new Float32Array(allTiles.length * floatsPerTile);
+        // Check for storage buffer overflow
+        const maxTiles = this.storageBufferSize / 64; // 64 bytes per tile (single mat4x4)
+        if (allTiles.length > maxTiles) {
+            console.error(`Storage buffer overflow: Trying to render ${allTiles.length} tiles but buffer only supports ${maxTiles} tiles. Truncating to ${maxTiles} tiles.`);
+            allTiles = allTiles.slice(0, maxTiles);
+        }
 
+        // Batch write all tile uniforms to storage buffer ONCE
+        // WGSL struct layout: mat4x4<f32> combinedMatrix (64 bytes = 16 floats per tile)
+        const floatsPerTile = 16;
+
+        // Reuse pre-allocated buffer, only process the tiles we need
         for (let i = 0; i < allTiles.length; i++) {
             const tile = allTiles[i];
             const offset = i * floatsPerTile;
 
-            // Reuse model matrix object instead of creating new one
-            // Work in image pixel coordinates - no scaling needed
+            // Create model matrix for this tile (position and scale)
             mat4.identity(this.reusableModelMatrix);
             mat4.translate(this.reusableModelMatrix, this.reusableModelMatrix, [
                 tile.x,
@@ -643,21 +547,21 @@ export class WebGPURenderer {
                 1
             ]);
 
-            // Pack data with correct alignment
-            uniformData.set(mvpMatrix, offset);                      // 16 floats: mvpMatrix
-            uniformData.set(this.reusableModelMatrix, offset + 16);  // 16 floats: modelMatrix
-            uniformData[offset + 32] = tile.x;                       // tilePosition.x
-            uniformData[offset + 33] = tile.y;                       // tilePosition.y
-            uniformData[offset + 34] = 0.0;                          // _padding0.x
-            uniformData[offset + 35] = 0.0;                          // _padding0.y
-            uniformData[offset + 36] = tile.width;                   // tileSize.x
-            uniformData[offset + 37] = tile.height;                  // tileSize.y
-            uniformData[offset + 38] = 0.0;                          // _padding1.x
-            uniformData[offset + 39] = 0.0;                          // _padding1.y
+            // Pre-multiply: combinedMatrix = MVP × Model (done on CPU once per tile)
+            mat4.multiply(this.reusableCombinedMatrix, mvpMatrix as mat4, this.reusableModelMatrix);
+
+            // Pack combined matrix into pre-allocated buffer (16 floats)
+            this.uniformDataBuffer.set(this.reusableCombinedMatrix, offset);
         }
 
-        // Single write operation for all tile data
-        this.device.queue.writeBuffer(this.storageBuffer, 0, uniformData);
+        // Single write operation for all tile data (subarray to avoid uploading unused data)
+        this.device.queue.writeBuffer(
+            this.storageBuffer,
+            0,
+            this.uniformDataBuffer.buffer,
+            0,
+            allTiles.length * floatsPerTile * 4  // Convert float count to byte count
+        );
 
         const commandEncoder = this.device.createCommandEncoder();
         const textureView = this.context.getCurrentTexture().createView();

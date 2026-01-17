@@ -41,6 +41,9 @@ export class Viewport {
     containerHeight: number;
   }> = new Map();
 
+  // OPTIMIZATION: Track if cache needs invalidation (avoid double clear)
+  private boundsCacheInvalid: boolean = false;
+
   constructor(containerWidth: number, containerHeight: number) {
     this.containerWidth = containerWidth;
     this.containerHeight = containerHeight;
@@ -95,9 +98,13 @@ export class Viewport {
 
   /**
    * Invalidate the bounds cache when viewport state changes
+   * OPTIMIZED: Only clear if not already invalid (prevents double clear)
    */
   private invalidateBoundsCache(): void {
-    this.boundsCache.clear();
+    if (!this.boundsCacheInvalid) {
+      this.boundsCache.clear();
+      this.boundsCacheInvalid = true;
+    }
   }
 
   private updateScaleLimits(): void {
@@ -152,42 +159,25 @@ export class Viewport {
   }
 
 
-  fitToHeight(image: IIIFImage) {
-    const imageHeight = image.height;
-    const targetScale = this.containerHeight / imageHeight;
-    // Calculate camera Z for this scale
-    this.cameraZ = this.containerHeight / (2 * targetScale * this.tanHalfFov);
-    // Set max zoom out to 5x farther, max zoom in to 10x closer
-    this.maxZ = this.cameraZ * 5;
-    this.minZ = this.cameraZ * 0.1;
-
-    // Update clipping planes based on zoom constraints
-    this.near = this.minZ * 0.01;  // 1% of closest zoom for safety
-    this.far = this.maxZ * 2;      // 2x farthest zoom for safety
-
-    this.updateScale();
-
-    this.centerX = 0.5;
-    this.centerY = 0.5;
-    return this;
-  }
 
   // Get visible bounds in image coordinates
   getImageBounds(image: IIIFImage) {
-    // Check cache first
-    const cached = this.boundsCache.get(image.id);
+    // Check cache first (only if cache is valid)
+    if (!this.boundsCacheInvalid) {
+      const cached = this.boundsCache.get(image.id);
 
-    // Round scale to 3 decimal places for cache comparison (matching tile manager precision)
-    const roundedScale = Math.round(this.scale * 1000) / 1000;
+      // Round scale to 3 decimal places for cache comparison (matching tile manager precision)
+      const roundedScale = Math.round(this.scale * 1000) / 1000;
 
-    if (cached &&
-        cached.centerX === this.centerX &&
-        cached.centerY === this.centerY &&
-        cached.scale === roundedScale &&
-        cached.containerWidth === this.containerWidth &&
-        cached.containerHeight === this.containerHeight) {
-      // Cache hit - return cached bounds without recalculation
-      return cached.bounds;
+      if (cached &&
+          cached.centerX === this.centerX &&
+          cached.centerY === this.centerY &&
+          cached.scale === roundedScale &&
+          cached.containerWidth === this.containerWidth &&
+          cached.containerHeight === this.containerHeight) {
+        // Cache hit - return cached bounds without recalculation
+        return cached.bounds;
+      }
     }
 
     // Cache miss - calculate bounds
@@ -207,6 +197,9 @@ export class Viewport {
       height: scaledHeight
     };
 
+    // Round scale to 3 decimal places for cache storage
+    const roundedScale = Math.round(this.scale * 1000) / 1000;
+
     // Store in cache (using rounded scale for consistency)
     this.boundsCache.set(image.id, {
       bounds,
@@ -216,6 +209,10 @@ export class Viewport {
       containerWidth: this.containerWidth,
       containerHeight: this.containerHeight
     });
+
+    // Mark cache as valid since we just populated it
+    this.boundsCacheInvalid = false;
+
     return bounds;
   }
 

@@ -32,6 +32,10 @@ export class TileManager {
     private cachedSortedTiles: any[] | null = null;
     private cachedTileSetHash: string | null = null;
 
+  // GPU upload queue to prevent blocking during texture uploads
+  private pendingGPUUploads: Array<{ tileId: string; bitmap: ImageBitmap }> = [];
+  private isProcessingUploads: boolean = false;
+
   constructor(id: string, iiifImage: IIIFImage, maxCacheSize: number = 500, renderer?: WebGPURenderer, distanceDetail: number = 0.35) {
     this.id = id;
     this.image = iiifImage;
@@ -175,7 +179,10 @@ export class TileManager {
         id: tileId,
         x: x,
         y: y,
-        z: zoomLevel,  // Higher zoom levels (more detail) render closer
+        // Assign unique z-value per tile to prevent depth fighting at edges
+        // Base: zoomLevel, Offset: tiny increments based on tile position
+        // This ensures deterministic render order: back-to-front, top-left to bottom-right
+        z: zoomLevel + (tileY * 0.00001) + (tileX * 0.000001),
         width: Math.min(tileSize * scaleFactor, this.image.width - x),
         height: Math.min(tileSize * scaleFactor, this.image.height - y),
         tileX: tileX,
@@ -195,7 +202,10 @@ export class TileManager {
       url: url,
       x: x,
       y: y,
-      z: zoomLevel,  // Higher zoom levels (more detail) render closer
+      // Assign unique z-value per tile to prevent depth fighting at edges
+      // Base: zoomLevel, Offset: tiny increments based on tile position
+      // This ensures deterministic render order: back-to-front, top-left to bottom-right
+      z: zoomLevel + (tileY * 0.00001) + (tileX * 0.000001),
       width: width,
       height: height,
       tileX: tileX,
@@ -211,7 +221,9 @@ export class TileManager {
       !this.tileCache.has(tile.id) && !this.loadingTiles.has(tile.id)
     );
 
-    if (tilesToLoad.length === 0) return;
+    if (tilesToLoad.length === 0) {
+      return;
+    }
 
     // Sort tiles by priority (closest to viewport center first)
     // Tiles with lower priority values are closer to the center
@@ -253,13 +265,13 @@ export class TileManager {
       this.tileCache.set(tile.id, cachedTile);
       this.markTileAccessed(tile.id);
 
-      // Upload to GPU immediately if renderer is available
+      // Queue GPU upload instead of blocking immediately
       if (this.renderer) {
-        this.renderer.uploadTextureFromBitmap(tile.id, loadedBitmap);
+        this.queueGPUUpload(tile.id, loadedBitmap);
       }
 
-      // Invalidate cache so next render picks up the newly loaded tile
-      this.invalidateTileCache();
+      // No cache invalidation needed - existing validation logic at lines 440-451
+      // automatically detects when new tiles load and recalculates as needed
 
       this.evictOldTiles();
       return cachedTile;
@@ -320,6 +332,48 @@ export class TileManager {
 
     // Load tiles with priority-based ordering (non-blocking)
     this.loadTilesBatch(tiles);
+  }
+
+  /**
+   * Queue GPU upload to avoid blocking the main thread during texture upload
+   * Uploads are processed asynchronously during idle time
+   */
+  private queueGPUUpload(tileId: string, bitmap: ImageBitmap) {
+    this.pendingGPUUploads.push({ tileId, bitmap });
+
+    // Start processing if not already running
+    if (!this.isProcessingUploads) {
+      this.processGPUUploadQueue();
+    }
+  }
+
+  /**
+   * Process GPU upload queue asynchronously
+   * Uses requestAnimationFrame for non-blocking uploads spread across frames
+   */
+  private processGPUUploadQueue() {
+    if (this.pendingGPUUploads.length === 0) {
+      this.isProcessingUploads = false;
+      return;
+    }
+
+    this.isProcessingUploads = true;
+    const upload = this.pendingGPUUploads.shift()!;
+
+    // Upload immediately (GPU operations are already async via command queues)
+    if (this.renderer) {
+      this.renderer.uploadTextureFromBitmap(upload.tileId, upload.bitmap);
+    }
+
+    // Check queue again (new items may have been added during upload)
+    // This prevents race condition where items added during processing are missed
+    if (this.pendingGPUUploads.length > 0) {
+      // Use requestAnimationFrame for smooth uploads without blocking
+      requestAnimationFrame(() => this.processGPUUploadQueue());
+    } else {
+      // Queue is empty now, but mark as not processing to allow new batches
+      this.isProcessingUploads = false;
+    }
   }
 
   // Get loaded tiles for rendering with fallback to previous tiles (optimized for WebGPU)
@@ -465,9 +519,9 @@ export class TileManager {
         url: thumbnailUrl
       };
 
-      // Upload to GPU immediately if renderer is available
+      // Queue GPU upload for thumbnail
       if (this.renderer) {
-        this.renderer.uploadTextureFromBitmap('thumbnail', loadedBitmap);
+        this.queueGPUUpload('thumbnail', loadedBitmap);
       }
 
       return this.thumbnail;

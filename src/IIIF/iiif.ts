@@ -5,7 +5,6 @@ import { TileManager } from './iiif-tile';
 import { WebGPURenderer } from './iiif-webgpu';
 import { ToolBar } from './iiif-toolbar';
 import { AnnotationManager } from './iiif-annotations'
-import { GestureHandler } from './iiif-gesture';
 import { Camera } from './iiif-camera';
 
 export class IIIFViewer {
@@ -18,8 +17,6 @@ export class IIIFViewer {
     renderer?: WebGPURenderer;
     toolbar?: ToolBar;
     annotationManager?: AnnotationManager;
-    gestureHandler?: GestureHandler;
-    gsap?: any;
     private eventListeners: { event: string, handler: EventListener }[];
     private renderLoopActive: boolean = false;
     private animationFrameId?: number;
@@ -33,7 +30,6 @@ export class IIIFViewer {
         this.viewport = new Viewport(container.clientWidth, container.clientHeight);
         this.toolbar = new ToolBar(container, options.toolbar);
         this.camera = new Camera(this.viewport, this.images, this.tiles);
-        this.gsap = options.gsap || undefined;
 
         this.annotationManager = new AnnotationManager();
         this.eventListeners = [];
@@ -116,6 +112,8 @@ export class IIIFViewer {
         this.images.set(id, iiifImage);
 
         // Pass renderer to TileManager if available
+        // distanceDetail: Lower = more detail from further away (0.3-0.5 recommended)
+        // 0.30 = slightly more detail, 0.35 = balanced, 0.40 = conservative
         const tileManager = new TileManager(id, iiifImage, 500, this.renderer, 0.35);
 
         if (focus) {
@@ -130,16 +128,6 @@ export class IIIFViewer {
         await tileManager.loadThumbnail();
     }
 
-    async removeImage(id: string) {
-        const index = this.images.has(id) ? Array.from(this.images.keys()).indexOf(id) : -1;
-        if (index !== -1) {
-            this.images.delete(id);
-            this.tiles.delete(id);
-            console.log(`Image with ID ${id} removed.`);
-        } else {
-            console.warn(`Image with ID ${id} not found.`);
-        }
-    }
 
 
     private updateAnimations() {
@@ -250,16 +238,6 @@ export class IIIFViewer {
         );
     }
 
-    unlisten() {
-        this.eventListeners.forEach(({ event, handler }) => {
-            if (event === 'resize') {
-                window.removeEventListener(event, handler);
-            } else {
-                this.container.removeEventListener(event, handler);
-            }
-        });
-        this.eventListeners = [];
-    }
 
 
     render(imageId?: string) {
@@ -305,28 +283,15 @@ export class IIIFViewer {
         this.renderLoopActive = true;
         console.log('Starting render loop for image:', imageId);
 
-        if (this.gsap) {
-            // Use GSAP ticker for the render loop
-            const gsapLoop = () => {
-                if (!this.renderLoopActive) {
-                    this.gsap!.ticker.remove(gsapLoop);
-                    return;
-                }
-                this.render(imageId);
-            };
-            this.gsap.ticker.add(gsapLoop);
-        } else {
-            // Fallback to requestAnimationFrame
-            const loop = () => {
-                if (!this.renderLoopActive) {
-                    console.log('Render loop stopped');
-                    return;
-                }
-                this.render(imageId);
-                this.animationFrameId = requestAnimationFrame(loop);
-            };
-            loop();
-        }
+        const loop = () => {
+            if (!this.renderLoopActive) {
+                console.log('Render loop stopped');
+                return;
+            }
+            this.render(imageId);
+            this.animationFrameId = requestAnimationFrame(loop);
+        };
+        loop();
     }
 
     stopRenderLoop() {
