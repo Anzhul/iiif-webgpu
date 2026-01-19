@@ -1,5 +1,5 @@
 import { IIIFImage } from './iiif-image';
-import { WebGPURenderer } from './iiif-webgpu';
+import type { IIIFRenderer } from './iiif-renderer';
 
 export class TileManager {
     id: string;
@@ -11,7 +11,7 @@ export class TileManager {
     private maxCacheSize: number;
     // Tracks which tiles were accessed recently for LRU cache eviction
     private tileAccessOrder: Set<string>;
-    private renderer?: WebGPURenderer;
+    private renderer?: IIIFRenderer;
     private distanceDetail: number;
     // Cache of the most recently rendered tiles (for fallback when zooming)
     private lastRenderedTiles: any[] = [];
@@ -36,7 +36,7 @@ export class TileManager {
   private pendingGPUUploads: Array<{ tileId: string; bitmap: ImageBitmap }> = [];
   private isProcessingUploads: boolean = false;
 
-  constructor(id: string, iiifImage: IIIFImage, maxCacheSize: number = 500, renderer?: WebGPURenderer, distanceDetail: number = 0.35) {
+  constructor(id: string, iiifImage: IIIFImage, maxCacheSize: number = 500, renderer?: IIIFRenderer, distanceDetail: number = 0.35) {
     this.id = id;
     this.image = iiifImage;
     this.tileCache = new Map();
@@ -491,7 +491,7 @@ export class TileManager {
   }
 
   // Set renderer reference (useful if renderer is created after TileManager)
-  setRenderer(renderer: WebGPURenderer) {
+  setRenderer(renderer: IIIFRenderer) {
     this.renderer = renderer;
   }
 

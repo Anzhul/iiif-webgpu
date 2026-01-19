@@ -42,6 +42,11 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) til
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // Sample the texture
-    return textureSample(tileTexture, textureSampler, input.texCoord);
+    // Add small epsilon to avoid sampling exactly at texture edges (0.0 or 1.0)
+    // This prevents flickering artifacts at tile boundaries due to floating-point precision
+    let epsilon = 0.0001;
+    let clampedCoord = clamp(input.texCoord, vec2<f32>(epsilon), vec2<f32>(1.0 - epsilon));
+
+    // Sample the texture with slightly inset coordinates
+    return textureSample(tileTexture, textureSampler, clampedCoord);
 }

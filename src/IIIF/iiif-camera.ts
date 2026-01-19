@@ -470,12 +470,6 @@ export class Camera {
             }
         }
 
-        // Ensure final state is constrained
-        const image = this.images.get(animation.imageId);
-        if (image && strategy.shouldConstrainCenter(animation)) {
-            this.viewport.constrainCenter(image);
-        }
-
         this.stopAnimation();
     }
 
@@ -528,11 +522,6 @@ export class Camera {
         // Apply zoom anchor point if present (for zoom animations only)
         if (animation.type === 'zoom' && this.hasAnchorPoint(animation)) {
             this.applyZoomAnchor(animation, image);
-        }
-
-        // Apply constraints if strategy requires it
-        if (strategy.shouldConstrainCenter(animation)) {
-            this.viewport.constrainCenter(image);
         }
 
         // Request tiles for new position (hybrid strategy)

@@ -3,22 +3,13 @@
 import { mat4 } from 'gl-matrix';
 import { IIIFImage } from './iiif-image.js';
 import { Viewport } from './iiif-view.js';
+import type { IIIFRenderer, TileRenderData } from './iiif-renderer.js';
 import ShaderModule from './iiif-shader.wgsl?raw';
-
-interface TileRenderData {
-    id: string;
-    image: ImageBitmap;
-    x: number;
-    y: number;
-    z: number;  // Z position in world space (default 0 for image plane)
-    width: number;
-    height: number;
-}
 
 // Note: Matrix creation functions moved into WebGPURenderer class
 // to enable caching and reuse. See getPerspectiveMatrix() and getMVPMatrix().
 
-export class WebGPURenderer {
+export class WebGPURenderer implements IIIFRenderer {
     canvas: HTMLCanvasElement;
     container: HTMLElement;
     devicePixelRatio: number;

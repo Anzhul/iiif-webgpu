@@ -246,6 +246,16 @@ export class Viewport {
 
     // Only invalidate cache if center actually changed
     if (oldCenterX !== this.centerX || oldCenterY !== this.centerY) {
+      // DEBUG: Log constraint changes to detect wavering
+      const deltaX = Math.abs(this.centerX - oldCenterX);
+      const deltaY = Math.abs(this.centerY - oldCenterY);
+      if (deltaX > 0.000001 || deltaY > 0.000001) {
+        console.log('Constraint adjusted center:', {
+          deltaX: deltaX.toFixed(8),
+          deltaY: deltaY.toFixed(8),
+          scale: this.scale.toFixed(3)
+        });
+      }
       this.invalidateBoundsCache();
     }
   }
