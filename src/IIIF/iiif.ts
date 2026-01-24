@@ -4,16 +4,27 @@ import { Viewport } from './iiif-view';
 import { TileManager } from './iiif-tile';
 import { WebGPURenderer } from './iiif-webgpu';
 import { WebGLRenderer } from './iiif-webgl';
-import type { IIIFRenderer } from './iiif-renderer';
+import type { IIIFRenderer, WorldTileRenderData } from './iiif-renderer';
 import { ToolBar } from './iiif-toolbar';
 import { AnnotationManager } from './iiif-annotations'
 import { Camera } from './iiif-camera';
 import { IIIFOverlayManager } from './iiif-overlay';
+import { IIIFManifestParser, type ManifestInfo } from './iiif-manifest';
+import { LayoutManager, type LayoutMode, type LayoutOptions } from './iiif-layout';
 
 // Re-export overlay and annotation types for convenience
 export type { OverlayElement } from './iiif-overlay';
 export type { Annotation } from './iiif-annotations';
 export { IIIFOverlayManager } from './iiif-overlay';
+
+// Re-export manifest and layout types
+export { IIIFManifestParser } from './iiif-manifest';
+export type { ManifestInfo, CanvasInfo, ImageService } from './iiif-manifest';
+export { LayoutManager } from './iiif-layout';
+export type { LayoutMode, LayoutOptions, LayoutResult } from './iiif-layout';
+
+// Re-export overlay component factories
+export * from './iiif-overlay-components';
 
 export class IIIFViewer {
     container: HTMLElement;
@@ -31,6 +42,11 @@ export class IIIFViewer {
     private renderLoopActive: boolean = false;
     private animationFrameId?: number;
     private cachedContainerRect: DOMRect;
+
+    // Multi-image unified canvas state
+    private manifestInfo?: ManifestInfo;
+    private layoutMode: LayoutMode = 'horizontal';
+    private layoutGap: number = 50;
 
     constructor(container: HTMLElement, options: any = {}) {
         this.container = container;
@@ -169,7 +185,7 @@ export class IIIFViewer {
         }
     }
 
-    async addImage(id: string, url: string, focus: boolean = false) {
+    async addImage(id: string, url: string, focus: boolean = false, skipTileRequest: boolean = false) {
         const iiifImage = new IIIFImage(id, url);
         await iiifImage.loadManifest(url);
         this.images.set(id, iiifImage);
@@ -184,14 +200,238 @@ export class IIIFViewer {
         }
         this.tiles.set(id, tileManager);
 
-        // Request initial tiles for the viewport
-        tileManager.requestTilesForViewport(this.viewport);
+        // Skip tile requests during batch loading (will be done after layout)
+        if (!skipTileRequest) {
+            // Request initial tiles for the viewport
+            tileManager.requestTilesForViewport(this.viewport);
 
-        // Load low-resolution thumbnail for background
-        await tileManager.loadThumbnail();
+            // Load low-resolution thumbnail for background
+            await tileManager.loadThumbnail();
+        }
     }
 
+    /**
+     * Load a IIIF manifest (Presentation API) or info.json (Image API)
+     * Automatically detects the type and loads all images
+     * @param url - URL to manifest.json or info.json
+     * @param options - Layout options for multi-image display
+     */
+    async loadManifest(url: string, options: {
+        layout?: LayoutMode;
+        gap?: number;
+        gridColumns?: number;
+        maxConcurrentLoads?: number;
+    } = {}): Promise<ManifestInfo> {
+        // Parse the manifest (handles both Presentation and Image API)
+        this.manifestInfo = await IIIFManifestParser.parse(url);
 
+        // Store layout preferences
+        this.layoutMode = options.layout || 'horizontal';
+        this.layoutGap = options.gap ?? 50;
+
+        // Enable world space mode for multi-image viewing
+        if (this.manifestInfo.canvases.length > 1) {
+            this.viewport.enableWorldSpace();
+        }
+
+        // Collect all canvas info for loading
+        const canvasesToLoad: Array<{ index: number; imageId: string; infoUrl: string; label: string }> = [];
+
+        for (let i = 0; i < this.manifestInfo.canvases.length; i++) {
+            const canvas = this.manifestInfo.canvases[i];
+
+            // Use first image service from canvas
+            const imageService = canvas.imageServices[0];
+            if (!imageService) {
+                console.warn(`Canvas ${canvas.id} has no image service, skipping`);
+                continue;
+            }
+
+            const imageId = `canvas_${i}`;
+            const infoUrl = imageService.id.endsWith('/info.json')
+                ? imageService.id
+                : `${imageService.id}/info.json`;
+
+            canvasesToLoad.push({
+                index: i,
+                imageId,
+                infoUrl,
+                label: canvas.label || `Page ${i + 1}`
+            });
+        }
+
+        // Load images in batches to prevent overwhelming the browser
+        // skipTileRequest=true: don't load tiles yet, wait until layout is done
+        const batchSize = options.maxConcurrentLoads || 4;
+
+        for (let i = 0; i < canvasesToLoad.length; i += batchSize) {
+            const batch = canvasesToLoad.slice(i, i + batchSize);
+
+            await Promise.all(batch.map(async (item) => {
+                try {
+                    // Skip tile requests during batch loading - will load after layout
+                    await this.addImage(item.imageId, item.infoUrl, false, true);
+                    const image = this.images.get(item.imageId);
+                    if (image) {
+                        image.label = item.label;
+                    }
+                } catch (error) {
+                    console.warn(`Failed to load canvas ${item.index}:`, error);
+                }
+            }));
+
+            console.log(`Loaded ${Math.min(i + batchSize, canvasesToLoad.length)}/${canvasesToLoad.length} images`);
+        }
+
+        // Layout the images (sets worldX/worldY positions)
+        this.layoutImages();
+
+        // Fit viewport to show all images
+        this.fitToAllImages();
+
+        // Set up world space event listeners for multi-image panning/zooming
+        if (this.manifestInfo.canvases.length > 1) {
+            this.listenWorldSpace();
+        }
+
+        return this.manifestInfo;
+    }
+
+    /**
+     * Layout all loaded images according to current layout mode
+     */
+    layoutImages(): void {
+        const imageArray = Array.from(this.images.values());
+
+        if (imageArray.length === 0) return;
+
+        const layoutOptions: LayoutOptions = {
+            mode: this.layoutMode,
+            gap: this.layoutGap,
+            alignToTallest: true,
+            alignToWidest: true
+        };
+
+        // Apply layout (this sets worldX/worldY on each image)
+        LayoutManager.layout(imageArray, layoutOptions);
+
+        // Request tiles for visible images
+        this.requestTilesForAllVisibleImages();
+    }
+
+    /**
+     * Change the layout mode and re-layout images
+     */
+    setLayout(mode: LayoutMode, gap?: number): void {
+        this.layoutMode = mode;
+        if (gap !== undefined) {
+            this.layoutGap = gap;
+        }
+        this.layoutImages();
+        this.fitToAllImages();
+    }
+
+    /**
+     * Fit viewport to show all images
+     */
+    fitToAllImages(padding: number = 50): void {
+        const bounds = LayoutManager.getBounds(Array.from(this.images.values()));
+
+        if (bounds.width === 0 || bounds.height === 0) return;
+
+        this.viewport.fitToBounds(
+            bounds.minX,
+            bounds.minY,
+            bounds.maxX,
+            bounds.maxY,
+            padding
+        );
+
+        // Load thumbnails and request tiles for visible images
+        this.loadThumbnailsForVisibleImages();
+        this.requestTilesForAllVisibleImages();
+    }
+
+    /**
+     * Load thumbnails for all visible images (lazy loading)
+     */
+    private async loadThumbnailsForVisibleImages(): Promise<void> {
+        const visibleImages: Array<{ imageId: string; tileManager: TileManager }> = [];
+
+        for (const [imageId, image] of this.images) {
+            if (this.viewport.isImageVisible(image)) {
+                const tileManager = this.tiles.get(imageId);
+                if (tileManager && !tileManager.getThumbnail()) {
+                    visibleImages.push({ imageId, tileManager });
+                }
+            }
+        }
+
+        // Load thumbnails in batches of 2 with delay between batches
+        // This prevents overwhelming the server and avoids decode errors
+        for (let i = 0; i < visibleImages.length; i += 2) {
+            const batch = visibleImages.slice(i, i + 2);
+            await Promise.all(batch.map(item => item.tileManager.loadThumbnail()));
+
+            // Small delay between batches to avoid rate limiting
+            if (i + 2 < visibleImages.length) {
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+        }
+    }
+
+    /**
+     * Request tiles for all images visible in the current viewport
+     */
+    private requestTilesForAllVisibleImages(): void {
+        if (!this.viewport.useWorldSpace) {
+            // Single image mode - use original method
+            for (const tileManager of this.tiles.values()) {
+                tileManager.requestTilesForViewport(this.viewport);
+            }
+            return;
+        }
+
+        // World space mode - only request tiles for visible images
+        for (const [imageId, image] of this.images) {
+            if (this.viewport.isImageVisible(image)) {
+                const tileManager = this.tiles.get(imageId);
+                if (tileManager) {
+                    tileManager.requestTilesForWorldViewport(this.viewport);
+                }
+            }
+        }
+    }
+
+    /**
+     * Render all images in world space (unified canvas mode)
+     */
+    private renderMultiImage(): void {
+        if (!this.renderer?.renderMultiImage) {
+            console.warn('Renderer does not support multi-image rendering');
+            return;
+        }
+
+        // Collect tiles from all visible images
+        const allTiles: WorldTileRenderData[] = [];
+
+        for (const [imageId, image] of this.images) {
+            // Skip images outside viewport
+            if (!this.viewport.isImageVisible(image)) {
+                continue;
+            }
+
+            const tileManager = this.tiles.get(imageId);
+            if (!tileManager) continue;
+
+            // Get tiles with world offsets
+            const tiles = tileManager.getWorldSpaceTiles(this.viewport);
+            allTiles.push(...tiles);
+        }
+
+        // Render all tiles
+        this.renderer.renderMultiImage(this.viewport, allTiles);
+    }
 
     private updateAnimations() {
         // Only update interactive animations if Camera is not running programmatic animations
@@ -356,6 +596,62 @@ export class IIIFViewer {
         );
     }
 
+    /**
+     * Set up event listeners for world space mode (multi-image panning/zooming)
+     */
+    listenWorldSpace() {
+        const mousedownHandler = (event: MouseEvent) => {
+            event.preventDefault();
+
+            // Calculate canvas-relative coordinates
+            const canvasX = event.clientX - this.cachedContainerRect.left;
+            const canvasY = event.clientY - this.cachedContainerRect.top;
+
+            // Start world space pan via camera
+            this.camera.startWorldSpacePan(canvasX, canvasY);
+
+            const onMouseMove = (moveEvent: MouseEvent) => {
+                // Update target canvas position
+                const newCanvasX = moveEvent.clientX - this.cachedContainerRect.left;
+                const newCanvasY = moveEvent.clientY - this.cachedContainerRect.top;
+
+                // Update pan via camera (same method works for world space)
+                this.camera.updateInteractivePan(newCanvasX, newCanvasY);
+            };
+
+            const cleanup = () => {
+                // End pan via camera
+                this.camera.endInteractivePan();
+
+                // Remove all drag-related listeners
+                document.removeEventListener('mousemove', onMouseMove);
+                document.removeEventListener('mouseup', cleanup);
+                document.removeEventListener('mouseleave', cleanup);
+            };
+
+            // Listen on document to catch mouse events outside the container
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', cleanup);
+            document.addEventListener('mouseleave', cleanup);
+        };
+
+        const wheelHandler = (event: WheelEvent) => {
+            const canvasX = event.clientX - this.cachedContainerRect.left;
+            const canvasY = event.clientY - this.cachedContainerRect.top;
+
+            // Handle wheel for world space zooming
+            this.camera.handleWorldSpaceWheel(event, canvasX, canvasY);
+        };
+
+        this.container.addEventListener('mousedown', mousedownHandler);
+        this.container.addEventListener('wheel', wheelHandler);
+
+        this.eventListeners.push(
+            { event: 'mousedown', handler: mousedownHandler as EventListener },
+            { event: 'wheel', handler: wheelHandler as EventListener }
+        );
+    }
+
 
 
     render(imageId?: string) {
@@ -367,6 +663,21 @@ export class IIIFViewer {
             return;
         }
 
+        // Use multi-image rendering if in world space mode with multiple images
+        if (this.viewport.useWorldSpace && this.images.size > 1) {
+            this.renderMultiImage();
+
+            // Request tiles for visible images
+            this.requestTilesForAllVisibleImages();
+
+            // Update overlay positions
+            if (this.overlayManager) {
+                this.overlayManager.updateAllOverlays();
+            }
+            return;
+        }
+
+        // Single image rendering mode
         // If imageId is provided, render only that image, otherwise render first image
         const id = imageId || Array.from(this.images.keys())[0];
         if (!id) {

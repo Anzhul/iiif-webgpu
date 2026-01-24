@@ -24,8 +24,12 @@ export class TileManager {
         centerX: number;
         centerY: number;
         scale: number;
+        zoomLevel: number;  // Cache zoom level to detect level changes
         containerWidth: number;
         containerHeight: number;
+        // World space coordinates (for multi-image mode)
+        worldCenterX?: number;
+        worldCenterY?: number;
     } | null = null;
 
     // Cache for z-sorted tiles to avoid redundant sorting every frame
@@ -68,35 +72,65 @@ export class TileManager {
   /**
    * Check if viewport has changed significantly enough to invalidate tile cache
    * Uses a small threshold to avoid recalculating on tiny movements
+   * Supports both single-image mode (centerX/Y) and world space mode (worldCenterX/Y)
    */
-  private hasViewportChanged(viewport: any): boolean {
+  private hasViewportChanged(viewport: any, useWorldSpace: boolean = false): boolean {
     if (!this.cachedViewportState) {
       return true;
     }
 
     const state = this.cachedViewportState;
     const threshold = 0.001; // ~0.1% movement threshold
+    // World space uses pixel coordinates, so need larger threshold
+    const worldThreshold = 1.0; // 1 pixel movement threshold
 
-    // Check if any viewport parameter changed beyond threshold
-    return (
-      Math.abs(viewport.centerX - state.centerX) > threshold ||
-      Math.abs(viewport.centerY - state.centerY) > threshold ||
-      Math.abs(viewport.scale - state.scale) > threshold ||
-      viewport.containerWidth !== state.containerWidth ||
-      viewport.containerHeight !== state.containerHeight
-    );
+    // CRITICAL: Check if zoom level changed - this is more important than scale threshold
+    // Even small scale changes can cross zoom level boundaries, requiring different tiles
+    const currentZoomLevel = this.getOptimalZoomLevel(viewport.scale);
+    if (currentZoomLevel !== state.zoomLevel) {
+      return true;
+    }
+
+    // Check scale and container size (common to both modes)
+    if (Math.abs(viewport.scale - state.scale) > threshold ||
+        viewport.containerWidth !== state.containerWidth ||
+        viewport.containerHeight !== state.containerHeight) {
+      return true;
+    }
+
+    // Check center coordinates based on mode
+    if (useWorldSpace) {
+      // World space mode - check world center coordinates
+      const worldCenterX = viewport.worldCenterX ?? 0;
+      const worldCenterY = viewport.worldCenterY ?? 0;
+      const cachedWorldX = state.worldCenterX ?? 0;
+      const cachedWorldY = state.worldCenterY ?? 0;
+      return (
+        Math.abs(worldCenterX - cachedWorldX) > worldThreshold ||
+        Math.abs(worldCenterY - cachedWorldY) > worldThreshold
+      );
+    } else {
+      // Single image mode - check normalized center coordinates
+      return (
+        Math.abs(viewport.centerX - state.centerX) > threshold ||
+        Math.abs(viewport.centerY - state.centerY) > threshold
+      );
+    }
   }
 
   /**
    * Update cached viewport state
    */
-  private updateViewportCache(viewport: any): void {
+  private updateViewportCache(viewport: any, useWorldSpace: boolean = false): void {
     this.cachedViewportState = {
       centerX: viewport.centerX,
       centerY: viewport.centerY,
       scale: viewport.scale,
+      zoomLevel: this.getOptimalZoomLevel(viewport.scale),
       containerWidth: viewport.containerWidth,
-      containerHeight: viewport.containerHeight
+      containerHeight: viewport.containerHeight,
+      worldCenterX: useWorldSpace ? viewport.worldCenterX : undefined,
+      worldCenterY: useWorldSpace ? viewport.worldCenterY : undefined
     };
   }
 
@@ -164,7 +198,8 @@ export class TileManager {
       return null;
     }
 
-    const tileId = `${zoomLevel}-${tileX}-${tileY}`;
+    // Include image ID in tile ID to prevent collisions across multiple images
+    const tileId = `${this.id}_${zoomLevel}-${tileX}-${tileY}`;
 
     // Check if tile already exists in cache or is being loaded
     const cachedTile = this.tileCache.get(tileId);
@@ -215,7 +250,12 @@ export class TileManager {
     };
   }
 
-  // Load tiles in parallel batches with priority ordering
+  // Maximum concurrent tile requests to prevent ERR_INSUFFICIENT_RESOURCES
+  private static readonly MAX_CONCURRENT_REQUESTS = 6;
+  private static globalLoadingCount = 0;
+  private static pendingQueue: Array<{ tile: any; manager: TileManager }> = [];
+
+  // Load tiles in parallel batches with priority ordering and throttling
   loadTilesBatch(tiles: any[]) {
     const tilesToLoad = tiles.filter(tile =>
       !this.tileCache.has(tile.id) && !this.loadingTiles.has(tile.id)
@@ -226,15 +266,44 @@ export class TileManager {
     }
 
     // Sort tiles by priority (closest to viewport center first)
-    // Tiles with lower priority values are closer to the center
     tilesToLoad.sort((a, b) => {
       const aPriority = a.priority !== undefined ? a.priority : Infinity;
       const bPriority = b.priority !== undefined ? b.priority : Infinity;
       return aPriority - bPriority;
     });
 
-    // Load tiles in priority order (still parallel, but browser may prioritize earlier requests)
-    Promise.allSettled(tilesToLoad.map(tile => this.loadTile(tile)));
+    // Add to global pending queue with manager reference
+    for (const tile of tilesToLoad) {
+      if (!this.loadingTiles.has(tile.id)) {
+        TileManager.pendingQueue.push({ tile, manager: this });
+      }
+    }
+
+    // Process queue
+    this.processQueue();
+  }
+
+  // Process the global tile loading queue
+  private processQueue() {
+    while (TileManager.globalLoadingCount < TileManager.MAX_CONCURRENT_REQUESTS &&
+           TileManager.pendingQueue.length > 0) {
+      const item = TileManager.pendingQueue.shift();
+      if (!item) break;
+
+      const { tile, manager } = item;
+
+      // Skip if already loaded or loading
+      if (manager.tileCache.has(tile.id) || manager.loadingTiles.has(tile.id)) {
+        continue;
+      }
+
+      TileManager.globalLoadingCount++;
+      manager.loadTile(tile).finally(() => {
+        TileManager.globalLoadingCount--;
+        // Process next item in queue
+        this.processQueue();
+      });
+    }
   }
 
   // Load tile with caching - optimized for direct bitmap loading
@@ -401,7 +470,8 @@ export class TileManager {
             continue;
           }
 
-          const tileId = `${zoomLevel}-${tileX}-${tileY}`;
+          // Include image ID in tile ID to prevent collisions across multiple images
+          const tileId = `${this.id}_${zoomLevel}-${tileX}-${tileY}`;
           neededTileIds.add(tileId);
         }
       }
@@ -461,19 +531,26 @@ export class TileManager {
     }
 
     // Some tiles are missing - use previous tiles as fallback
+    // This provides visual continuity during zoom transitions
     if (this.lastRenderedTiles.length > 0) {
-      // Combine: new loaded tiles + old tiles for areas not yet loaded
-      const tileMap = new Map(loadedTiles.map(t => [t.id, t]));
+      // Start with all previous tiles (they render behind due to lower z-depth)
+      const tileMap = new Map<string, any>();
 
-      // Add previous tiles that don't overlap with new ones
+      // Add old tiles first - they'll be rendered behind new ones
+      // Filter to only include tiles that are still in cache (not evicted)
       for (const oldTile of this.lastRenderedTiles) {
-        if (!tileMap.has(oldTile.id)) {
+        if (this.tileCache.has(oldTile.id)) {
           tileMap.set(oldTile.id, oldTile);
         }
       }
 
+      // Add/override with new loaded tiles (higher z-depth = rendered on top)
+      for (const newTile of loadedTiles) {
+        tileMap.set(newTile.id, newTile);
+      }
+
       // CRITICAL: Always sort by z-depth for consistent render order
-      // Sort back to front: lower z (farther) renders first, higher z (closer) renders last
+      // Sort back to front: lower z (farther/old) renders first, higher z (closer/new) renders last
       const sortedTiles = Array.from(tileMap.values()).sort((a, b) => a.z - b.z);
 
       // Don't cache this result as it's a fallback mix
@@ -506,10 +583,24 @@ export class TileManager {
       }
 
       const blob = await response.blob();
+
+      // Validate blob before attempting to decode
+      if (blob.size === 0) {
+        throw new Error('Empty response blob');
+      }
+
+      // Check content type - if not an image, the server may have returned an error page
+      const contentType = blob.type;
+      if (contentType && !contentType.startsWith('image/')) {
+        throw new Error(`Unexpected content type: ${contentType}`);
+      }
+
       const loadedBitmap = await createImageBitmap(blob);
 
+      // Include image ID in thumbnail ID to prevent collisions
+      const thumbnailId = `${this.id}_thumbnail`;
       this.thumbnail = {
-        id: 'thumbnail',
+        id: thumbnailId,
         image: loadedBitmap,
         x: 0,
         y: 0,
@@ -521,7 +612,7 @@ export class TileManager {
 
       // Queue GPU upload for thumbnail
       if (this.renderer) {
-        this.queueGPUUpload('thumbnail', loadedBitmap);
+        this.queueGPUUpload(thumbnailId, loadedBitmap);
       }
 
       return this.thumbnail;
@@ -534,6 +625,118 @@ export class TileManager {
   // Get the thumbnail for background rendering
   getThumbnail() {
     return this.thumbnail;
+  }
+
+  /**
+   * Get tiles for world-space rendering (includes world offset)
+   * Used for multi-image unified canvas mode
+   * NOTE: Caller should check isImageVisible() before calling this method
+   */
+  getWorldSpaceTiles(viewport: any): Array<any> {
+    const tiles: any[] = [];
+
+    // ALWAYS add thumbnail as background if available (caller already checked visibility)
+    if (this.thumbnail) {
+      tiles.push({
+        ...this.thumbnail,
+        worldOffsetX: this.image.worldX,
+        worldOffsetY: this.image.worldY
+      });
+    }
+
+    // Use world-space bounds calculation (returns clamped bounds)
+    const localBounds = viewport.getImageBoundsInWorldSpace(this.image);
+
+    // Check if we have a valid intersection for tile calculation
+    // This can happen when viewport partially overlaps the image
+    if (localBounds.right <= localBounds.left || localBounds.bottom <= localBounds.top) {
+      // No valid tile intersection, but thumbnail was already added above
+      return tiles;
+    }
+
+    const zoomLevel = this.getOptimalZoomLevel(viewport.scale);
+    const scaleFactor = this.image.scaleFactors[zoomLevel];
+    const tileSize = this.image.tileSize;
+
+    // Calculate tile boundaries from local bounds (already clamped to image dimensions)
+    const startTileX = Math.floor(localBounds.left / (tileSize * scaleFactor));
+    const startTileY = Math.floor(localBounds.top / (tileSize * scaleFactor));
+    const endTileX = Math.floor(localBounds.right / (tileSize * scaleFactor));
+    const endTileY = Math.floor(localBounds.bottom / (tileSize * scaleFactor));
+
+    // Collect loaded tiles with world offset
+    for (let tileY = startTileY; tileY <= endTileY; tileY++) {
+      for (let tileX = startTileX; tileX <= endTileX; tileX++) {
+        const tileId = `${this.id}_${zoomLevel}-${tileX}-${tileY}`;
+        const cachedTile = this.tileCache.get(tileId);
+
+        if (cachedTile && cachedTile.image) {
+          tiles.push({
+            ...cachedTile,
+            worldOffsetX: this.image.worldX,
+            worldOffsetY: this.image.worldY
+          });
+          this.markTileAccessed(tileId);
+        }
+      }
+    }
+
+    return tiles;
+  }
+
+  /**
+   * Request tiles for world-space viewport
+   * Similar to requestTilesForViewport but uses world-space bounds
+   */
+  requestTilesForWorldViewport(viewport: any): void {
+    // Use world-space bounds calculation (returns clamped bounds)
+    const localBounds = viewport.getImageBoundsInWorldSpace(this.image);
+
+    // Check if image is visible: after clamping, right must be > left and bottom must be > top
+    // Since localBounds is clamped, we check if the clamped area has any size
+    if (localBounds.right <= localBounds.left || localBounds.bottom <= localBounds.top) {
+      return; // Image not visible, skip tile loading
+    }
+
+    const zoomLevel = this.getOptimalZoomLevel(viewport.scale);
+    const scaleFactor = this.image.scaleFactors[zoomLevel];
+    const tileSize = this.image.tileSize;
+
+    // Add margin for preloading (but clamp to image bounds)
+    const preloadMargin = tileSize * scaleFactor;
+
+    // Calculate tile boundaries with preload margin (clamped to valid tile range)
+    const startTileX = Math.max(0, Math.floor((localBounds.left - preloadMargin) / (tileSize * scaleFactor)));
+    const startTileY = Math.max(0, Math.floor((localBounds.top - preloadMargin) / (tileSize * scaleFactor)));
+    // Calculate max tile indices for this image
+    const maxTileX = Math.ceil(this.image.width / (tileSize * scaleFactor)) - 1;
+    const maxTileY = Math.ceil(this.image.height / (tileSize * scaleFactor)) - 1;
+    const endTileX = Math.min(maxTileX, Math.floor((localBounds.right + preloadMargin) / (tileSize * scaleFactor)));
+    const endTileY = Math.min(maxTileY, Math.floor((localBounds.bottom + preloadMargin) / (tileSize * scaleFactor)));
+
+    // Calculate viewport center in local image coordinates for priority
+    const localCenterX = viewport.worldCenterX - this.image.worldX;
+    const localCenterY = viewport.worldCenterY - this.image.worldY;
+    const centerTileX = localCenterX / (tileSize * scaleFactor);
+    const centerTileY = localCenterY / (tileSize * scaleFactor);
+
+    const tiles: any[] = [];
+
+    for (let tileY = startTileY; tileY <= endTileY; tileY++) {
+      for (let tileX = startTileX; tileX <= endTileX; tileX++) {
+        const tile = this.createTile(tileX, tileY, zoomLevel, scaleFactor);
+        if (tile) {
+          // Calculate distance from viewport center for priority
+          const distX = tileX - centerTileX;
+          const distY = tileY - centerTileY;
+          tile.priority = Math.sqrt(distX * distX + distY * distY);
+          tiles.push(tile);
+        }
+      }
+    }
+
+    // Load tiles with priority ordering
+    this.loadTilesBatch(tiles);
   }
 
   // LRU cache management

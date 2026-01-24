@@ -3,7 +3,7 @@
 import { mat4 } from 'gl-matrix';
 import { IIIFImage } from './iiif-image.js';
 import { Viewport } from './iiif-view.js';
-import type { IIIFRenderer, TileRenderData } from './iiif-renderer.js';
+import type { IIIFRenderer, TileRenderData, WorldTileRenderData } from './iiif-renderer.js';
 import ShaderModule from './iiif-shader.wgsl?raw';
 
 // Note: Matrix creation functions moved into WebGPURenderer class
@@ -582,6 +582,124 @@ export class WebGPURenderer implements IIIFRenderer {
         renderPass.end();
         const commandBuffer = commandEncoder.finish();
         this.device.queue.submit([commandBuffer]);
+    }
+
+    /**
+     * Render multiple images in world space (unified canvas mode)
+     * Tiles include world offset information for positioning
+     */
+    renderMultiImage(viewport: Viewport, tiles: WorldTileRenderData[]): void {
+        if (!this.device || !this.context || !this.pipeline || !this.storageBuffer) {
+            return;
+        }
+
+        // Get MVP matrix for world space rendering
+        // In world space mode, we use worldCenterX/Y instead of normalized coordinates
+        const mvpMatrix = this.getWorldSpaceMVPMatrix(viewport);
+
+        // Sort all tiles by z-depth (back to front)
+        const sortedTiles = [...tiles].sort((a, b) => a.z - b.z);
+
+        // Check for storage buffer overflow
+        const maxTiles = this.storageBufferSize / 64;
+        let renderTiles = sortedTiles;
+        if (sortedTiles.length > maxTiles) {
+            console.warn(`Storage buffer overflow: ${sortedTiles.length} tiles, max ${maxTiles}. Truncating.`);
+            renderTiles = sortedTiles.slice(0, maxTiles);
+        }
+
+        // Batch write all tile uniforms to storage buffer
+        const floatsPerTile = 16;
+
+        for (let i = 0; i < renderTiles.length; i++) {
+            const tile = renderTiles[i];
+            const offset = i * floatsPerTile;
+
+            // Create model matrix with world offset applied
+            mat4.identity(this.reusableModelMatrix);
+            mat4.translate(this.reusableModelMatrix, this.reusableModelMatrix, [
+                tile.x + tile.worldOffsetX,  // Apply world offset
+                tile.y + tile.worldOffsetY,
+                tile.z
+            ]);
+            mat4.scale(this.reusableModelMatrix, this.reusableModelMatrix, [
+                tile.width,
+                tile.height,
+                1
+            ]);
+
+            // Pre-multiply: combinedMatrix = MVP × Model
+            mat4.multiply(this.reusableCombinedMatrix, mvpMatrix as mat4, this.reusableModelMatrix);
+
+            // Pack into buffer
+            this.uniformDataBuffer.set(this.reusableCombinedMatrix, offset);
+        }
+
+        // Write to GPU
+        this.device.queue.writeBuffer(
+            this.storageBuffer,
+            0,
+            this.uniformDataBuffer.buffer,
+            0,
+            renderTiles.length * floatsPerTile * 4
+        );
+
+        const commandEncoder = this.device.createCommandEncoder();
+        const textureView = this.context.getCurrentTexture().createView();
+
+        const renderPass = commandEncoder.beginRenderPass({
+            colorAttachments: [{
+                view: textureView,
+                clearValue: { r: 0.1, g: 0.1, b: 0.1, a: 1.0 },
+                loadOp: 'clear',
+                storeOp: 'store',
+            }],
+            depthStencilAttachment: {
+                view: this.depthTexture!.createView(),
+                depthClearValue: 1.0,
+                depthLoadOp: 'clear',
+                depthStoreOp: 'store',
+            }
+        });
+
+        renderPass.setPipeline(this.pipeline);
+
+        // Render each tile
+        for (let i = 0; i < renderTiles.length; i++) {
+            this.renderTile(renderPass, renderTiles[i], i);
+        }
+
+        renderPass.end();
+        const commandBuffer = commandEncoder.finish();
+        this.device.queue.submit([commandBuffer]);
+    }
+
+    /**
+     * Get MVP matrix for world space rendering
+     * Uses absolute world coordinates instead of normalized image coordinates
+     * Uses same approach as single-image mode for consistency
+     */
+    private getWorldSpaceMVPMatrix(viewport: Viewport): Float32Array {
+        // Get perspective matrix
+        const aspectRatio = this.canvas.width / this.canvas.height;
+        const perspectiveMatrix = this.getPerspectiveMatrix(
+            viewport.fov,
+            aspectRatio,
+            viewport.near,
+            viewport.far
+        );
+
+        // Create view matrix using same approach as single-image mode
+        // This ensures consistent behavior between modes
+        const view = mat4.create();
+        mat4.translate(view, view, [-viewport.worldCenterX, viewport.worldCenterY, -viewport.cameraZ]);
+        mat4.scale(view, view, [1, -1, 1]);  // Flip Y for image coordinates
+
+        // Combine projection * view
+        const mvpMatrix = mat4.create();
+        mat4.multiply(mvpMatrix, perspectiveMatrix as mat4, view as mat4);
+
+        return mvpMatrix as Float32Array;
     }
 
     destroyTexture(tileId: string) {

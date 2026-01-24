@@ -1,8 +1,9 @@
 import { IIIFImage } from './iiif-image';
 
 /**
- * Classical camera view representation in image pixel coordinates
- * Useful for camera-like pan/zoom operations
+ * Classical camera view representation supporting both:
+ * - Single image mode: normalized coordinates (0-1) relative to one image
+ * - World space mode: absolute pixel coordinates for multi-image canvas
  */
 
 export class Viewport {
@@ -11,8 +12,13 @@ export class Viewport {
   containerWidth: number;
   containerHeight: number;
 
-  centerX: number; // Normalized (0-1)
-  centerY: number; // Normalized (0-1)
+  centerX: number; // Normalized (0-1) for single image mode
+  centerY: number; // Normalized (0-1) for single image mode
+
+  // World space coordinates (for multi-image unified canvas)
+  worldCenterX: number = 0;  // Absolute pixel X in world space
+  worldCenterY: number = 0;  // Absolute pixel Y in world space
+  useWorldSpace: boolean = false;  // Toggle between normalized and world space modes
 
   // 3D camera properties
   cameraZ: number; // Camera Z position (distance from image plane)
@@ -291,5 +297,174 @@ export class Viewport {
     this.invalidateBoundsCache();
   }
 
+  // ============ WORLD SPACE METHODS ============
 
+  /**
+   * Enable world space mode for multi-image canvas
+   */
+  enableWorldSpace(): void {
+    this.useWorldSpace = true;
+  }
+
+  /**
+   * Disable world space mode (single image mode)
+   */
+  disableWorldSpace(): void {
+    this.useWorldSpace = false;
+  }
+
+  /**
+   * Set the world space center position
+   */
+  setWorldCenter(worldX: number, worldY: number): void {
+    this.worldCenterX = worldX;
+    this.worldCenterY = worldY;
+    this.invalidateBoundsCache();
+  }
+
+  /**
+   * Get the visible bounds in world coordinates
+   * Uses live calculation from cameraZ to ensure accuracy during animations
+   */
+  getWorldBounds(): { left: number; top: number; right: number; bottom: number; width: number; height: number } {
+    // Calculate scale directly from cameraZ to ensure accuracy during zoom animations
+    // (this.scale may be slightly stale due to throttled updateScale() calls)
+    const liveScale = this.containerHeight / (2 * this.cameraZ * this.tanHalfFov);
+    const viewportWidth = this.containerWidth / liveScale;
+    const viewportHeight = this.containerHeight / liveScale;
+
+    return {
+      left: this.worldCenterX - viewportWidth / 2,
+      top: this.worldCenterY - viewportHeight / 2,
+      right: this.worldCenterX + viewportWidth / 2,
+      bottom: this.worldCenterY + viewportHeight / 2,
+      width: viewportWidth,
+      height: viewportHeight
+    };
+  }
+
+  /**
+   * Convert canvas coordinates to world coordinates
+   */
+  canvasToWorldPoint(canvasX: number, canvasY: number): { x: number; y: number } {
+    // Use live scale for accuracy during zoom animations
+    const liveScale = this.containerHeight / (2 * this.cameraZ * this.tanHalfFov);
+    const viewportWidth = this.containerWidth / liveScale;
+    const viewportHeight = this.containerHeight / liveScale;
+
+    const worldX = (this.worldCenterX - viewportWidth / 2) + (canvasX / liveScale);
+    const worldY = (this.worldCenterY - viewportHeight / 2) + (canvasY / liveScale);
+
+    return { x: worldX, y: worldY };
+  }
+
+  /**
+   * Convert world coordinates to canvas coordinates
+   */
+  worldToCanvasPoint(worldX: number, worldY: number): { x: number; y: number } {
+    // Use live scale for accuracy during zoom animations
+    const liveScale = this.containerHeight / (2 * this.cameraZ * this.tanHalfFov);
+    const viewportWidth = this.containerWidth / liveScale;
+    const viewportHeight = this.containerHeight / liveScale;
+
+    const canvasX = (worldX - (this.worldCenterX - viewportWidth / 2)) * liveScale;
+    const canvasY = (worldY - (this.worldCenterY - viewportHeight / 2)) * liveScale;
+
+    return { x: canvasX, y: canvasY };
+  }
+
+  /**
+   * Get image bounds in LOCAL image coordinates (accounting for world position)
+   * This is used by TileManager to know which tiles to load
+   */
+  getImageBoundsInWorldSpace(image: IIIFImage): { left: number; top: number; right: number; bottom: number; width: number; height: number } {
+    const worldBounds = this.getWorldBounds();
+
+    // Convert world bounds to image-local coordinates
+    const localLeft = worldBounds.left - image.worldX;
+    const localTop = worldBounds.top - image.worldY;
+    const localRight = worldBounds.right - image.worldX;
+    const localBottom = worldBounds.bottom - image.worldY;
+
+    // Clamp to image dimensions
+    return {
+      left: Math.max(0, localLeft),
+      top: Math.max(0, localTop),
+      right: Math.min(image.width, localRight),
+      bottom: Math.min(image.height, localBottom),
+      width: worldBounds.width,
+      height: worldBounds.height
+    };
+  }
+
+  /**
+   * Check if an image is visible in the current viewport (world space)
+   */
+  isImageVisible(image: IIIFImage): boolean {
+    const worldBounds = this.getWorldBounds();
+    const imageBounds = image.worldBounds;
+
+    // Check for intersection
+    return !(imageBounds.right < worldBounds.left ||
+             imageBounds.left > worldBounds.right ||
+             imageBounds.bottom < worldBounds.top ||
+             imageBounds.top > worldBounds.bottom);
+  }
+
+  /**
+   * Fit the viewport to show all images within given bounds
+   */
+  fitToBounds(minX: number, minY: number, maxX: number, maxY: number, padding: number = 50): void {
+    const boundsWidth = maxX - minX + padding * 2;
+    const boundsHeight = maxY - minY + padding * 2;
+
+    // Calculate scale to fit bounds
+    const scaleX = this.containerWidth / boundsWidth;
+    const scaleY = this.containerHeight / boundsHeight;
+    const targetScale = Math.min(scaleX, scaleY);
+
+    // Calculate cameraZ from target scale
+    this.cameraZ = this.containerHeight / (2 * targetScale * this.tanHalfFov);
+
+    // Set adaptive zoom limits based on content size
+    // For multi-image viewing, allow much more zoom-in to see details
+    // maxZ: zoom out to see 5x more than fit-all view
+    this.maxZ = this.cameraZ * 5;
+
+    // minZ: Calculate based on target pixel-level zoom
+    // We want to be able to zoom in until ~1:1 pixel viewing
+    // At 1:1, scale = 1 (1 screen pixel = 1 image pixel)
+    // minZ at scale=1: containerHeight / (2 * 1 * tanHalfFov)
+    const zoomOneToOneZ = this.containerHeight / (2 * 1 * this.tanHalfFov);
+
+    // Allow zooming to 2x beyond 1:1 (200% zoom)
+    this.minZ = zoomOneToOneZ * 0.5;
+
+    // But don't allow minZ to be larger than current camera Z (would prevent any zoom-in)
+    this.minZ = Math.min(this.minZ, this.cameraZ * 0.01);
+
+    this.near = this.minZ * 0.01;
+    this.far = this.maxZ * 2;
+
+    this.updateScale();
+
+    // Center on the bounds
+    this.worldCenterX = (minX + maxX) / 2;
+    this.worldCenterY = (minY + maxY) / 2;
+  }
+
+  /**
+   * Set center from world point (for world-space panning)
+   */
+  setCenterFromWorldPoint(worldX: number, worldY: number, canvasX: number, canvasY: number): void {
+    // Use live scale for accuracy during zoom animations
+    const liveScale = this.containerHeight / (2 * this.cameraZ * this.tanHalfFov);
+    const viewportWidth = this.containerWidth / liveScale;
+    const viewportHeight = this.containerHeight / liveScale;
+
+    this.worldCenterX = worldX - (canvasX / liveScale) + (viewportWidth / 2);
+    this.worldCenterY = worldY - (canvasY / liveScale) + (viewportHeight / 2);
+
+    this.invalidateBoundsCache();
+  }
 }

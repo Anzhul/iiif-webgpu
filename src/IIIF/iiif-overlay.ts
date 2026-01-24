@@ -67,6 +67,10 @@ export class IIIFOverlayManager {
     overlay.element.style.transformOrigin = 'top left';
     overlay.element.style.pointerEvents = 'auto'; // Allow individual overlays to receive events
 
+    // GPU acceleration and anti-jitter properties
+    overlay.element.style.willChange = 'transform';
+    overlay.element.style.backfaceVisibility = 'hidden';
+
     // Add to DOM if not already present
     if (!overlay.element.parentElement) {
       this.container.appendChild(overlay.element);
@@ -133,14 +137,25 @@ export class IIIFOverlayManager {
       image
     );
 
-    // Calculate scale
-    const scale = overlay.scaleWithZoom !== false ? this.viewport.scale : 1;
+    // Round position to avoid subpixel rendering issues that cause text wavering
+    const roundedX = Math.round(position.x * 100) / 100;
+    const roundedY = Math.round(position.y * 100) / 100;
 
-    // Apply transform with scale (this scales everything including text)
     overlay.element.style.display = 'block';
-    overlay.element.style.transform = `translate(${position.x}px, ${position.y}px) scale(${scale})`;
-    overlay.element.style.width = `${overlay.imageWidth}px`;
-    overlay.element.style.height = `${overlay.imageHeight}px`;
+
+    if (overlay.scaleWithZoom !== false) {
+      // Scale with zoom: apply CSS scale transform (text/borders scale proportionally)
+      const roundedScale = Math.round(this.viewport.scale * 10000) / 10000;
+      overlay.element.style.transform = `translate3d(${roundedX}px, ${roundedY}px, 0) scale(${roundedScale})`;
+      overlay.element.style.width = `${overlay.imageWidth}px`;
+      overlay.element.style.height = `${overlay.imageHeight}px`;
+    } else {
+      // Fixed: only translate position, keep original size (no scaling)
+      overlay.element.style.transform = `translate3d(${roundedX}px, ${roundedY}px, 0)`;
+      // Use the original pixel dimensions without scaling
+      overlay.element.style.width = `${overlay.imageWidth}px`;
+      overlay.element.style.height = `${overlay.imageHeight}px`;
+    }
   }
 
   /**

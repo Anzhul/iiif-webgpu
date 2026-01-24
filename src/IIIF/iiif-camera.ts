@@ -78,6 +78,9 @@ interface InteractiveState {
     // Anchor point approach: track which image point should stay under cursor
     anchorImageX?: number;  // The image point (in image pixels) we're anchored to
     anchorImageY?: number;
+    // World space anchor (for multi-image mode)
+    anchorWorldX?: number;  // The world point we're anchored to
+    anchorWorldY?: number;
     targetCanvasX: number;  // Where the anchor should appear (in canvas pixels)
     targetCanvasY: number;
     currentCanvasX: number; // Smoothly interpolated position
@@ -86,6 +89,8 @@ interface InteractiveState {
     targetCameraZ: number;  // Target camera Z position
     currentCameraZ: number; // Smoothly interpolated Z position
     imageId?: string;
+    // World space mode flag
+    useWorldSpace: boolean;
 }
 
 export class Camera {
@@ -101,7 +106,8 @@ export class Camera {
         currentCanvasX: 0,
         currentCanvasY: 0,
         targetCameraZ: 0,
-        currentCameraZ: 0
+        currentCameraZ: 0,
+        useWorldSpace: false
     };
     private lastZoomTime: number = 0;
     private isIdle: boolean = true; // Track idle state for performance
@@ -136,7 +142,7 @@ export class Camera {
     private readonly CONFIG = {
         // Tile request strategy - Hybrid approach (OpenSeadragon-inspired)
         TILE_IMMEDIATE_THROTTLE: 200,   // Max 5 immediate requests/sec for responsiveness
-        TILE_DEBOUNCE_DELAY: 50,        // Wait 50ms after movement stops for final request
+        TILE_DEBOUNCE_DELAY: 150,       // Wait 150ms after movement stops for final request
 
         // Zoom throttling (ms between wheel events)
         ZOOM_THROTTLE: 80,
@@ -432,12 +438,16 @@ export class Camera {
      * This reduces tile requests from 40/sec to ~6/sec during continuous pan
      * while maintaining excellent responsiveness
      */
-    private requestTilesHybrid(imageId: string, now: number): void {
+    private requestTilesHybrid(imageId: string | undefined, now: number): void {
         const timeSinceImmediate = now - this.lastImmediateRequestTime;
 
         // Immediate request for responsiveness (but throttled to 5/sec max)
         if (timeSinceImmediate > this.CONFIG.TILE_IMMEDIATE_THROTTLE) {
-            this.requestTilesImmediate(imageId);
+            if (this.interactiveState.useWorldSpace) {
+                this.requestTilesWorldSpace();
+            } else if (imageId) {
+                this.requestTilesImmediate(imageId);
+            }
             this.lastImmediateRequestTime = now;
         }
 
@@ -450,8 +460,26 @@ export class Camera {
         // Schedule new request after movement stops
         this.tileUpdateTimer = window.setTimeout(() => {
             this.tileUpdateTimer = null;
-            this.requestTilesImmediate(imageId);
+            if (this.interactiveState.useWorldSpace) {
+                this.requestTilesWorldSpace();
+            } else if (imageId) {
+                this.requestTilesImmediate(imageId);
+            }
         }, this.CONFIG.TILE_DEBOUNCE_DELAY);
+    }
+
+    /**
+     * Request tiles for all visible images in world space mode
+     */
+    private requestTilesWorldSpace(): void {
+        for (const [imageId, image] of this.images) {
+            if (this.viewport.isImageVisible(image)) {
+                const tileManager = this.tiles.get(imageId);
+                if (tileManager) {
+                    tileManager.requestTilesForWorldViewport(this.viewport);
+                }
+            }
+        }
     }
 
     /**
@@ -469,6 +497,9 @@ export class Camera {
                 this.applyZoomAnchor(animation, image);
             }
         }
+
+        // Request tiles for final position after animation completes
+        this.requestTilesImmediate(animation.imageId);
 
         this.stopAnimation();
     }
@@ -607,6 +638,24 @@ export class Camera {
     private applyInteractiveTransform(): boolean {
         const state = this.interactiveState;
 
+        // World space mode - use world anchor point
+        if (state.useWorldSpace) {
+            if (state.anchorWorldX === undefined || state.anchorWorldY === undefined) {
+                return false;
+            }
+
+            // Set viewport center so anchor world point appears at current canvas position
+            this.viewport.setCenterFromWorldPoint(
+                state.anchorWorldX,
+                state.anchorWorldY,
+                state.currentCanvasX,
+                state.currentCanvasY
+            );
+
+            return true;
+        }
+
+        // Single image mode - use image anchor point
         if (state.anchorImageX === undefined ||
             state.anchorImageY === undefined ||
             !state.imageId) {
@@ -656,6 +705,11 @@ export class Camera {
         // Early exit if no animations (and set idle state)
         if (!hasPanAnimation && !hasZoomAnimation) {
             this.isIdle = true;  // Go to sleep until next interaction
+
+            // IMPORTANT: Request final tiles when animation settles to ensure correct tiles are loaded
+            // This fires AFTER the trailing animation completes, guaranteeing we load tiles for the final position
+            this.requestTilesOnSettle();
+
             this.updateResult.needsUpdate = false;
             this.updateResult.imageId = undefined;
             return this.updateResult;
@@ -675,12 +729,13 @@ export class Camera {
         const needsUpdate = this.applyInteractiveTransform();
 
         // Request tiles if movement is significant (throttled)
-        if (needsUpdate && state.imageId) {
+        if (needsUpdate) {
             const isSignificant =
                 deltas.panDistanceSquared > (config.PAN_SIGNIFICANT_THRESHOLD ** 2) ||
                 deltas.zoomAbs > config.ZOOM_SIGNIFICANT_THRESHOLD;
 
             if (isSignificant) {
+                // World space mode doesn't need imageId, single image mode does
                 this.requestTilesHybrid(state.imageId, performance.now());
             }
         }
@@ -689,6 +744,31 @@ export class Camera {
         this.updateResult.needsUpdate = needsUpdate;
         this.updateResult.imageId = needsUpdate ? state.imageId : undefined;
         return this.updateResult;
+    }
+
+    /**
+     * Request tiles when animation settles to idle
+     * This ensures tiles are loaded for the exact final viewport position
+     */
+    private requestTilesOnSettle(): void {
+        // Clear any pending debounced requests
+        if (this.tileUpdateTimer !== null) {
+            clearTimeout(this.tileUpdateTimer);
+            this.tileUpdateTimer = null;
+        }
+
+        // IMPORTANT: Ensure viewport.scale is up-to-date before requesting tiles
+        // During zoom animation, scale updates are throttled for performance,
+        // but we need the accurate scale for correct tile level selection
+        this.viewport.updateScale();
+        this.lastScaleUpdateZ = this.viewport.cameraZ;
+
+        // Request tiles for final position immediately
+        if (this.interactiveState.useWorldSpace) {
+            this.requestTilesWorldSpace();
+        } else if (this.interactiveState.imageId) {
+            this.requestTilesImmediate(this.interactiveState.imageId);
+        }
     }
 
     /**
@@ -742,11 +822,111 @@ export class Camera {
         // The updateInteractivePan loop will stop automatically when caught up
 
         // Request tiles for final position
-        if (this.interactiveState.imageId) {
+        if (this.interactiveState.useWorldSpace) {
+            // World space mode - request tiles for all visible images only
+            this.requestTilesWorldSpace();
+        } else if (this.interactiveState.imageId) {
             const tiles = this.tiles.get(this.interactiveState.imageId);
             if (tiles) {
                 tiles.requestTilesForViewport(this.viewport);
             }
+        }
+    }
+
+    // ============ WORLD SPACE INTERACTIVE METHODS ============
+
+    /**
+     * Start an interactive pan in world space mode (mouse down)
+     */
+    startWorldSpacePan(canvasX: number, canvasY: number) {
+        // Wake up from idle state
+        this.isIdle = false;
+
+        this.interactiveState.isDragging = true;
+        this.interactiveState.useWorldSpace = true;
+
+        // Convert canvas position to world coordinates to establish anchor point
+        const worldPoint = this.viewport.canvasToWorldPoint(canvasX, canvasY);
+        this.interactiveState.anchorWorldX = worldPoint.x;
+        this.interactiveState.anchorWorldY = worldPoint.y;
+
+        // Clear image-specific anchor (not used in world space mode)
+        this.interactiveState.anchorImageX = undefined;
+        this.interactiveState.anchorImageY = undefined;
+        this.interactiveState.imageId = undefined;
+
+        // Initialize both target and current to the starting position
+        this.interactiveState.targetCanvasX = canvasX;
+        this.interactiveState.targetCanvasY = canvasY;
+        this.interactiveState.currentCanvasX = canvasX;
+        this.interactiveState.currentCanvasY = canvasY;
+
+        // Initialize zoom state to current viewport state
+        this.interactiveState.targetCameraZ = this.viewport.cameraZ;
+        this.interactiveState.currentCameraZ = this.viewport.cameraZ;
+        this.lastScaleUpdateZ = this.viewport.cameraZ;
+    }
+
+    /**
+     * Handle wheel event for zooming in world space mode
+     */
+    handleWorldSpaceWheel(event: WheelEvent, canvasX: number, canvasY: number) {
+        event.preventDefault();
+
+        // Wake up from idle state
+        this.isIdle = false;
+
+        // Throttle zoom events for smoother experience
+        const now = performance.now();
+        if (now - this.lastZoomTime < this.CONFIG.ZOOM_THROTTLE) {
+            return;
+        }
+        this.lastZoomTime = now;
+
+        // Zoom factor for each scroll increment
+        const zoomFactor = 1.5;
+        const newScale = event.deltaY < 0 ? this.viewport.scale * zoomFactor : this.viewport.scale / zoomFactor;
+
+        // Clamp to valid scale range
+        const clampedScale = Math.max(
+            this.viewport.minScale,
+            Math.min(this.viewport.maxScale, newScale)
+        );
+
+        // Convert scale to camera Z
+        const targetCameraZ = (this.viewport.containerHeight / clampedScale) / (2 * this.viewport.getTanHalfFov());
+
+        // Clamp to valid Z range
+        const clampedCameraZ = Math.max(
+            this.viewport.minZ,
+            Math.min(this.viewport.maxZ, targetCameraZ)
+        );
+
+        // Update target zoom for trailing animation
+        this.interactiveState.targetCameraZ = clampedCameraZ;
+        this.interactiveState.useWorldSpace = true;
+
+        // Check if this is the first interactive action
+        const isFirstInteraction = this.interactiveState.anchorWorldX === undefined;
+
+        // On first interaction, initialize current Z to viewport Z to prevent jump
+        if (isFirstInteraction) {
+            this.interactiveState.currentCameraZ = this.viewport.cameraZ;
+        }
+
+        // Get the world point under the current cursor position
+        const worldPoint = this.viewport.canvasToWorldPoint(canvasX, canvasY);
+
+        // Update anchor to keep this world point under the cursor as we zoom
+        this.interactiveState.anchorWorldX = worldPoint.x;
+        this.interactiveState.anchorWorldY = worldPoint.y;
+        this.interactiveState.targetCanvasX = canvasX;
+        this.interactiveState.targetCanvasY = canvasY;
+
+        // On first interaction or when not dragging, snap current position to avoid jump
+        if (isFirstInteraction || !this.interactiveState.isDragging) {
+            this.interactiveState.currentCanvasX = canvasX;
+            this.interactiveState.currentCanvasY = canvasY;
         }
     }
 
