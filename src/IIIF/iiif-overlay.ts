@@ -1,24 +1,21 @@
-import { IIIFImage } from './iiif-image';
 import { Viewport } from './iiif-view';
 
 /**
- * Represents an HTML overlay element positioned over an IIIF image
+ * Represents an HTML overlay element positioned in world coordinates
  */
 export interface OverlayElement {
   /** Unique identifier for this overlay */
   id: string;
   /** The HTML element to position */
   element: HTMLElement;
-  /** X position in image pixel coordinates */
-  imageX: number;
-  /** Y position in image pixel coordinates */
-  imageY: number;
-  /** Width in image pixel coordinates */
-  imageWidth: number;
-  /** Height in image pixel coordinates */
-  imageHeight: number;
-  /** Which image this overlay belongs to */
-  imageId: string;
+  /** X position in world coordinates */
+  worldX: number;
+  /** Y position in world coordinates */
+  worldY: number;
+  /** Width in world coordinates */
+  worldWidth: number;
+  /** Height in world coordinates */
+  worldHeight: number;
   /** Whether to scale the element with zoom (default: true) */
   scaleWithZoom?: boolean;
 }
@@ -31,22 +28,18 @@ export class IIIFOverlayManager {
   private overlays: Map<string, OverlayElement> = new Map();
   private container: HTMLElement;
   private viewport: Viewport;
-  private images: Map<string, IIIFImage>;
 
   /**
    * Creates a new overlay manager
    * @param container The container element to add overlays to (should be same size as canvas)
    * @param viewport The viewport instance from the IIIF viewer
-   * @param images Map of image IDs to IIIFImage instances
    */
   constructor(
     container: HTMLElement,
-    viewport: Viewport,
-    images: Map<string, IIIFImage>
+    viewport: Viewport
   ) {
     this.container = container;
     this.viewport = viewport;
-    this.images = images;
 
     // Ensure container is positioned
     if (getComputedStyle(container).position === 'static') {
@@ -58,14 +51,14 @@ export class IIIFOverlayManager {
   }
 
   /**
-   * Adds an overlay element at the specified image coordinates
+   * Adds an overlay element at the specified world coordinates
    * @param overlay The overlay configuration
    */
   addOverlay(overlay: OverlayElement): void {
     // Set up the element styling
     overlay.element.style.position = 'absolute';
     overlay.element.style.transformOrigin = 'top left';
-    overlay.element.style.pointerEvents = 'auto'; // Allow individual overlays to receive events
+    overlay.element.style.pointerEvents = 'auto';
 
     // Add to DOM if not already present
     if (!overlay.element.parentElement) {
@@ -101,46 +94,35 @@ export class IIIFOverlayManager {
     const overlay = this.overlays.get(id);
     if (!overlay) return;
 
-    const image = this.images.get(overlay.imageId);
-    if (!image) {
-      // Hide overlay if image not found
-      overlay.element.style.display = 'none';
-      return;
-    }
-
-    // Get viewport bounds in image space
-    const bounds = this.viewport.getImageBounds(image);
+    // Get viewport bounds in world space
+    const bounds = this.viewport.getWorldBounds();
 
     // Check if overlay is visible
-    const overlayRight = overlay.imageX + overlay.imageWidth;
-    const overlayBottom = overlay.imageY + overlay.imageHeight;
+    const overlayRight = overlay.worldX + overlay.worldWidth;
+    const overlayBottom = overlay.worldY + overlay.worldHeight;
 
     if (
       overlayRight < bounds.left ||
-      overlay.imageX > bounds.right ||
+      overlay.worldX > bounds.right ||
       overlayBottom < bounds.top ||
-      overlay.imageY > bounds.bottom
+      overlay.worldY > bounds.bottom
     ) {
       // Overlay is off-screen
       overlay.element.style.display = 'none';
       return;
     }
 
-    // Convert image coordinates to canvas pixel coordinates
-    const position = this.imageToCanvasCoords(
-      overlay.imageX,
-      overlay.imageY,
-      image
-    );
+    // Convert world coordinates to canvas pixel coordinates
+    const position = this.worldToCanvasCoords(overlay.worldX, overlay.worldY);
 
-    // Calculate scale
+    // Calculate scale: viewport.scale is CSS pixels per world unit
     const scale = overlay.scaleWithZoom !== false ? this.viewport.scale : 1;
 
-    // Apply transform with scale (this scales everything including text)
+    // Apply transform with scale
     overlay.element.style.display = 'block';
     overlay.element.style.transform = `translate(${position.x}px, ${position.y}px) scale(${scale})`;
-    overlay.element.style.width = `${overlay.imageWidth}px`;
-    overlay.element.style.height = `${overlay.imageHeight}px`;
+    overlay.element.style.width = `${overlay.worldWidth}px`;
+    overlay.element.style.height = `${overlay.worldHeight}px`;
   }
 
   /**
@@ -153,38 +135,28 @@ export class IIIFOverlayManager {
   }
 
   /**
-   * Converts image pixel coordinates to canvas pixel coordinates
+   * Converts world coordinates to canvas pixel coordinates
    */
-  private imageToCanvasCoords(
-    imageX: number,
-    imageY: number,
-    image: IIIFImage
+  private worldToCanvasCoords(
+    worldX: number,
+    worldY: number
   ): { x: number; y: number } {
-    const scaledWidth = this.viewport.containerWidth / this.viewport.scale;
-    const scaledHeight = this.viewport.containerHeight / this.viewport.scale;
+    const bounds = this.viewport.getWorldBounds();
 
-    const viewportMinX = (this.viewport.centerX * image.width) - (scaledWidth / 2);
-    const viewportMinY = (this.viewport.centerY * image.height) - (scaledHeight / 2);
-
-    const canvasX = (imageX - viewportMinX) * this.viewport.scale;
-    const canvasY = (imageY - viewportMinY) * this.viewport.scale;
+    const canvasX = (worldX - bounds.left) * this.viewport.scale;
+    const canvasY = (worldY - bounds.top) * this.viewport.scale;
 
     return { x: canvasX, y: canvasY };
   }
 
   /**
-   * Converts canvas pixel coordinates to image pixel coordinates
+   * Converts canvas pixel coordinates to world coordinates
    */
-  canvasToImageCoords(
+  canvasToWorldCoords(
     canvasX: number,
-    canvasY: number,
-    imageId: string
-  ): { x: number; y: number } | null {
-    const image = this.images.get(imageId);
-    if (!image) return null;
-
-    const point = this.viewport.canvasToImagePoint(canvasX, canvasY, image);
-    return { x: point.x, y: point.y };
+    canvasY: number
+  ): { x: number; y: number } {
+    return this.viewport.canvasToWorldPoint(canvasX, canvasY);
   }
 
   /**
@@ -214,33 +186,33 @@ export class IIIFOverlayManager {
   }
 
   /**
-   * Updates an overlay's image position (useful for draggable overlays)
+   * Updates an overlay's world position (useful for draggable overlays)
    */
   updateOverlayPosition(
     id: string,
-    imageX: number,
-    imageY: number
+    worldX: number,
+    worldY: number
   ): void {
     const overlay = this.overlays.get(id);
     if (overlay) {
-      overlay.imageX = imageX;
-      overlay.imageY = imageY;
+      overlay.worldX = worldX;
+      overlay.worldY = worldY;
       this.updateOverlay(id);
     }
   }
 
   /**
-   * Updates an overlay's size in image coordinates
+   * Updates an overlay's size in world coordinates
    */
   updateOverlaySize(
     id: string,
-    imageWidth: number,
-    imageHeight: number
+    worldWidth: number,
+    worldHeight: number
   ): void {
     const overlay = this.overlays.get(id);
     if (overlay) {
-      overlay.imageWidth = imageWidth;
-      overlay.imageHeight = imageHeight;
+      overlay.worldWidth = worldWidth;
+      overlay.worldHeight = worldHeight;
       this.updateOverlay(id);
     }
   }

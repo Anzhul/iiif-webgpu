@@ -1,6 +1,5 @@
 import { Viewport } from './iiif-view';
-import { IIIFImage } from './iiif-image';
-import { TileManager } from './iiif-tile';
+import { World } from './iiif-world';
 import type { EasingFunction } from './easing';
 import { easeOutQuart, interpolate } from './easing';
 
@@ -15,12 +14,11 @@ interface CameraAnimation {
     targetCenterY: number;
     targetCameraZ: number;
     easing: EasingFunction;
-    imageId: string;
     // For zoom animations - anchor point to keep fixed
     zoomAnchorCanvasX?: number;
     zoomAnchorCanvasY?: number;
-    zoomAnchorImageX?: number;
-    zoomAnchorImageY?: number;
+    zoomAnchorWorldX?: number;
+    zoomAnchorWorldY?: number;
     onUpdate?: () => void;
     onComplete?: () => void;
 }
@@ -52,8 +50,8 @@ class ZoomAnimationStrategy implements AnimationStrategy {
 
     shouldConstrainCenter(animation: CameraAnimation): boolean {
         // Don't constrain if anchor point is set (anchor takes priority)
-        return !(animation.zoomAnchorImageX !== undefined &&
-                 animation.zoomAnchorImageY !== undefined &&
+        return !(animation.zoomAnchorWorldX !== undefined &&
+                 animation.zoomAnchorWorldY !== undefined &&
                  animation.zoomAnchorCanvasX !== undefined &&
                  animation.zoomAnchorCanvasY !== undefined);
     }
@@ -75,9 +73,9 @@ class ToAnimationStrategy implements AnimationStrategy {
 
 interface InteractiveState {
     isDragging: boolean;
-    // Anchor point approach: track which image point should stay under cursor
-    anchorImageX?: number;  // The image point (in image pixels) we're anchored to
-    anchorImageY?: number;
+    // Anchor point approach: track which world point should stay under cursor
+    anchorWorldX?: number;  // The world point we're anchored to
+    anchorWorldY?: number;
     targetCanvasX: number;  // Where the anchor should appear (in canvas pixels)
     targetCanvasY: number;
     currentCanvasX: number; // Smoothly interpolated position
@@ -85,13 +83,11 @@ interface InteractiveState {
     // Zoom state with trailing
     targetCameraZ: number;  // Target camera Z position
     currentCameraZ: number; // Smoothly interpolated Z position
-    imageId?: string;
 }
 
 export class Camera {
     viewport: Viewport;
-    tiles: Map<string, TileManager>;
-    images: Map<string, IIIFImage>;
+    world: World;
     private currentAnimation?: CameraAnimation;
     private animationFrameId?: number;
     private interactiveState: InteractiveState = {
@@ -128,8 +124,7 @@ export class Camera {
     };
 
     private readonly updateResult = {
-        needsUpdate: false,
-        imageId: undefined as string | undefined
+        needsUpdate: false
     };
 
     // Configuration constants
@@ -149,7 +144,7 @@ export class Camera {
             // Pan animation thresholds (pixels)
             PAN_ANIMATION_THRESHOLD: 0.05,        // Minimum distance to continue animation
             PAN_ANIMATION_THRESHOLD_SQ: 0.0025,   // Squared version for optimization
-            PAN_SIGNIFICANT_THRESHOLD: 1.0,       // Minimum distance to request tiles
+            PAN_SIGNIFICANT_THRESHOLD: 1.0,        // Minimum distance to request tiles
 
             // Zoom animation thresholds (camera Z units)
             ZOOM_ANIMATION_THRESHOLD: 0.5,        // Minimum delta to continue animation
@@ -158,43 +153,30 @@ export class Camera {
         }
     } as const;
 
-    constructor(viewport: Viewport, images: Map<string, IIIFImage>, tiles: Map<string, TileManager>) {
+    constructor(viewport: Viewport, world: World) {
         this.viewport = viewport;
-        this.tiles = tiles;
-        this.images = images;
+        this.world = world;
     }
 
     /**
-     * Animate camera to a specific position in image coordinates
-     * @param imageX - X coordinate in image pixel space
-     * @param imageY - Y coordinate in image pixel space
-     * @param imageZ - Target camera Z position (distance from image plane)
-     * @param imageId - ID of the image to navigate within
+     * Animate camera to a specific position in world coordinates
+     * @param worldX - X coordinate in world space
+     * @param worldY - Y coordinate in world space
+     * @param cameraZ - Target camera Z position
      * @param duration - Animation duration in milliseconds
      * @param easing - Easing function for the animation
      */
     to(
-        imageX: number,
-        imageY: number,
-        imageZ: number,
-        imageId: string,
+        worldX: number,
+        worldY: number,
+        cameraZ: number,
         duration = 500,
         easing: EasingFunction = easeOutQuart
     ) {
-        const image = this.images.get(imageId);
-        if (!image) {
-            console.warn(`Image with ID ${imageId} not found`);
-            return;
-        }
-
-        // Convert image pixel coordinates to normalized coordinates (0-1)
-        const targetCenterX = imageX / image.width;
-        const targetCenterY = imageY / image.height;
-
         // Clamp camera Z to valid range
         const targetCameraZ = Math.max(
             this.viewport.minZ,
-            Math.min(this.viewport.maxZ, imageZ)
+            Math.min(this.viewport.maxZ, cameraZ)
         );
 
         this.startAnimation({
@@ -204,42 +186,28 @@ export class Camera {
             startCenterX: this.viewport.centerX,
             startCenterY: this.viewport.centerY,
             startCameraZ: this.viewport.cameraZ,
-            targetCenterX,
-            targetCenterY,
+            targetCenterX: worldX,
+            targetCenterY: worldY,
             targetCameraZ,
-            easing,
-            imageId
+            easing
         });
     }
 
     /**
-     * Pan the camera by delta amounts (in image pixels)
-     * @param deltaX - X delta in image pixel space
-     * @param deltaY - Y delta in image pixel space
-     * @param imageId - ID of the image to pan within
+     * Pan the camera by delta amounts in world coordinates
+     * @param deltaX - X delta in world units
+     * @param deltaY - Y delta in world units
      * @param duration - Animation duration in milliseconds
      * @param easing - Easing function for the animation
      */
     pan(
         deltaX: number,
         deltaY: number,
-        imageId: string,
         duration = 500,
         easing: EasingFunction = easeOutQuart
     ) {
-        const image = this.images.get(imageId);
-        if (!image) {
-            console.warn(`Image with ID ${imageId} not found`);
-            return;
-        }
-
-        // Convert delta to normalized coordinates
-        const deltaNormX = deltaX / image.width;
-        const deltaNormY = deltaY / image.height;
-
-        // Calculate target position
-        const targetCenterX = this.viewport.centerX + deltaNormX;
-        const targetCenterY = this.viewport.centerY + deltaNormY;
+        const targetCenterX = this.viewport.centerX + deltaX;
+        const targetCenterY = this.viewport.centerY + deltaY;
 
         this.startAnimation({
             type: 'pan',
@@ -250,16 +218,14 @@ export class Camera {
             startCameraZ: this.viewport.cameraZ,
             targetCenterX,
             targetCenterY,
-            targetCameraZ: this.viewport.cameraZ, // Keep Z unchanged for pan
-            easing,
-            imageId
+            targetCameraZ: this.viewport.cameraZ,
+            easing
         });
     }
 
     /**
      * Zoom the camera to a target scale
-     * @param targetScale - Target scale value (like ViewportController.zoom)
-     * @param imageId - ID of the image to zoom within
+     * @param targetScale - Target scale value
      * @param duration - Animation duration in milliseconds
      * @param easing - Easing function for the animation
      * @param anchorCanvasX - Optional canvas X coordinate to keep fixed during zoom
@@ -267,18 +233,11 @@ export class Camera {
      */
     zoom(
         targetScale: number,
-        imageId: string,
         duration = 500,
         easing: EasingFunction = easeOutQuart,
         anchorCanvasX?: number,
         anchorCanvasY?: number
     ) {
-        const image = this.images.get(imageId);
-        if (!image) {
-            console.warn(`Image with ID ${imageId} not found`);
-            return;
-        }
-
         // Clamp target scale to valid range
         targetScale = Math.max(
             this.viewport.minScale,
@@ -286,9 +245,6 @@ export class Camera {
         );
 
         // Convert target scale to camera Z position
-        // scale = containerHeight / visibleHeight
-        // visibleHeight = 2 * cameraZ * tan(fov/2)
-        // Therefore: cameraZ = (containerHeight / scale) / (2 * tan(fov/2))
         const targetCameraZ = (this.viewport.containerHeight / targetScale) / (2 * this.viewport.getTanHalfFov());
 
         // Clamp to valid Z range
@@ -297,14 +253,14 @@ export class Camera {
             Math.min(this.viewport.maxZ, targetCameraZ)
         );
 
-        // If anchor point is provided, calculate the image point to keep fixed
-        let zoomAnchorImageX: number | undefined;
-        let zoomAnchorImageY: number | undefined;
+        // If anchor point is provided, calculate the world point to keep fixed
+        let zoomAnchorWorldX: number | undefined;
+        let zoomAnchorWorldY: number | undefined;
 
         if (anchorCanvasX !== undefined && anchorCanvasY !== undefined) {
-            const anchorPoint = this.viewport.canvasToImagePoint(anchorCanvasX, anchorCanvasY, image);
-            zoomAnchorImageX = anchorPoint.x;
-            zoomAnchorImageY = anchorPoint.y;
+            const anchorPoint = this.viewport.canvasToWorldPoint(anchorCanvasX, anchorCanvasY);
+            zoomAnchorWorldX = anchorPoint.x;
+            zoomAnchorWorldY = anchorPoint.y;
         }
 
         this.startAnimation({
@@ -314,33 +270,30 @@ export class Camera {
             startCenterX: this.viewport.centerX,
             startCenterY: this.viewport.centerY,
             startCameraZ: this.viewport.cameraZ,
-            targetCenterX: this.viewport.centerX, // Will be adjusted during animation if anchor point is set
+            targetCenterX: this.viewport.centerX,
             targetCenterY: this.viewport.centerY,
             targetCameraZ: clampedCameraZ,
             zoomAnchorCanvasX: anchorCanvasX,
             zoomAnchorCanvasY: anchorCanvasY,
-            zoomAnchorImageX,
-            zoomAnchorImageY,
-            easing,
-            imageId
+            zoomAnchorWorldX,
+            zoomAnchorWorldY,
+            easing
         });
     }
 
     /**
      * Zoom by a factor (convenience method)
      * @param factor - Zoom factor (>1 = zoom in, <1 = zoom out)
-     * @param imageId - ID of the image to zoom within
      * @param duration - Animation duration in milliseconds
      * @param easing - Easing function for the animation
      */
     zoomByFactor(
         factor: number,
-        imageId: string,
         duration = 500,
         easing: EasingFunction = easeOutQuart
     ) {
         const targetScale = this.viewport.scale * factor;
-        this.zoom(targetScale, imageId, duration, easing);
+        this.zoom(targetScale, duration, easing);
     }
 
     /**
@@ -391,8 +344,8 @@ export class Camera {
      * Check if animation has anchor point defined
      */
     private hasAnchorPoint(animation: CameraAnimation): boolean {
-        return animation.zoomAnchorImageX !== undefined &&
-               animation.zoomAnchorImageY !== undefined &&
+        return animation.zoomAnchorWorldX !== undefined &&
+               animation.zoomAnchorWorldY !== undefined &&
                animation.zoomAnchorCanvasX !== undefined &&
                animation.zoomAnchorCanvasY !== undefined;
     }
@@ -400,26 +353,25 @@ export class Camera {
     /**
      * Apply zoom anchor point to viewport
      */
-    private applyZoomAnchor(animation: CameraAnimation, image: IIIFImage): void {
+    private applyZoomAnchor(animation: CameraAnimation): void {
         if (!this.hasAnchorPoint(animation)) return;
 
-        this.viewport.setCenterFromImagePoint(
-            animation.zoomAnchorImageX!,
-            animation.zoomAnchorImageY!,
+        this.viewport.setCenterFromWorldPoint(
+            animation.zoomAnchorWorldX!,
+            animation.zoomAnchorWorldY!,
             animation.zoomAnchorCanvasX!,
-            animation.zoomAnchorCanvasY!,
-            image
+            animation.zoomAnchorCanvasY!
         );
     }
 
     /**
-     * Request tiles immediately (without debounce)
-     * Used for immediate feedback on first interaction
+     * Request tiles for all visible world images
      */
-    private requestTilesImmediate(imageId: string): void {
-        const tileManager = this.tiles.get(imageId);
-        if (tileManager) {
-            tileManager.requestTilesForViewport(this.viewport);
+    private requestTilesImmediate(): void {
+        const bounds = this.viewport.getWorldBounds();
+        const visibleImages = this.world.getVisibleImages(bounds.left, bounds.top, bounds.right, bounds.bottom);
+        for (const worldImage of visibleImages) {
+            worldImage.tileManager.requestTilesForViewport(this.viewport);
         }
     }
 
@@ -428,29 +380,24 @@ export class Camera {
      * - Provides immediate feedback on first movement (max 5/sec)
      * - Debounces during continuous movement (50ms after stopping)
      * - Ensures final position always gets tiles
-     *
-     * This reduces tile requests from 40/sec to ~6/sec during continuous pan
-     * while maintaining excellent responsiveness
      */
-    private requestTilesHybrid(imageId: string, now: number): void {
+    private requestTilesHybrid(now: number): void {
         const timeSinceImmediate = now - this.lastImmediateRequestTime;
 
         // Immediate request for responsiveness (but throttled to 5/sec max)
         if (timeSinceImmediate > this.CONFIG.TILE_IMMEDIATE_THROTTLE) {
-            this.requestTilesImmediate(imageId);
+            this.requestTilesImmediate();
             this.lastImmediateRequestTime = now;
         }
 
         // Always schedule debounced request for final position
-        // Clear any existing timer
         if (this.tileUpdateTimer !== null) {
             clearTimeout(this.tileUpdateTimer);
         }
 
-        // Schedule new request after movement stops
         this.tileUpdateTimer = window.setTimeout(() => {
             this.tileUpdateTimer = null;
-            this.requestTilesImmediate(imageId);
+            this.requestTilesImmediate();
         }, this.CONFIG.TILE_DEBOUNCE_DELAY);
     }
 
@@ -464,10 +411,7 @@ export class Camera {
 
         // Apply zoom anchor if present
         if (animation.type === 'zoom') {
-            const image = this.images.get(animation.imageId);
-            if (image) {
-                this.applyZoomAnchor(animation, image);
-            }
+            this.applyZoomAnchor(animation);
         }
 
         this.stopAnimation();
@@ -484,7 +428,7 @@ export class Camera {
     }
 
     /**
-     * Run the animation loop (REFACTORED)
+     * Run the animation loop
      */
     private runAnimation() {
         const animation = this.currentAnimation;
@@ -507,27 +451,18 @@ export class Camera {
         const progress = elapsed / animation.duration;
         const easedProgress = animation.easing(progress);
 
-        // Cache image lookup (used multiple times)
-        const image = this.images.get(animation.imageId);
-        if (!image) {
-            console.warn(`Animation image ${animation.imageId} not found`);
-            this.stopAnimation();
-            return;
-        }
-
         // Get strategy for animation type and update viewport
         const strategy = this.getAnimationStrategy(animation.type);
         strategy.updateViewport(this.viewport, easedProgress, animation);
 
         // Apply zoom anchor point if present (for zoom animations only)
         if (animation.type === 'zoom' && this.hasAnchorPoint(animation)) {
-            this.applyZoomAnchor(animation, image);
+            this.applyZoomAnchor(animation);
         }
 
         // Request tiles for new position (hybrid strategy)
-        this.requestTilesHybrid(animation.imageId, now);
+        this.requestTilesHybrid(now);
 
-        
         // Call update callback if provided
         animation.onUpdate?.();
 
@@ -545,8 +480,7 @@ export class Camera {
 
 
     /**
-     * Calculate interactive animation deltas (OPTIMIZED - reuses object to avoid allocation)
-     * Updates the shared deltasResult object and returns it
+     * Calculate interactive animation deltas (reuses object to avoid allocation)
      */
     private calculateInteractiveDeltas() {
         const state = this.interactiveState;
@@ -573,8 +507,7 @@ export class Camera {
     }
 
     /**
-     * Update zoom animation using trailing effect (OPTIMIZED)
-     * Only updates scale when Z changes significantly (performance optimization)
+     * Update zoom animation using trailing effect
      */
     private updateZoomAnimation(zoomDelta: number, zoomAbs: number): void {
         const state = this.interactiveState;
@@ -584,17 +517,14 @@ export class Camera {
         if (zoomAbs < config.ZOOM_SNAP_THRESHOLD) {
             state.currentCameraZ = state.targetCameraZ;
         } else {
-            // Exponential decay for smooth approach
             state.currentCameraZ += zoomDelta * config.TRAILING_FACTOR;
         }
 
-        // Update viewport Z
         this.viewport.cameraZ = state.currentCameraZ;
 
-        // OPTIMIZATION: Only call expensive updateScale() if Z changed significantly
-        // This avoids 9 arithmetic operations + cache clear on tiny changes
+        // Only call expensive updateScale() if Z changed significantly
         const zChange = Math.abs(this.viewport.cameraZ - this.lastScaleUpdateZ);
-        if (zChange > 1.0) {  // Threshold: 1 unit change
+        if (zChange > 1.0) {
             this.viewport.updateScale();
             this.lastScaleUpdateZ = this.viewport.cameraZ;
         }
@@ -607,24 +537,16 @@ export class Camera {
     private applyInteractiveTransform(): boolean {
         const state = this.interactiveState;
 
-        if (state.anchorImageX === undefined ||
-            state.anchorImageY === undefined ||
-            !state.imageId) {
+        if (state.anchorWorldX === undefined || state.anchorWorldY === undefined) {
             return false;
         }
 
-        const image = this.images.get(state.imageId);
-        if (!image) {
-            return false;
-        }
-
-        // Set viewport center so anchor image point appears at current canvas position
-        this.viewport.setCenterFromImagePoint(
-            state.anchorImageX,
-            state.anchorImageY,
+        // Set viewport center so anchor world point appears at current canvas position
+        this.viewport.setCenterFromWorldPoint(
+            state.anchorWorldX,
+            state.anchorWorldY,
             state.currentCanvasX,
-            state.currentCanvasY,
-            image
+            state.currentCanvasY
         );
 
         return true;
@@ -633,11 +555,9 @@ export class Camera {
     /**
      * Update interactive animations (trailing effect for both pan and zoom)
      * Should be called every frame when Camera is not running programmatic animations
-     *
-     * OPTIMIZED: Avoids duplicate calculations, uses idle state, reuses result objects
      */
-    updateInteractiveAnimation(): { needsUpdate: boolean; imageId?: string } {
-        // OPTIMIZATION: Skip all work if idle (most of the time)
+    updateInteractiveAnimation(): { needsUpdate: boolean } {
+        // Skip all work if idle
         if (this.isIdle) {
             return this.updateResult;
         }
@@ -645,69 +565,57 @@ export class Camera {
         const state = this.interactiveState;
         const config = this.CONFIG.INTERACTIVE;
 
-        // OPTIMIZATION: Calculate deltas ONCE (not twice like before)
         const deltas = this.calculateInteractiveDeltas();
 
-        // Check if any animations are active using pre-calculated deltas
         const hasPanAnimation = state.isDragging ||
             deltas.panDistanceSquared > config.PAN_ANIMATION_THRESHOLD_SQ;
         const hasZoomAnimation = deltas.zoomAbs > config.ZOOM_ANIMATION_THRESHOLD;
 
         // Early exit if no animations (and set idle state)
         if (!hasPanAnimation && !hasZoomAnimation) {
-            this.isIdle = true;  // Go to sleep until next interaction
+            this.isIdle = true;
             this.updateResult.needsUpdate = false;
-            this.updateResult.imageId = undefined;
             return this.updateResult;
         }
 
-        // Update pan animation with trailing effect
         if (hasPanAnimation) {
             this.updatePanAnimation(deltas.panDeltaX, deltas.panDeltaY);
         }
 
-        // Update zoom animation with trailing effect
         if (hasZoomAnimation) {
             this.updateZoomAnimation(deltas.zoomDelta, deltas.zoomAbs);
         }
 
-        // Apply viewport transformation using anchor point
         const needsUpdate = this.applyInteractiveTransform();
 
         // Request tiles if movement is significant (throttled)
-        if (needsUpdate && state.imageId) {
+        if (needsUpdate) {
             const isSignificant =
                 deltas.panDistanceSquared > (config.PAN_SIGNIFICANT_THRESHOLD ** 2) ||
                 deltas.zoomAbs > config.ZOOM_SIGNIFICANT_THRESHOLD;
 
             if (isSignificant) {
-                this.requestTilesHybrid(state.imageId, performance.now());
+                this.requestTilesHybrid(performance.now());
             }
         }
 
-        // OPTIMIZATION: Reuse result object instead of allocating new one
         this.updateResult.needsUpdate = needsUpdate;
-        this.updateResult.imageId = needsUpdate ? state.imageId : undefined;
         return this.updateResult;
     }
 
     /**
      * Start an interactive pan (mouse down)
      */
-    startInteractivePan(canvasX: number, canvasY: number, imageId: string) {
-        const image = this.images.get(imageId);
-        if (!image) return;
-
-        // OPTIMIZATION: Wake up from idle state
+    startInteractivePan(canvasX: number, canvasY: number) {
+        // Wake up from idle state
         this.isIdle = false;
 
         this.interactiveState.isDragging = true;
-        this.interactiveState.imageId = imageId;
 
-        // Convert to image coordinates to establish anchor point
-        const imagePoint = this.viewport.canvasToImagePoint(canvasX, canvasY, image);
-        this.interactiveState.anchorImageX = imagePoint.x;
-        this.interactiveState.anchorImageY = imagePoint.y;
+        // Convert to world coordinates to establish anchor point
+        const worldPoint = this.viewport.canvasToWorldPoint(canvasX, canvasY);
+        this.interactiveState.anchorWorldX = worldPoint.x;
+        this.interactiveState.anchorWorldY = worldPoint.y;
 
         // Initialize both target and current to the starting position
         this.interactiveState.targetCanvasX = canvasX;
@@ -727,7 +635,6 @@ export class Camera {
     updateInteractivePan(canvasX: number, canvasY: number) {
         if (!this.interactiveState.isDragging) return;
 
-        // Update target canvas position
         this.interactiveState.targetCanvasX = canvasX;
         this.interactiveState.targetCanvasY = canvasY;
     }
@@ -738,28 +645,20 @@ export class Camera {
     endInteractivePan() {
         this.interactiveState.isDragging = false;
 
-        // Let the animation continue to catch up to target position
-        // The updateInteractivePan loop will stop automatically when caught up
-
         // Request tiles for final position
-        if (this.interactiveState.imageId) {
-            const tiles = this.tiles.get(this.interactiveState.imageId);
-            if (tiles) {
-                tiles.requestTilesForViewport(this.viewport);
-            }
-        }
+        this.requestTilesImmediate();
     }
 
     /**
      * Handle wheel event for zooming with trailing effect
      */
-    handleWheel(event: WheelEvent, canvasX: number, canvasY: number, imageIds: string[]) {
+    handleWheel(event: WheelEvent, canvasX: number, canvasY: number) {
         event.preventDefault();
 
-        // OPTIMIZATION: Wake up from idle state
+        // Wake up from idle state
         this.isIdle = false;
 
-        // Throttle zoom events for smoother experience
+        // Throttle zoom events
         const now = performance.now();
         if (now - this.lastZoomTime < this.CONFIG.ZOOM_THROTTLE) {
             return;
@@ -767,7 +666,6 @@ export class Camera {
         this.lastZoomTime = now;
 
         // Zoom factor for each scroll increment
-        // deltaY < 0 = scroll up (away from user) = zoom in
         const zoomFactor = 1.5;
         const newScale = event.deltaY < 0 ? this.viewport.scale * zoomFactor : this.viewport.scale / zoomFactor;
 
@@ -790,37 +688,25 @@ export class Camera {
         this.interactiveState.targetCameraZ = clampedCameraZ;
 
         // Check if this is the first interactive action
-        const isFirstInteraction = this.interactiveState.anchorImageX === undefined;
+        const isFirstInteraction = this.interactiveState.anchorWorldX === undefined;
 
         // On first interaction, initialize current Z to viewport Z to prevent jump
         if (isFirstInteraction) {
             this.interactiveState.currentCameraZ = this.viewport.cameraZ;
         }
 
-        // Initialize imageId if not already set
-        if (!this.interactiveState.imageId && imageIds.length > 0) {
-            this.interactiveState.imageId = imageIds[0];
-        }
-
         // Always update anchor to current cursor position for zoom-to-cursor behavior
-        if (this.interactiveState.imageId && imageIds.length > 0) {
-            const image = this.images.get(imageIds[0]);
-            if (image) {
-                // Get the image point under the current cursor position
-                const imagePoint = this.viewport.canvasToImagePoint(canvasX, canvasY, image);
+        const worldPoint = this.viewport.canvasToWorldPoint(canvasX, canvasY);
 
-                // Update anchor to keep this image point under the cursor as we zoom
-                this.interactiveState.anchorImageX = imagePoint.x;
-                this.interactiveState.anchorImageY = imagePoint.y;
-                this.interactiveState.targetCanvasX = canvasX;
-                this.interactiveState.targetCanvasY = canvasY;
+        this.interactiveState.anchorWorldX = worldPoint.x;
+        this.interactiveState.anchorWorldY = worldPoint.y;
+        this.interactiveState.targetCanvasX = canvasX;
+        this.interactiveState.targetCanvasY = canvasY;
 
-                // On first interaction or when not dragging, snap current position to avoid jump
-                if (isFirstInteraction || !this.interactiveState.isDragging) {
-                    this.interactiveState.currentCanvasX = canvasX;
-                    this.interactiveState.currentCanvasY = canvasY;
-                }
-            }
+        // On first interaction or when not dragging, snap current position to avoid jump
+        if (isFirstInteraction || !this.interactiveState.isDragging) {
+            this.interactiveState.currentCanvasX = canvasX;
+            this.interactiveState.currentCanvasY = canvasY;
         }
     }
 

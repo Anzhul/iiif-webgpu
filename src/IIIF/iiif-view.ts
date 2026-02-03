@@ -1,8 +1,9 @@
-import { IIIFImage } from './iiif-image';
+import type { WorldImage } from './iiif-world';
 
 /**
- * Classical camera view representation in image pixel coordinates
- * Useful for camera-like pan/zoom operations
+ * Viewport using world coordinates.
+ * centerX/centerY are absolute world coordinates (not normalized 0-1).
+ * scale = CSS pixels per world unit.
  */
 
 export class Viewport {
@@ -11,11 +12,11 @@ export class Viewport {
   containerWidth: number;
   containerHeight: number;
 
-  centerX: number; // Normalized (0-1)
-  centerY: number; // Normalized (0-1)
+  centerX: number; // World coordinate
+  centerY: number; // World coordinate
 
   // 3D camera properties
-  cameraZ: number; // Camera Z position (distance from image plane)
+  cameraZ: number; // Camera Z position in world units
   minZ: number;
   maxZ: number;
 
@@ -23,62 +24,60 @@ export class Viewport {
   near: number; // Near clipping plane
   far: number; // Far clipping plane
 
-  scale: number; // Cached scale derived from cameraZ
-  minScale: number; // Minimum scale (maximum zoom out) derived from maxZ
-  maxScale: number; // Maximum scale (maximum zoom in) derived from minZ
+  scale: number; // CSS pixels per world unit
+  minScale: number;
+  maxScale: number;
 
-  // Cached FOV trigonometric values to avoid repeated calculations
+  // Cached FOV trigonometric values
   private fovRadians: number;
   private tanHalfFov: number;
 
-  // Cache for getImageBounds to avoid redundant calculations
-  private boundsCache: Map<string, {
-    bounds: { left: number; top: number; right: number; bottom: number; width: number; height: number };
+  // Cache for world bounds
+  private worldBoundsCache: {
+    bounds: { left: number; top: number; right: number; bottom: number; width: number; height: number } | null;
     centerX: number;
     centerY: number;
     scale: number;
     containerWidth: number;
     containerHeight: number;
-  }> = new Map();
+  } = {
+    bounds: null,
+    centerX: NaN,
+    centerY: NaN,
+    scale: NaN,
+    containerWidth: NaN,
+    containerHeight: NaN,
+  };
 
-  // OPTIMIZATION: Track if cache needs invalidation (avoid double clear)
   private boundsCacheInvalid: boolean = false;
 
   constructor(containerWidth: number, containerHeight: number) {
     this.containerWidth = containerWidth;
     this.containerHeight = containerHeight;
 
-    this.centerX = 0.5; // Normalized coordinates (0-1)
-    this.centerY = 0.5;
+    // Will be set properly by fitToWorld
+    this.centerX = 0;
+    this.centerY = 0;
 
-    // Initialize 3D camera parameters
-    this.cameraZ = 1000; // Camera is 1000 pixels away from the image plane (at Z=0)
+    this.cameraZ = 1000;
     this.minZ = 100;
     this.maxZ = 2000;
 
-    this.fov = 45; // 60 degree field of view
-    this.near = 0.1; // Near clipping plane
-    this.far = 10000; // Far clipping plane
+    this.fov = 45;
+    this.near = 0.1;
+    this.far = 10000;
 
-    // Initialize cached FOV trigonometric values
     this.fovRadians = (this.fov * Math.PI) / 180;
     this.tanHalfFov = Math.tan(this.fovRadians / 2);
 
-    // Initialize scale properties
     this.scale = this.calculateScale();
 
-    // Initialize scale limits (will be properly calculated in updateScaleLimits)
     const visibleHeightAtMaxZ = 2 * this.maxZ * this.tanHalfFov;
     this.minScale = this.containerHeight / visibleHeightAtMaxZ;
     const visibleHeightAtMinZ = 2 * this.minZ * this.tanHalfFov;
     this.maxScale = this.containerHeight / visibleHeightAtMinZ;
   }
 
-  /**
-   * Update cached FOV trigonometric constants
-   * Call this whenever FOV changes dynamically
-   * @internal Reserved for future use when FOV becomes mutable
-   */
   // @ts-ignore - Reserved for future use when FOV becomes mutable
   private updateFovConstants(): void {
     this.fovRadians = (this.fov * Math.PI) / 180;
@@ -96,24 +95,16 @@ export class Viewport {
     this.invalidateBoundsCache();
   }
 
-  /**
-   * Invalidate the bounds cache when viewport state changes
-   * OPTIMIZED: Only clear if not already invalid (prevents double clear)
-   */
   private invalidateBoundsCache(): void {
     if (!this.boundsCacheInvalid) {
-      this.boundsCache.clear();
+      this.worldBoundsCache.bounds = null;
       this.boundsCacheInvalid = true;
     }
   }
 
   private updateScaleLimits(): void {
-    // Calculate scale limits based on Z limits
-    // When camera is at maxZ (far away), scale is at minimum (zoomed out)
     const visibleHeightAtMaxZ = 2 * this.maxZ * this.tanHalfFov;
     this.minScale = this.containerHeight / visibleHeightAtMaxZ;
-
-    // When camera is at minZ (close), scale is at maximum (zoomed in)
     const visibleHeightAtMinZ = 2 * this.minZ * this.tanHalfFov;
     this.maxScale = this.containerHeight / visibleHeightAtMinZ;
   }
@@ -122,174 +113,166 @@ export class Viewport {
     return this.scale;
   }
 
-  /**
-   * Get cached FOV in radians
-   */
   getFovRadians(): number {
     return this.fovRadians;
   }
 
-  /**
-   * Get cached tan(fov/2) value
-   */
   getTanHalfFov(): number {
     return this.tanHalfFov;
   }
-    
 
-  fitToWidth(image: IIIFImage) {
-
-    const targetScale = this.containerWidth / image.width;
-
+  /**
+   * Fit the viewport so that a world region fills the container width.
+   * Sets center to the middle of the given world dimensions.
+   */
+  fitToWorld(worldWidth: number, worldHeight: number) {
+    const targetScale = this.containerWidth / worldWidth;
     this.cameraZ = this.containerHeight / (2 * targetScale * this.tanHalfFov);
 
-    // Set max zoom out to 5x farther, max zoom in to 10x closer
     this.maxZ = this.cameraZ * 5;
     this.minZ = this.cameraZ * 0.1;
-
-    // Update clipping planes based on zoom constraints
-    this.near = this.minZ * 0.01;  // 1% of closest zoom for safety
-    this.far = this.maxZ * 2;      // 2x farthest zoom for safety
+    this.near = this.minZ * 0.01;
+    this.far = this.maxZ * 2;
 
     this.updateScale();
 
-    this.centerX = 0.5;
-    this.centerY = 0.5;
+    this.centerX = worldWidth / 2;
+    this.centerY = worldHeight / 2;
     return this;
   }
 
-
-
-  // Get visible bounds in image coordinates
-  getImageBounds(image: IIIFImage) {
-    // Check cache first (only if cache is valid)
-    if (!this.boundsCacheInvalid) {
-      const cached = this.boundsCache.get(image.id);
-
-      // Round scale to 3 decimal places for cache comparison (matching tile manager precision)
+  /**
+   * Get visible bounds in world coordinates
+   */
+  getWorldBounds(): { left: number; top: number; right: number; bottom: number; width: number; height: number } {
+    if (!this.boundsCacheInvalid && this.worldBoundsCache.bounds) {
+      const c = this.worldBoundsCache;
       const roundedScale = Math.round(this.scale * 1000) / 1000;
-
-      if (cached &&
-          cached.centerX === this.centerX &&
-          cached.centerY === this.centerY &&
-          cached.scale === roundedScale &&
-          cached.containerWidth === this.containerWidth &&
-          cached.containerHeight === this.containerHeight) {
-        // Cache hit - return cached bounds without recalculation
-        return cached.bounds;
+      if (c.centerX === this.centerX &&
+          c.centerY === this.centerY &&
+          c.scale === roundedScale &&
+          c.containerWidth === this.containerWidth &&
+          c.containerHeight === this.containerHeight) {
+        return c.bounds!;
       }
     }
 
-    // Cache miss - calculate bounds
-    // How many pixels of the original image are visible in the viewport
-    const scaledWidth = this.containerWidth / this.scale;
-    const scaledHeight = this.containerHeight / this.scale;
-
-    const left = (this.centerX * image.width) - (scaledWidth / 2);
-    const top = (this.centerY * image.height) - (scaledHeight / 2);
+    const worldWidth = this.containerWidth / this.scale;
+    const worldHeight = this.containerHeight / this.scale;
+    const left = this.centerX - worldWidth / 2;
+    const top = this.centerY - worldHeight / 2;
 
     const bounds = {
-      left: Math.max(0, left),
-      top: Math.max(0, top),
-      right: Math.min(image.width, left + scaledWidth),
-      bottom: Math.min(image.height, top + scaledHeight),
-      width: scaledWidth,
-      height: scaledHeight
+      left,
+      top,
+      right: left + worldWidth,
+      bottom: top + worldHeight,
+      width: worldWidth,
+      height: worldHeight
     };
 
-    // Round scale to 3 decimal places for cache storage
     const roundedScale = Math.round(this.scale * 1000) / 1000;
-
-    // Store in cache (using rounded scale for consistency)
-    this.boundsCache.set(image.id, {
+    this.worldBoundsCache = {
       bounds,
       centerX: this.centerX,
       centerY: this.centerY,
       scale: roundedScale,
       containerWidth: this.containerWidth,
-      containerHeight: this.containerHeight
-    });
-
-    // Mark cache as valid since we just populated it
+      containerHeight: this.containerHeight,
+    };
     this.boundsCacheInvalid = false;
 
     return bounds;
   }
 
-  constrainCenter(image?: IIIFImage) {
+  /**
+   * Get the visible region of a WorldImage in image pixel coordinates.
+   * Used by TileManager to determine which tiles to fetch.
+   */
+  getImageBoundsForWorldImage(worldImage: WorldImage): { left: number; top: number; right: number; bottom: number; width: number; height: number } {
+    const wb = this.getWorldBounds();
+    const p = worldImage.placement;
+
+    // Clamp world bounds to this image's world region
+    const clampedLeft = Math.max(wb.left, p.worldX);
+    const clampedTop = Math.max(wb.top, p.worldY);
+    const clampedRight = Math.min(wb.right, p.worldX + p.worldWidth);
+    const clampedBottom = Math.min(wb.bottom, p.worldY + p.worldHeight);
+
+    // Convert world coords to image pixels
+    const imgLeft = worldImage.worldToImage(clampedLeft, 0).x;
+    const imgTop = worldImage.worldToImage(0, clampedTop).y;
+    const imgRight = worldImage.worldToImage(clampedRight, 0).x;
+    const imgBottom = worldImage.worldToImage(0, clampedBottom).y;
+
+    return {
+      left: Math.max(0, imgLeft),
+      top: Math.max(0, imgTop),
+      right: Math.min(worldImage.image.width, imgRight),
+      bottom: Math.min(worldImage.image.height, imgBottom),
+      width: imgRight - imgLeft,
+      height: imgBottom - imgTop
+    };
+  }
+
+  /**
+   * Constrain center to keep content visible.
+   * worldWidth/worldHeight define the total content bounds.
+   */
+  constrainCenter(worldWidth?: number, worldHeight?: number) {
     const oldCenterX = this.centerX;
     const oldCenterY = this.centerY;
 
-    if (!image) {
-      // Basic constraint to 0-1 range
-      this.centerX = Math.max(0, Math.min(1, this.centerX));
-      this.centerY = Math.max(0, Math.min(1, this.centerY));
-    } else {
-      // Advanced constraint considering zoom level and image bounds
-      const scaledWidth = this.containerWidth / this.scale;
-      const scaledHeight = this.containerHeight / this.scale;
-
-      // When viewport is larger than image, don't constrain (allow free positioning for zoom-to-cursor)
-      // When viewport is smaller than image, constrain to keep image visible
-      if (scaledWidth < image.width) {
-        const minCenterX = (scaledWidth / 2) / image.width;
-        const maxCenterX = 1 - (scaledWidth / 2) / image.width;
-        this.centerX = Math.max(minCenterX, Math.min(maxCenterX, this.centerX));
-      }
-
-      if (scaledHeight < image.height) {
-        const minCenterY = (scaledHeight / 2) / image.height;
-        const maxCenterY = 1 - (scaledHeight / 2) / image.height;
-        this.centerY = Math.max(minCenterY, Math.min(maxCenterY, this.centerY));
-      }
+    if (worldWidth === undefined || worldHeight === undefined) {
+      // No constraint
+      return;
     }
 
-    // Only invalidate cache if center actually changed
+    const viewWidth = this.containerWidth / this.scale;
+    const viewHeight = this.containerHeight / this.scale;
+
+    if (viewWidth < worldWidth) {
+      const minCenterX = viewWidth / 2;
+      const maxCenterX = worldWidth - viewWidth / 2;
+      this.centerX = Math.max(minCenterX, Math.min(maxCenterX, this.centerX));
+    }
+
+    if (viewHeight < worldHeight) {
+      const minCenterY = viewHeight / 2;
+      const maxCenterY = worldHeight - viewHeight / 2;
+      this.centerY = Math.max(minCenterY, Math.min(maxCenterY, this.centerY));
+    }
+
     if (oldCenterX !== this.centerX || oldCenterY !== this.centerY) {
-      // DEBUG: Log constraint changes to detect wavering
-      const deltaX = Math.abs(this.centerX - oldCenterX);
-      const deltaY = Math.abs(this.centerY - oldCenterY);
-      if (deltaX > 0.000001 || deltaY > 0.000001) {
-        console.log('Constraint adjusted center:', {
-          deltaX: deltaX.toFixed(8),
-          deltaY: deltaY.toFixed(8),
-          scale: this.scale.toFixed(3)
-        });
-      }
       this.invalidateBoundsCache();
     }
   }
 
-  // Matrix-based coordinate transformations
+  /**
+   * Convert canvas pixel coordinates to world coordinates
+   */
+  canvasToWorldPoint(canvasX: number, canvasY: number): { x: number; y: number } {
+    const worldWidth = this.containerWidth / this.scale;
+    const worldHeight = this.containerHeight / this.scale;
+    const worldMinX = this.centerX - worldWidth / 2;
+    const worldMinY = this.centerY - worldHeight / 2;
 
-  // Convert canvas pixel coordinates to image pixel coordinates
-  // In 3D mode, this performs a ray-plane intersection at Z=0
-  canvasToImagePoint(canvasX: number, canvasY: number, image: IIIFImage, targetZ: number = 0): { x: number, y: number, z: number } {
-    // Calculate viewport bounds in image space
-    const viewportWidth = this.containerWidth / this.scale;
-    const viewportHeight = this.containerHeight / this.scale;
-    const viewportMinX = (this.centerX * image.width) - (viewportWidth / 2);
-    const viewportMinY = (this.centerY * image.height) - (viewportHeight / 2);
-
-    // Transform canvas pixel to image pixel
-    const imageX = viewportMinX + (canvasX / this.scale);
-    const imageY = viewportMinY + (canvasY / this.scale);
-
-    return { x: imageX, y: imageY, z: targetZ };
+    return {
+      x: worldMinX + canvasX / this.scale,
+      y: worldMinY + canvasY / this.scale
+    };
   }
 
-  // Set center such that a given image point appears at a given canvas position
-  setCenterFromImagePoint(imageX: number, imageY: number, canvasX: number, canvasY: number, image: IIIFImage) {
-    const viewportWidth = this.containerWidth / this.scale;
-    const viewportHeight = this.containerHeight / this.scale;
+  /**
+   * Set center such that a given world point appears at a given canvas position
+   */
+  setCenterFromWorldPoint(worldX: number, worldY: number, canvasX: number, canvasY: number) {
+    const worldWidth = this.containerWidth / this.scale;
+    const worldHeight = this.containerHeight / this.scale;
 
-    // Calculate what center would place imagePoint at canvasPosition
-    this.centerX = (imageX - (canvasX / this.scale) + (viewportWidth / 2)) / image.width;
-    this.centerY = (imageY - (canvasY / this.scale) + (viewportHeight / 2)) / image.height;
+    this.centerX = worldX - (canvasX / this.scale) + worldWidth / 2;
+    this.centerY = worldY - (canvasY / this.scale) + worldHeight / 2;
 
-    // Invalidate bounds cache since center changed
     this.invalidateBoundsCache();
   }
-
-
 }

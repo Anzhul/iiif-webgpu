@@ -3,6 +3,7 @@
  *
  * This file demonstrates how to add HTML overlays to your IIIF images
  * that automatically follow pan and zoom transformations.
+ * All coordinates are in world space (which equals image pixel dimensions for single images).
  */
 
 import { IIIFViewer } from './iiif';
@@ -11,7 +12,7 @@ import type { OverlayElement } from './iiif-overlay';
 /**
  * Example 1: Add a simple colored box overlay
  */
-export function addSimpleBoxOverlay(viewer: IIIFViewer, imageId: string) {
+export function addSimpleBoxOverlay(viewer: IIIFViewer) {
     if (!viewer.overlayManager) {
         console.error('Overlay manager not initialized');
         return;
@@ -23,16 +24,15 @@ export function addSimpleBoxOverlay(viewer: IIIFViewer, imageId: string) {
     box.style.border = '2px solid red';
     box.style.boxSizing = 'border-box';
 
-    // Define the overlay in image pixel coordinates
+    // Define the overlay in world coordinates
     const overlay: OverlayElement = {
         id: 'red-box',
         element: box,
-        imageX: 1000,      // X position in image pixels
-        imageY: 500,       // Y position in image pixels
-        imageWidth: 500,   // Width in image pixels
-        imageHeight: 300,  // Height in image pixels
-        imageId: imageId,
-        scaleWithZoom: true // Box will scale with zoom level
+        worldX: 1000,      // X position in world units
+        worldY: 500,        // Y position in world units
+        worldWidth: 500,    // Width in world units
+        worldHeight: 300,   // Height in world units
+        scaleWithZoom: true  // Box will scale with zoom level
     };
 
     viewer.overlayManager.addOverlay(overlay);
@@ -43,7 +43,6 @@ export function addSimpleBoxOverlay(viewer: IIIFViewer, imageId: string) {
  */
 export function addLabelOverlay(
     viewer: IIIFViewer,
-    imageId: string,
     text: string,
     x: number,
     y: number
@@ -66,11 +65,10 @@ export function addLabelOverlay(
     const overlay: OverlayElement = {
         id: `label-${Date.now()}`,
         element: label,
-        imageX: x,
-        imageY: y,
-        imageWidth: 150,
-        imageHeight: 40,
-        imageId: imageId,
+        worldX: x,
+        worldY: y,
+        worldWidth: 150,
+        worldHeight: 40,
         scaleWithZoom: true
     };
 
@@ -82,7 +80,6 @@ export function addLabelOverlay(
  */
 export function addButtonOverlay(
     viewer: IIIFViewer,
-    imageId: string,
     x: number,
     y: number,
     onClick: () => void
@@ -108,11 +105,10 @@ export function addButtonOverlay(
     const overlay: OverlayElement = {
         id: `button-${Date.now()}`,
         element: button,
-        imageX: x,
-        imageY: y,
-        imageWidth: 100,
-        imageHeight: 40,
-        imageId: imageId,
+        worldX: x,
+        worldY: y,
+        worldWidth: 100,
+        worldHeight: 40,
         scaleWithZoom: true
     };
 
@@ -124,7 +120,6 @@ export function addButtonOverlay(
  */
 export function addHighlightRegions(
     viewer: IIIFViewer,
-    imageId: string,
     regions: Array<{ x: number; y: number; width: number; height: number; color?: string }>
 ) {
     if (!viewer.overlayManager) {
@@ -141,11 +136,10 @@ export function addHighlightRegions(
         const overlay: OverlayElement = {
             id: `highlight-${index}`,
             element: highlight,
-            imageX: region.x,
-            imageY: region.y,
-            imageWidth: region.width,
-            imageHeight: region.height,
-            imageId: imageId,
+            worldX: region.x,
+            worldY: region.y,
+            worldWidth: region.width,
+            worldHeight: region.height,
             scaleWithZoom: true
         };
 
@@ -158,7 +152,6 @@ export function addHighlightRegions(
  */
 export function addDraggableOverlay(
     viewer: IIIFViewer,
-    imageId: string,
     initialX: number,
     initialY: number
 ) {
@@ -196,16 +189,16 @@ export function addDraggableOverlay(
         const deltaX = e.clientX - dragStartX;
         const deltaY = e.clientY - dragStartY;
 
-        // Convert to image pixels
+        // Convert to world units
         const scale = viewer.viewport.scale;
-        const deltaImageX = deltaX / scale;
-        const deltaImageY = deltaY / scale;
+        const deltaWorldX = deltaX / scale;
+        const deltaWorldY = deltaY / scale;
 
         // Update overlay position
         viewer.overlayManager.updateOverlayPosition(
             overlayId,
-            overlay.imageX + deltaImageX,
-            overlay.imageY + deltaImageY
+            overlay.worldX + deltaWorldX,
+            overlay.worldY + deltaWorldY
         );
 
         dragStartX = e.clientX;
@@ -219,11 +212,10 @@ export function addDraggableOverlay(
     const overlay: OverlayElement = {
         id: overlayId,
         element: draggable,
-        imageX: initialX,
-        imageY: initialY,
-        imageWidth: 100,
-        imageHeight: 100,
-        imageId: imageId,
+        worldX: initialX,
+        worldY: initialY,
+        worldWidth: 100,
+        worldHeight: 100,
         scaleWithZoom: true
     };
 
@@ -235,7 +227,6 @@ export function addDraggableOverlay(
  */
 export function addFixedSizeOverlay(
     viewer: IIIFViewer,
-    imageId: string,
     x: number,
     y: number
 ) {
@@ -254,11 +245,10 @@ export function addFixedSizeOverlay(
     const overlay: OverlayElement = {
         id: `marker-${Date.now()}`,
         element: marker,
-        imageX: x,
-        imageY: y,
-        imageWidth: 20,  // These will be ignored since scaleWithZoom is false
-        imageHeight: 20,
-        imageId: imageId,
+        worldX: x,
+        worldY: y,
+        worldWidth: 20,
+        worldHeight: 20,
         scaleWithZoom: false  // Overlay stays same size regardless of zoom
     };
 
@@ -277,33 +267,33 @@ export function exampleUsage() {
 
     // Load an image
     viewer.addImage('my-image', 'https://example.com/iiif/image/info.json', true);
-    viewer.startRenderLoop('my-image');
-    viewer.listen('my-image');
+    viewer.startRenderLoop();
+    viewer.listen();
 
     // Add overlays after image is loaded
     setTimeout(() => {
         // Add a simple box
-        addSimpleBoxOverlay(viewer, 'my-image');
+        addSimpleBoxOverlay(viewer);
 
         // Add a label
-        addLabelOverlay(viewer, 'my-image', 'Important Region', 2000, 1500);
+        addLabelOverlay(viewer, 'Important Region', 2000, 1500);
 
         // Add a button
-        addButtonOverlay(viewer, 'my-image', 3000, 2000, () => {
+        addButtonOverlay(viewer, 3000, 2000, () => {
             console.log('Button clicked!');
         });
 
         // Add multiple highlights
-        addHighlightRegions(viewer, 'my-image', [
+        addHighlightRegions(viewer, [
             { x: 500, y: 500, width: 300, height: 200 },
             { x: 1000, y: 800, width: 400, height: 300, color: 'rgba(0, 255, 0, 0.3)' }
         ]);
 
         // Add a draggable overlay
-        addDraggableOverlay(viewer, 'my-image', 1500, 1000);
+        addDraggableOverlay(viewer, 1500, 1000);
 
         // Add a fixed-size marker
-        addFixedSizeOverlay(viewer, 'my-image', 2500, 1800);
+        addFixedSizeOverlay(viewer, 2500, 1800);
     }, 1000);
 
     // You can also remove overlays

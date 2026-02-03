@@ -1,5 +1,4 @@
 import { mat4 } from 'gl-matrix';
-import { IIIFImage } from './iiif-image.js';
 import { Viewport } from './iiif-view.js';
 import type { IIIFRenderer, TileRenderData } from './iiif-renderer.js';
 
@@ -63,8 +62,6 @@ export class WebGLRenderer implements IIIFRenderer {
     private mvpCache = {
         centerX: NaN,
         centerY: NaN,
-        imageWidth: NaN,
-        imageHeight: NaN,
         canvasWidth: NaN,
         canvasHeight: NaN,
         cameraZ: NaN,
@@ -295,8 +292,6 @@ export class WebGLRenderer implements IIIFRenderer {
     private getMVPMatrix(
         centerX: number,
         centerY: number,
-        imageWidth: number,
-        imageHeight: number,
         canvasWidth: number,
         canvasHeight: number,
         cameraZ: number,
@@ -310,8 +305,6 @@ export class WebGLRenderer implements IIIFRenderer {
 
         if (this.mvpCache.centerX === roundedCenterX &&
             this.mvpCache.centerY === roundedCenterY &&
-            this.mvpCache.imageWidth === imageWidth &&
-            this.mvpCache.imageHeight === imageHeight &&
             this.mvpCache.canvasWidth === canvasWidth &&
             this.mvpCache.canvasHeight === canvasHeight &&
             this.mvpCache.cameraZ === roundedCameraZ &&
@@ -325,13 +318,11 @@ export class WebGLRenderer implements IIIFRenderer {
         const aspectRatio = canvasWidth / canvasHeight;
         const projection = this.getPerspectiveMatrix(fov, aspectRatio, near, far);
 
-        const lookAtX = centerX * imageWidth;
-        const lookAtY = centerY * imageHeight;
-        const cameraX = lookAtX;
-        const cameraY = lookAtY;
+        const lookAtX = centerX;
+        const lookAtY = centerY;
 
         const view = mat4.create();
-        mat4.translate(view, view, [-cameraX, cameraY, -cameraZ]);
+        mat4.translate(view, view, [-lookAtX, lookAtY, -cameraZ]);
         mat4.scale(view, view, [1, -1, 1]);
 
         mat4.multiply(this.reusableVP, projection as mat4, view as mat4);
@@ -340,8 +331,6 @@ export class WebGLRenderer implements IIIFRenderer {
 
         this.mvpCache.centerX = roundedCenterX;
         this.mvpCache.centerY = roundedCenterY;
-        this.mvpCache.imageWidth = imageWidth;
-        this.mvpCache.imageHeight = imageHeight;
         this.mvpCache.canvasWidth = canvasWidth;
         this.mvpCache.canvasHeight = canvasHeight;
         this.mvpCache.cameraZ = roundedCameraZ;
@@ -426,15 +415,13 @@ export class WebGLRenderer implements IIIFRenderer {
         this.gl.drawArrays(this.gl.TRIANGLES, 0, 6);
     }
 
-    render(viewport: Viewport, image: IIIFImage, tiles: TileRenderData[], thumbnail?: TileRenderData) {
+    render(viewport: Viewport, tiles: TileRenderData[], thumbnail?: TileRenderData) {
         if (!this.gl || !this.program) return;
 
-        // Get cached MVP matrix
+        // Get cached MVP matrix — centerX/centerY are world coordinates directly
         const mvpMatrix = this.getMVPMatrix(
             viewport.centerX,
             viewport.centerY,
-            image.width,
-            image.height,
             this.canvas.width,
             this.canvas.height,
             viewport.cameraZ,

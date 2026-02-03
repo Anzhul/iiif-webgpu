@@ -2,22 +2,20 @@ import { IIIFOverlayManager } from './iiif-overlay';
 import type { OverlayElement } from './iiif-overlay';
 
 /**
- * Annotation configuration
+ * Annotation configuration - all coordinates are in world space
  */
 export interface Annotation {
     /** Unique identifier */
     id: string;
-    /** Which image this annotation belongs to */
-    imageId: string;
     /** Whether annotation is fixed in place or can be moved */
     fixed: boolean;
-    /** X position in image pixel coordinates */
+    /** X position in world coordinates */
     x: number;
-    /** Y position in image pixel coordinates */
+    /** Y position in world coordinates */
     y: number;
-    /** Width in image pixel coordinates */
+    /** Width in world coordinates */
     width: number;
-    /** Height in image pixel coordinates */
+    /** Height in world coordinates */
     height: number;
     /** CSS styles to apply to the annotation box */
     style?: {
@@ -72,15 +70,14 @@ export class AnnotationManager {
         // Create the annotation element
         const annotationElement = this.createAnnotationElement(annotation);
 
-        // Create overlay from annotation
+        // Create overlay from annotation (using world coordinates)
         const overlay: OverlayElement = {
             id: annotation.id,
             element: annotationElement,
-            imageX: annotation.x,
-            imageY: annotation.y,
-            imageWidth: annotation.width,
-            imageHeight: annotation.height,
-            imageId: annotation.imageId,
+            worldX: annotation.x,
+            worldY: annotation.y,
+            worldWidth: annotation.width,
+            worldHeight: annotation.height,
             scaleWithZoom: annotation.scaleWithZoom !== false
         };
 
@@ -160,15 +157,7 @@ export class AnnotationManager {
     }
 
     /**
-     * Get annotations for a specific image
-     */
-    getAnnotationsByImage(imageId: string): Annotation[] {
-        return Array.from(this.annotations.values())
-            .filter(a => a.imageId === imageId);
-    }
-
-    /**
-     * Update annotation position
+     * Update annotation position in world coordinates
      */
     updateAnnotationPosition(id: string, x: number, y: number): void {
         const annotation = this.annotations.get(id);
@@ -180,7 +169,7 @@ export class AnnotationManager {
     }
 
     /**
-     * Update annotation size
+     * Update annotation size in world coordinates
      */
     updateAnnotationSize(id: string, width: number, height: number): void {
         const annotation = this.annotations.get(id);

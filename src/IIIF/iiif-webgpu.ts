@@ -1,7 +1,6 @@
 
 /// <reference types="@webgpu/types" />
 import { mat4 } from 'gl-matrix';
-import { IIIFImage } from './iiif-image.js';
 import { Viewport } from './iiif-view.js';
 import type { IIIFRenderer, TileRenderData } from './iiif-renderer.js';
 import ShaderModule from './iiif-shader.wgsl?raw';
@@ -42,8 +41,6 @@ export class WebGPURenderer implements IIIFRenderer {
     private mvpCache = {
         centerX: NaN,
         centerY: NaN,
-        imageWidth: NaN,
-        imageHeight: NaN,
         canvasWidth: NaN,
         canvasHeight: NaN,
         cameraZ: NaN,
@@ -310,11 +307,13 @@ export class WebGPURenderer implements IIIFRenderer {
      * Only recalculates when viewport parameters change
      * Optimized: uses direct numeric comparison instead of expensive string concatenation with toFixed()
      */
+    /**
+     * Get or create cached MVP matrix.
+     * centerX/centerY are world coordinates directly (no image dimension multiplication).
+     */
     private getMVPMatrix(
         centerX: number,
         centerY: number,
-        imageWidth: number,
-        imageHeight: number,
         canvasWidth: number,
         canvasHeight: number,
         cameraZ: number,
@@ -322,16 +321,12 @@ export class WebGPURenderer implements IIIFRenderer {
         near: number,
         far: number
     ): Float32Array {
-        // Fast cache check using direct value comparison (no string allocation or toFixed() calls)
-        // Round centerX/centerY to avoid cache misses from floating point precision
-        const roundedCenterX = Math.round(centerX * 1000000) / 1000000;  // 6 decimals
+        const roundedCenterX = Math.round(centerX * 1000000) / 1000000;
         const roundedCenterY = Math.round(centerY * 1000000) / 1000000;
-        const roundedCameraZ = Math.round(cameraZ * 10000) / 10000;      // 4 decimals
+        const roundedCameraZ = Math.round(cameraZ * 10000) / 10000;
 
         if (this.mvpCache.centerX === roundedCenterX &&
             this.mvpCache.centerY === roundedCenterY &&
-            this.mvpCache.imageWidth === imageWidth &&
-            this.mvpCache.imageHeight === imageHeight &&
             this.mvpCache.canvasWidth === canvasWidth &&
             this.mvpCache.canvasHeight === canvasHeight &&
             this.mvpCache.cameraZ === roundedCameraZ &&
@@ -342,31 +337,23 @@ export class WebGPURenderer implements IIIFRenderer {
             return this.cachedMVPMatrix;
         }
 
-        // Cache miss - recalculate
         const aspectRatio = canvasWidth / canvasHeight;
         const projection = this.getPerspectiveMatrix(fov, aspectRatio, near, far);
 
-        // Create view matrix
-        const lookAtX = centerX * imageWidth;
-        const lookAtY = centerY * imageHeight;
-        const cameraX = lookAtX;
-        const cameraY = lookAtY;
+        // centerX/centerY are world coordinates directly
+        const lookAtX = centerX;
+        const lookAtY = centerY;
 
         const view = mat4.create();
-        mat4.translate(view, view, [-cameraX, cameraY, -cameraZ]);
+        mat4.translate(view, view, [-lookAtX, lookAtY, -cameraZ]);
         mat4.scale(view, view, [1, -1, 1]);
 
-        // Combine projection * view using reusable matrix
         mat4.multiply(this.reusableVP, projection as mat4, view as mat4);
 
-        // Store in cache
         this.cachedMVPMatrix = new Float32Array(this.reusableVP);
 
-        // Update cache keys
         this.mvpCache.centerX = roundedCenterX;
         this.mvpCache.centerY = roundedCenterY;
-        this.mvpCache.imageWidth = imageWidth;
-        this.mvpCache.imageHeight = imageHeight;
         this.mvpCache.canvasWidth = canvasWidth;
         this.mvpCache.canvasHeight = canvasHeight;
         this.mvpCache.cameraZ = roundedCameraZ;
@@ -479,18 +466,15 @@ export class WebGPURenderer implements IIIFRenderer {
         renderPass.draw(6, 1, 0, tileIndex);
     }
 
-    render(viewport: Viewport, image: IIIFImage, tiles: TileRenderData[], thumbnail?: TileRenderData) {
+    render(viewport: Viewport, tiles: TileRenderData[], thumbnail?: TileRenderData) {
         if (!this.device || !this.context || !this.pipeline || !this.storageBuffer) {
             return;
         }
 
-        // Get cached MVP matrix (only recalculates when viewport changes)
-        // Work in image pixel coordinates - zoom is controlled by cameraZ distance
+        // MVP matrix — centerX/centerY are world coordinates directly
         const mvpMatrix = this.getMVPMatrix(
             viewport.centerX,
             viewport.centerY,
-            image.width,
-            image.height,
             this.canvas.width,
             this.canvas.height,
             viewport.cameraZ,

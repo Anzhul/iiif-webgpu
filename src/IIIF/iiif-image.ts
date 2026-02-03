@@ -10,7 +10,7 @@ export class IIIFImage {
         this.url = url;
     }
 
-    get baseUrl() { return this.manifest['@id']; }
+    get baseUrl() { return this.manifest.id || this.manifest['@id']; }
     get width() { return this.manifest.width; }
     get height() { return this.manifest.height; }
     get aspectRatio() { return this.manifest.width / this.manifest.height; }

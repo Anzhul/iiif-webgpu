@@ -1,4 +1,3 @@
-import { IIIFImage } from './iiif-image.js';
 import { Viewport } from './iiif-view.js';
 
 export interface TileRenderData {
@@ -18,7 +17,7 @@ export interface IIIFRenderer {
 
     initialize(): Promise<void>;
     resize(): void;
-    render(viewport: Viewport, image: IIIFImage, tiles: TileRenderData[], thumbnail?: TileRenderData): void;
+    render(viewport: Viewport, tiles: TileRenderData[], thumbnail?: TileRenderData): void;
     uploadTextureFromBitmap(tileId: string, bitmap: ImageBitmap): any;
     destroyTexture(tileId: string): void;
     clearTextureCache(): void;

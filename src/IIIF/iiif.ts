@@ -4,22 +4,24 @@ import { Viewport } from './iiif-view';
 import { TileManager } from './iiif-tile';
 import { WebGPURenderer } from './iiif-webgpu';
 import { WebGLRenderer } from './iiif-webgl';
-import type { IIIFRenderer } from './iiif-renderer';
+import type { IIIFRenderer, TileRenderData } from './iiif-renderer';
 import { ToolBar } from './iiif-toolbar';
 import { AnnotationManager } from './iiif-annotations'
 import { Camera } from './iiif-camera';
 import { IIIFOverlayManager } from './iiif-overlay';
+import { World, WorldImage } from './iiif-world';
+import type { WorldPlacement } from './iiif-world';
 
 // Re-export overlay and annotation types for convenience
 export type { OverlayElement } from './iiif-overlay';
 export type { Annotation } from './iiif-annotations';
 export { IIIFOverlayManager } from './iiif-overlay';
+export type { WorldPlacement } from './iiif-world';
 
 export class IIIFViewer {
     container: HTMLElement;
     manifests: any[];
-    images: Map<string, IIIFImage>;
-    tiles: Map<string, TileManager>;
+    world: World;
     viewport: Viewport;
     camera: Camera;
     renderer?: IIIFRenderer;
@@ -35,11 +37,10 @@ export class IIIFViewer {
     constructor(container: HTMLElement, options: any = {}) {
         this.container = container;
         this.manifests = [];
-        this.images = new Map();
-        this.tiles = new Map();
+        this.world = new World();
         this.viewport = new Viewport(container.clientWidth, container.clientHeight);
         this.toolbar = new ToolBar(container, options.toolbar);
-        this.camera = new Camera(this.viewport, this.images, this.tiles);
+        this.camera = new Camera(this.viewport, this.world);
 
         this.eventListeners = [];
 
@@ -58,7 +59,6 @@ export class IIIFViewer {
         this.setupResizeHandler();
 
         // Check if webGPU is supported and initialize renderer
-        // This operation is asynchronous so must be in another function
         this.initializeRenderer();
     }
 
@@ -71,15 +71,14 @@ export class IIIFViewer {
         this.overlayContainer.style.width = '100%';
         this.overlayContainer.style.height = '100%';
         this.overlayContainer.style.pointerEvents = 'none';
-        this.overlayContainer.style.zIndex = '11'; // Above canvas (which is z-index: 10)
+        this.overlayContainer.style.zIndex = '11';
 
         this.container.appendChild(this.overlayContainer);
 
         // Initialize overlay manager
         this.overlayManager = new IIIFOverlayManager(
             this.overlayContainer,
-            this.viewport,
-            this.images
+            this.viewport
         );
     }
 
@@ -91,17 +90,15 @@ export class IIIFViewer {
                 await this.renderer.initialize();
 
                 // Set renderer for all existing TileManagers
-                for (const tileManager of this.tiles.values()) {
-                    tileManager.setRenderer(this.renderer);
+                for (const wi of this.world.worldImages.values()) {
+                    wi.tileManager.setRenderer(this.renderer);
                 }
             } catch (error) {
                 console.error('Failed to initialize WebGPU renderer:', error);
                 this.renderer = undefined;
-                // Try WebGL fallback
                 await this.initializeWebGLFallback();
             }
         } else {
-            // WebGPU not available, use WebGL fallback
             console.warn('WebGPU is not available in this browser, using WebGL fallback');
             await this.initializeWebGLFallback();
         }
@@ -114,8 +111,8 @@ export class IIIFViewer {
             await this.renderer.initialize();
 
             // Set renderer for all existing TileManagers
-            for (const tileManager of this.tiles.values()) {
-                tileManager.setRenderer(this.renderer);
+            for (const wi of this.world.worldImages.values()) {
+                wi.tileManager.setRenderer(this.renderer);
             }
         } catch (error) {
             console.error('Failed to initialize WebGL renderer:', error);
@@ -158,9 +155,11 @@ export class IIIFViewer {
             this.renderer.resize();
         }
 
-        // Request new tiles for all images with updated viewport
-        for (const tileManager of this.tiles.values()) {
-            tileManager.requestTilesForViewport(this.viewport);
+        // Request new tiles for all visible images
+        const bounds = this.viewport.getWorldBounds();
+        const visibleImages = this.world.getVisibleImages(bounds.left, bounds.top, bounds.right, bounds.bottom);
+        for (const wi of visibleImages) {
+            wi.tileManager.requestTilesForViewport(this.viewport);
         }
 
         // Update overlay positions after resize
@@ -169,20 +168,36 @@ export class IIIFViewer {
         }
     }
 
-    async addImage(id: string, url: string, focus: boolean = false) {
+    /**
+     * Add an image to the viewer
+     * @param id - Unique identifier for the image
+     * @param url - IIIF Image API info.json URL
+     * @param focus - Whether to fit viewport to this image
+     * @param placement - Optional world placement (defaults to origin with image dimensions)
+     */
+    async addImage(id: string, url: string, focus: boolean = false, placement?: WorldPlacement) {
         const iiifImage = new IIIFImage(id, url);
         await iiifImage.loadManifest(url);
-        this.images.set(id, iiifImage);
 
-        // Pass renderer to TileManager if available
-        // distanceDetail: Lower = more detail from further away (0.3-0.5 recommended)
-        // 0.30 = slightly more detail, 0.35 = balanced, 0.40 = conservative
+        // Default placement: origin at (0,0) with world dimensions = image dimensions
+        const worldPlacement: WorldPlacement = placement || {
+            worldX: 0,
+            worldY: 0,
+            worldWidth: iiifImage.width,
+            worldHeight: iiifImage.height
+        };
+
+        // Create TileManager
         const tileManager = new TileManager(id, iiifImage, 500, this.renderer, 0.35);
 
+        // Create WorldImage and add to world
+        const worldImage = new WorldImage(iiifImage, tileManager, worldPlacement);
+        tileManager.setWorldImage(worldImage);
+        this.world.addImage(id, worldImage);
+
         if (focus) {
-            this.viewport.fitToWidth(iiifImage);
+            this.viewport.fitToWorld(this.world.worldWidth, this.world.worldHeight);
         }
-        this.tiles.set(id, tileManager);
 
         // Request initial tiles for the viewport
         tileManager.requestTilesForViewport(this.viewport);
@@ -191,11 +206,7 @@ export class IIIFViewer {
         await tileManager.loadThumbnail();
     }
 
-
-
     private updateAnimations() {
-        // Only update interactive animations if Camera is not running programmatic animations
-        // This prevents conflicts between programmatic camera animations and interactive movements
         if (!this.camera.isAnimating()) {
             this.camera.updateInteractiveAnimation();
         }
@@ -203,59 +214,54 @@ export class IIIFViewer {
 
     /**
      * Zoom to a specific scale value
-     * @param targetScale - The target scale to zoom to (same as ViewportController)
-     * @param imageId - ID of the image
+     * @param targetScale - The target scale to zoom to
      * @param duration - Animation duration in milliseconds
      */
-    zoom(targetScale: number, imageId: string, duration = 500) {
-        this.camera.zoom(targetScale, imageId, duration);
+    zoom(targetScale: number, duration = 500) {
+        this.camera.zoom(targetScale, duration);
     }
 
     /**
      * Zoom by a factor
      * @param factor - Zoom factor (>1 = zoom in, <1 = zoom out)
-     * @param imageId - ID of the image
      * @param duration - Animation duration in milliseconds
      */
-    zoomByFactor(factor: number, imageId: string, duration = 500) {
-        this.camera.zoomByFactor(factor, imageId, duration);
+    zoomByFactor(factor: number, duration = 500) {
+        this.camera.zoomByFactor(factor, duration);
     }
 
     /**
-     * Pan by delta amounts in image pixel coordinates
-     * @param deltaX - X delta in image pixels
-     * @param deltaY - Y delta in image pixels
-     * @param imageId - ID of the image
+     * Pan by delta amounts in world coordinates
+     * @param deltaX - X delta in world units
+     * @param deltaY - Y delta in world units
      * @param duration - Animation duration in milliseconds
      */
-    pan(deltaX: number, deltaY: number, imageId: string, duration = 500) {
-        this.camera.pan(deltaX, deltaY, imageId, duration);
+    pan(deltaX: number, deltaY: number, duration = 500) {
+        this.camera.pan(deltaX, deltaY, duration);
     }
 
     /**
-     * Navigate to a specific position in the image
-     * @param imageX - X coordinate in image pixel space
-     * @param imageY - Y coordinate in image pixel space
-     * @param imageZ - Camera Z distance from image plane
-     * @param imageId - ID of the image
+     * Navigate to a specific position in world coordinates
+     * @param worldX - X coordinate in world space
+     * @param worldY - Y coordinate in world space
+     * @param cameraZ - Camera Z distance
      * @param duration - Animation duration in milliseconds
      */
-    to(imageX: number, imageY: number, imageZ: number, imageId: string, duration = 500) {
-        this.camera.to(imageX, imageY, imageZ, imageId, duration);
+    to(worldX: number, worldY: number, cameraZ: number, duration = 500) {
+        this.camera.to(worldX, worldY, cameraZ, duration);
     }
 
     /**
      * Add an overlay element to the viewer
-     * @param overlay - Overlay configuration
+     * @param overlay - Overlay configuration with world coordinates
      */
     addOverlay(overlay: {
         id: string;
         element: HTMLElement;
-        imageX: number;
-        imageY: number;
-        imageWidth: number;
-        imageHeight: number;
-        imageId: string;
+        worldX: number;
+        worldY: number;
+        worldWidth: number;
+        worldHeight: number;
         scaleWithZoom?: boolean;
     }): void {
         if (!this.overlayManager) {
@@ -267,11 +273,10 @@ export class IIIFViewer {
 
     /**
      * Add an annotation to the viewer
-     * @param annotation - Annotation configuration
+     * @param annotation - Annotation configuration with world coordinates
      */
     addAnnotation(annotation: {
         id: string;
-        imageId: string;
         fixed: boolean;
         x: number;
         y: number;
@@ -299,52 +304,39 @@ export class IIIFViewer {
         this.annotationManager.addAnnotation(annotation);
     }
 
-    listen(...ids: string[]) {
+    listen() {
         const mousedownHandler = (event: MouseEvent) => {
             event.preventDefault();
-
-            const image = this.images.get(ids[0]);
-            if (!image) return;
 
             // Calculate canvas-relative coordinates
             const canvasX = event.clientX - this.cachedContainerRect.left;
             const canvasY = event.clientY - this.cachedContainerRect.top;
 
-            // Start pan via camera
-            this.camera.startInteractivePan(canvasX, canvasY, ids[0]);
+            // Start pan via camera (world-space, no imageId needed)
+            this.camera.startInteractivePan(canvasX, canvasY);
 
             const onMouseMove = (moveEvent: MouseEvent) => {
-                // Update target canvas position
                 const newCanvasX = moveEvent.clientX - this.cachedContainerRect.left;
                 const newCanvasY = moveEvent.clientY - this.cachedContainerRect.top;
-
-                // Update pan via camera
                 this.camera.updateInteractivePan(newCanvasX, newCanvasY);
             };
 
             const cleanup = () => {
-                // End pan via camera
                 this.camera.endInteractivePan();
-
-                // Remove all drag-related listeners
                 document.removeEventListener('mousemove', onMouseMove);
                 document.removeEventListener('mouseup', cleanup);
                 document.removeEventListener('mouseleave', cleanup);
             };
 
-            // Listen on document to catch mouse events outside the container
             document.addEventListener('mousemove', onMouseMove);
             document.addEventListener('mouseup', cleanup);
-            // Also listen for mouse leaving the page entirely
             document.addEventListener('mouseleave', cleanup);
         };
 
         const wheelHandler = (event: WheelEvent) => {
             const canvasX = event.clientX - this.cachedContainerRect.left;
             const canvasY = event.clientY - this.cachedContainerRect.top;
-
-            // Handle wheel via camera
-            this.camera.handleWheel(event, canvasX, canvasY, ids);
+            this.camera.handleWheel(event, canvasX, canvasY);
         };
 
         this.container.addEventListener('mousedown', mousedownHandler);
@@ -356,62 +348,63 @@ export class IIIFViewer {
         );
     }
 
-
-
-    render(imageId?: string) {
+    render() {
         // Update animations first (this modifies viewport state)
         this.updateAnimations();
 
-        // Check renderer availability synchronously
         if (!this.renderer) {
             return;
         }
 
-        // If imageId is provided, render only that image, otherwise render first image
-        const id = imageId || Array.from(this.images.keys())[0];
-        if (!id) {
-            console.warn('No image to render');
+        // Get visible world bounds
+        const bounds = this.viewport.getWorldBounds();
+        const visibleImages = this.world.getVisibleImages(bounds.left, bounds.top, bounds.right, bounds.bottom);
+
+        if (visibleImages.length === 0) {
             return;
         }
 
-        const image = this.images.get(id);
-        const tileManager = this.tiles.get(id);
+        // Collect all tiles from all visible images
+        const allTiles: TileRenderData[] = [];
+        let thumbnail: TileRenderData | undefined;
 
-        if (!image || !tileManager) {
-            console.warn(`Image or TileManager not found for id: ${id}`);
-            return;
+        for (const worldImage of visibleImages) {
+            const tiles = worldImage.tileManager.getLoadedTilesForRender(this.viewport);
+            allTiles.push(...tiles);
+
+            // Use first available thumbnail
+            if (!thumbnail) {
+                thumbnail = worldImage.tileManager.getThumbnail();
+            }
         }
 
-        // Get loaded tiles for rendering
-        const tiles = tileManager.getLoadedTilesForRender(this.viewport);
+        // Sort by z for proper layering
+        allTiles.sort((a, b) => a.z - b.z);
 
-        // Get thumbnail for background rendering
-        const thumbnail = tileManager.getThumbnail();
+        // Render all tiles in a single pass
+        this.renderer.render(this.viewport, allTiles, thumbnail);
 
-        // Render with WebGPU
-        this.renderer.render(this.viewport, image, tiles, thumbnail);
-
-        // Update overlay positions to match camera transformations
+        // Update overlay positions
         if (this.overlayManager) {
             this.overlayManager.updateAllOverlays();
         }
     }
 
-    startRenderLoop(imageId?: string) {
+    startRenderLoop() {
         if (this.renderLoopActive) {
             console.log('Render loop already active');
             return;
         }
 
         this.renderLoopActive = true;
-        console.log('Starting render loop for image:', imageId);
+        console.log('Starting render loop');
 
         const loop = () => {
             if (!this.renderLoopActive) {
                 console.log('Render loop stopped');
                 return;
             }
-            this.render(imageId);
+            this.render();
             this.animationFrameId = requestAnimationFrame(loop);
         };
         loop();
@@ -427,7 +420,3 @@ export class IIIFViewer {
     }
 
 }
-
-//const viewer = new IIIFViewer(document.getElementById('iiif-container')!);
-//viewer.addImage('id', 'https://iiif.harvardartmuseums.org/manifests/object/299843');
-//viewer.
