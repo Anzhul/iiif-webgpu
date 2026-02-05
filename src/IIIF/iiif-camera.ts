@@ -2,6 +2,7 @@ import { Viewport } from './iiif-view';
 import { World } from './iiif-world';
 import type { EasingFunction } from './easing';
 import { easeOutQuart, interpolate } from './easing';
+import { Spring } from './spring';
 
 interface CameraAnimation {
     type: 'pan' | 'zoom' | 'to';
@@ -76,13 +77,10 @@ interface InteractiveState {
     // Anchor point approach: track which world point should stay under cursor
     anchorWorldX?: number;  // The world point we're anchored to
     anchorWorldY?: number;
-    targetCanvasX: number;  // Where the anchor should appear (in canvas pixels)
-    targetCanvasY: number;
-    currentCanvasX: number; // Smoothly interpolated position
-    currentCanvasY: number;
-    // Zoom state with trailing
-    targetCameraZ: number;  // Target camera Z position
-    currentCameraZ: number; // Smoothly interpolated Z position
+    // Spring animations for smooth, frame-rate independent trailing
+    canvasXSpring: Spring;
+    canvasYSpring: Spring;
+    cameraZSpring: Spring;
 }
 
 export class Camera {
@@ -92,16 +90,25 @@ export class Camera {
     private animationFrameId?: number;
     private interactiveState: InteractiveState = {
         isDragging: false,
-        targetCanvasX: 0,
-        targetCanvasY: 0,
-        currentCanvasX: 0,
-        currentCanvasY: 0,
-        targetCameraZ: 0,
-        currentCameraZ: 0
+        canvasXSpring: new Spring({
+            initial: 0,
+            springStiffness: 6.5,
+            animationTime: 1.2
+        }),
+        canvasYSpring: new Spring({
+            initial: 0,
+            springStiffness: 6.5,
+            animationTime: 1.2
+        }),
+        cameraZSpring: new Spring({
+            initial: 1,
+            springStiffness: 6.5,
+            animationTime: 1.2,
+            exponential: true
+        })
     };
     private lastZoomTime: number = 0;
     private isIdle: boolean = true; // Track idle state for performance
-    private lastScaleUpdateZ: number = 0; // Track last Z position when scale was updated
 
     // Hybrid tile request strategy (immediate + debounced)
     private lastImmediateRequestTime: number = 0;
@@ -114,15 +121,7 @@ export class Camera {
         to: new ToAnimationStrategy()
     };
 
-    // Reusable result objects to avoid allocations (performance optimization)
-    private readonly deltasResult = {
-        panDeltaX: 0,
-        panDeltaY: 0,
-        panDistanceSquared: 0,
-        zoomDelta: 0,
-        zoomAbs: 0
-    };
-
+    // Reusable result object to avoid allocations (performance optimization)
     private readonly updateResult = {
         needsUpdate: false
     };
@@ -138,18 +137,9 @@ export class Camera {
 
         // Interactive animation config
         INTERACTIVE: {
-            // Trailing/smoothness factor (0.05-0.15 recommended, lower = more trailing)
-            TRAILING_FACTOR: 0.08,
-
-            // Pan animation thresholds (pixels)
-            PAN_ANIMATION_THRESHOLD: 0.05,        // Minimum distance to continue animation
-            PAN_ANIMATION_THRESHOLD_SQ: 0.0025,   // Squared version for optimization
-            PAN_SIGNIFICANT_THRESHOLD: 1.0,        // Minimum distance to request tiles
-
-            // Zoom animation thresholds (camera Z units)
-            ZOOM_ANIMATION_THRESHOLD: 0.5,        // Minimum delta to continue animation
-            ZOOM_SNAP_THRESHOLD: 0.5,             // Distance to snap to target
-            ZOOM_SIGNIFICANT_THRESHOLD: 0.1       // Minimum delta to request tiles
+            // Spring physics parameters (OpenSeadragon-style)
+            SPRING_STIFFNESS: 6.5,      // Higher = faster response (5.0-10.0 typical)
+            ANIMATION_TIME: 1.2         // Animation time in seconds (1.0-1.5 typical)
         }
     } as const;
 
@@ -479,56 +469,7 @@ export class Camera {
     }
 
 
-    /**
-     * Calculate interactive animation deltas (reuses object to avoid allocation)
-     */
-    private calculateInteractiveDeltas() {
-        const state = this.interactiveState;
 
-        this.deltasResult.panDeltaX = state.targetCanvasX - state.currentCanvasX;
-        this.deltasResult.panDeltaY = state.targetCanvasY - state.currentCanvasY;
-        this.deltasResult.panDistanceSquared =
-            this.deltasResult.panDeltaX * this.deltasResult.panDeltaX +
-            this.deltasResult.panDeltaY * this.deltasResult.panDeltaY;
-
-        this.deltasResult.zoomDelta = state.targetCameraZ - state.currentCameraZ;
-        this.deltasResult.zoomAbs = Math.abs(this.deltasResult.zoomDelta);
-
-        return this.deltasResult;
-    }
-
-    /**
-     * Update pan animation using trailing effect
-     */
-    private updatePanAnimation(panDeltaX: number, panDeltaY: number): void {
-        const factor = this.CONFIG.INTERACTIVE.TRAILING_FACTOR;
-        this.interactiveState.currentCanvasX += panDeltaX * factor;
-        this.interactiveState.currentCanvasY += panDeltaY * factor;
-    }
-
-    /**
-     * Update zoom animation using trailing effect
-     */
-    private updateZoomAnimation(zoomDelta: number, zoomAbs: number): void {
-        const state = this.interactiveState;
-        const config = this.CONFIG.INTERACTIVE;
-
-        // Snap to target when very close to prevent infinite oscillation
-        if (zoomAbs < config.ZOOM_SNAP_THRESHOLD) {
-            state.currentCameraZ = state.targetCameraZ;
-        } else {
-            state.currentCameraZ += zoomDelta * config.TRAILING_FACTOR;
-        }
-
-        this.viewport.cameraZ = state.currentCameraZ;
-
-        // Only call expensive updateScale() if Z changed significantly
-        const zChange = Math.abs(this.viewport.cameraZ - this.lastScaleUpdateZ);
-        if (zChange > 1.0) {
-            this.viewport.updateScale();
-            this.lastScaleUpdateZ = this.viewport.cameraZ;
-        }
-    }
 
     /**
      * Apply interactive transform (anchor point transformation)
@@ -545,15 +486,15 @@ export class Camera {
         this.viewport.setCenterFromWorldPoint(
             state.anchorWorldX,
             state.anchorWorldY,
-            state.currentCanvasX,
-            state.currentCanvasY
+            state.canvasXSpring.current.value,
+            state.canvasYSpring.current.value
         );
 
         return true;
     }
 
     /**
-     * Update interactive animations (trailing effect for both pan and zoom)
+     * Update interactive animations (OpenSeadragon-style spring physics)
      * Should be called every frame when Camera is not running programmatic animations
      */
     updateInteractiveAnimation(): { needsUpdate: boolean } {
@@ -563,40 +504,30 @@ export class Camera {
         }
 
         const state = this.interactiveState;
-        const config = this.CONFIG.INTERACTIVE;
 
-        const deltas = this.calculateInteractiveDeltas();
+        // Update all springs and check if any are still animating
+        const panXAnimating = state.canvasXSpring.update();
+        const panYAnimating = state.canvasYSpring.update();
+        const zoomAnimating = state.cameraZSpring.update();
 
-        const hasPanAnimation = state.isDragging ||
-            deltas.panDistanceSquared > config.PAN_ANIMATION_THRESHOLD_SQ;
-        const hasZoomAnimation = deltas.zoomAbs > config.ZOOM_ANIMATION_THRESHOLD;
-
-        // Early exit if no animations (and set idle state)
-        if (!hasPanAnimation && !hasZoomAnimation) {
-            this.isIdle = true;
-            this.updateResult.needsUpdate = false;
-            return this.updateResult;
+        // Update viewport with new spring values
+        if (zoomAnimating) {
+            this.viewport.cameraZ = state.cameraZSpring.current.value;
+            this.viewport.updateScale();
         }
 
-        if (hasPanAnimation) {
-            this.updatePanAnimation(deltas.panDeltaX, deltas.panDeltaY);
-        }
-
-        if (hasZoomAnimation) {
-            this.updateZoomAnimation(deltas.zoomDelta, deltas.zoomAbs);
-        }
-
+        // Apply transform using updated spring values
         const needsUpdate = this.applyInteractiveTransform();
 
-        // Request tiles if movement is significant (throttled)
-        if (needsUpdate) {
-            const isSignificant =
-                deltas.panDistanceSquared > (config.PAN_SIGNIFICANT_THRESHOLD ** 2) ||
-                deltas.zoomAbs > config.ZOOM_SIGNIFICANT_THRESHOLD;
-
-            if (isSignificant) {
-                this.requestTilesHybrid(performance.now());
-            }
+        // Check if we should go idle (no animations and not dragging)
+        const isAnimating = state.isDragging || panXAnimating || panYAnimating || zoomAnimating;
+        if (!isAnimating) {
+            this.isIdle = true;
+            // Request final tiles before going idle
+            this.requestTilesImmediate();
+        } else if (needsUpdate) {
+            // Request tiles during animation (throttled)
+            this.requestTilesHybrid(performance.now());
         }
 
         this.updateResult.needsUpdate = needsUpdate;
@@ -617,16 +548,15 @@ export class Camera {
         this.interactiveState.anchorWorldX = worldPoint.x;
         this.interactiveState.anchorWorldY = worldPoint.y;
 
-        // Initialize both target and current to the starting position
-        this.interactiveState.targetCanvasX = canvasX;
-        this.interactiveState.targetCanvasY = canvasY;
-        this.interactiveState.currentCanvasX = canvasX;
-        this.interactiveState.currentCanvasY = canvasY;
-
-        // Initialize zoom state to current viewport state
-        this.interactiveState.targetCameraZ = this.viewport.cameraZ;
-        this.interactiveState.currentCameraZ = this.viewport.cameraZ;
-        this.lastScaleUpdateZ = this.viewport.cameraZ;
+        // Initialize springs to current position (no jump)
+        this.interactiveState.canvasXSpring.resetTo(canvasX);
+        this.interactiveState.canvasYSpring.resetTo(canvasY);
+        
+        // Sync zoom spring to current camera Z
+        if (!this.interactiveState.cameraZSpring.current.value || 
+            Math.abs(this.interactiveState.cameraZSpring.current.value - this.viewport.cameraZ) > 1.0) {
+            this.interactiveState.cameraZSpring.resetTo(this.viewport.cameraZ);
+        }
     }
 
     /**
@@ -635,8 +565,8 @@ export class Camera {
     updateInteractivePan(canvasX: number, canvasY: number) {
         if (!this.interactiveState.isDragging) return;
 
-        this.interactiveState.targetCanvasX = canvasX;
-        this.interactiveState.targetCanvasY = canvasY;
+        this.interactiveState.canvasXSpring.springTo(canvasX);
+        this.interactiveState.canvasYSpring.springTo(canvasY);
     }
 
     /**
@@ -650,7 +580,7 @@ export class Camera {
     }
 
     /**
-     * Handle wheel event for zooming with trailing effect
+     * Handle wheel event for zooming with spring physics
      */
     handleWheel(event: WheelEvent, canvasX: number, canvasY: number) {
         event.preventDefault();
@@ -684,30 +614,38 @@ export class Camera {
             Math.min(this.viewport.maxZ, targetCameraZ)
         );
 
-        // Update target zoom for trailing animation
-        this.interactiveState.targetCameraZ = clampedCameraZ;
-
         // Check if this is the first interactive action
         const isFirstInteraction = this.interactiveState.anchorWorldX === undefined;
 
-        // On first interaction, initialize current Z to viewport Z to prevent jump
-        if (isFirstInteraction) {
-            this.interactiveState.currentCameraZ = this.viewport.cameraZ;
+        // Sync zoom spring if needed
+        const notSynced = Math.abs(this.interactiveState.cameraZSpring.current.value - this.viewport.cameraZ) > 1.0;
+        
+        if (isFirstInteraction || notSynced) {
+            this.interactiveState.cameraZSpring.resetTo(this.viewport.cameraZ);
         }
 
-        // Always update anchor to current cursor position for zoom-to-cursor behavior
-        const worldPoint = this.viewport.canvasToWorldPoint(canvasX, canvasY);
+        // Update target zoom using spring
+        this.interactiveState.cameraZSpring.springTo(clampedCameraZ);
 
+        // Always update anchor to world point under current cursor for zoom-to-cursor behavior
+        const worldPoint = this.viewport.canvasToWorldPoint(canvasX, canvasY);
+        
         this.interactiveState.anchorWorldX = worldPoint.x;
         this.interactiveState.anchorWorldY = worldPoint.y;
-        this.interactiveState.targetCanvasX = canvasX;
-        this.interactiveState.targetCanvasY = canvasY;
-
-        // On first interaction or when not dragging, snap current position to avoid jump
-        if (isFirstInteraction || !this.interactiveState.isDragging) {
-            this.interactiveState.currentCanvasX = canvasX;
-            this.interactiveState.currentCanvasY = canvasY;
+        
+        // Reset canvas springs if cursor moved significantly or first interaction
+        const cursorDx = canvasX - this.interactiveState.canvasXSpring.current.value;
+        const cursorDy = canvasY - this.interactiveState.canvasYSpring.current.value;
+        const cursorMovedSignificantly = (cursorDx * cursorDx + cursorDy * cursorDy) > 100; // 10 pixel threshold
+        
+        if (isFirstInteraction || cursorMovedSignificantly) {
+            this.interactiveState.canvasXSpring.resetTo(canvasX);
+            this.interactiveState.canvasYSpring.resetTo(canvasY);
         }
+        
+        // Always animate to new cursor position for smooth zoom-to-cursor
+        this.interactiveState.canvasXSpring.springTo(canvasX);
+        this.interactiveState.canvasYSpring.springTo(canvasY);
     }
 
 }
