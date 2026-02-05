@@ -36,9 +36,11 @@ export class IIIFImage {
         return `${this.baseUrl}/${region}/${size}/${rotation}/${quality}.${format}`;
     }
 
-    getTileUrl(x : number, y: number, width: number, height: number, tileSize = this.tileSize) {
+    getTileUrl(x: number, y: number, width: number, height: number, scaleFactor: number = 1) {
         const region = `${x},${y},${width},${height}`;
-        const size = `${tileSize},${tileSize}`;
+        const outW = Math.ceil(width / scaleFactor);
+        const outH = Math.ceil(height / scaleFactor);
+        const size = `${outW},${outH}`;
         return this.getImageUrl(region, size);
     }
 

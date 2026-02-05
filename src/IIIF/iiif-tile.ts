@@ -39,7 +39,7 @@ export class TileManager {
   private pendingGPUUploads: Array<{ tileId: string; bitmap: ImageBitmap }> = [];
   private isProcessingUploads: boolean = false;
 
-  constructor(id: string, iiifImage: IIIFImage, maxCacheSize: number = 500, renderer?: IIIFRenderer, distanceDetail: number = 0.35) {
+  constructor(id: string, iiifImage: IIIFImage, maxCacheSize: number = 500, renderer?: IIIFRenderer, distanceDetail: number = 1.0) {
     this.id = id;
     this.image = iiifImage;
     this.tileCache = new Map();
@@ -141,10 +141,13 @@ export class TileManager {
       bottom: Math.ceil((bounds.bottom + margin) / scaleFactor)
     };
 
-    const startTileX = Math.floor(levelBounds.left / tileSize);
-    const startTileY = Math.floor(levelBounds.top / tileSize);
-    const endTileX = Math.floor(levelBounds.right / tileSize);
-    const endTileY = Math.floor(levelBounds.bottom / tileSize);
+    const maxTileX = Math.floor((this.image.width - 1) / (tileSize * scaleFactor));
+    const maxTileY = Math.floor((this.image.height - 1) / (tileSize * scaleFactor));
+
+    const startTileX = Math.max(0, Math.floor(levelBounds.left / tileSize));
+    const startTileY = Math.max(0, Math.floor(levelBounds.top / tileSize));
+    const endTileX = Math.min(maxTileX, Math.floor(levelBounds.right / tileSize));
+    const endTileY = Math.min(maxTileY, Math.floor(levelBounds.bottom / tileSize));
 
     // Calculate viewport center in tile coordinates for distance calculations
     let centerTileX: number, centerTileY: number;
@@ -228,7 +231,7 @@ export class TileManager {
       };
     }
 
-    const url = this.image.getTileUrl(imgX, imgY, imgW, imgH);
+    const url = this.image.getTileUrl(imgX, imgY, imgW, imgH, scaleFactor);
 
     return {
       id: tileId,
@@ -508,6 +511,10 @@ export class TileManager {
 
   getThumbnail() {
     return this.thumbnail;
+  }
+
+  getLoadedTileIds(): string[] {
+    return Array.from(this.tileCache.keys());
   }
 
   private evictOldTiles() {

@@ -11,16 +11,17 @@ import { Camera } from './iiif-camera';
 import { IIIFOverlayManager } from './iiif-overlay';
 import { World, WorldImage } from './iiif-world';
 import type { WorldPlacement } from './iiif-world';
+import { parseIIIFUrl, fetchAnnotationList } from './iiif-parser';
+import type { ParsedManifest, ParsedImageService } from './iiif-parser';
 
 // Re-export overlay and annotation types for convenience
 export type { OverlayElement } from './iiif-overlay';
-export type { Annotation } from './iiif-annotations';
+export type { CustomAnnotation, Annotation, IIIFAnnotation } from './iiif-annotations';
 export { IIIFOverlayManager } from './iiif-overlay';
 export type { WorldPlacement } from './iiif-world';
 
 export class IIIFViewer {
     container: HTMLElement;
-    manifests: any[];
     world: World;
     viewport: Viewport;
     camera: Camera;
@@ -29,14 +30,17 @@ export class IIIFViewer {
     annotationManager?: AnnotationManager;
     overlayManager?: IIIFOverlayManager;
     private overlayContainer?: HTMLElement;
+    private canvasNavContainer?: HTMLElement;
+    private canvasNavList?: HTMLElement;
     private eventListeners: { event: string, handler: EventListener }[];
     private renderLoopActive: boolean = false;
     private animationFrameId?: number;
     private cachedContainerRect: DOMRect;
+    private _manifest?: ParsedManifest;
+    private _currentCanvasIndex: number = -1;
 
     constructor(container: HTMLElement, options: any = {}) {
         this.container = container;
-        this.manifests = [];
         this.world = new World();
         this.viewport = new Viewport(container.clientWidth, container.clientHeight);
         this.toolbar = new ToolBar(container, options.toolbar);
@@ -54,6 +58,9 @@ export class IIIFViewer {
 
         // Initialize annotation manager with overlay manager
         this.annotationManager = new AnnotationManager(this.overlayManager);
+
+        // Set up canvas navigator
+        this.setupCanvasNav();
 
         // Set up resize observer to update cached rect and viewport
         this.setupResizeHandler();
@@ -80,6 +87,95 @@ export class IIIFViewer {
             this.overlayContainer,
             this.viewport
         );
+    }
+
+    private setupCanvasNav() {
+        this.canvasNavContainer = document.createElement('div');
+        this.canvasNavContainer.className = 'iiif-canvas-nav';
+        this.canvasNavContainer.style.display = 'none';
+
+        const header = document.createElement('div');
+        header.className = 'iiif-canvas-nav-header';
+
+        const label = document.createElement('span');
+        label.textContent = 'Pages';
+        header.appendChild(label);
+
+        const collapseBtn = document.createElement('button');
+        collapseBtn.className = 'iiif-canvas-nav-collapse';
+        collapseBtn.textContent = '\u2212';
+        header.appendChild(collapseBtn);
+
+        this.canvasNavContainer.appendChild(header);
+
+        this.canvasNavList = document.createElement('div');
+        this.canvasNavList.className = 'iiif-canvas-nav-list';
+        this.canvasNavContainer.appendChild(this.canvasNavList);
+
+        collapseBtn.addEventListener('click', () => {
+            this.canvasNavList!.classList.toggle('collapsed');
+            collapseBtn.textContent = this.canvasNavList!.classList.contains('collapsed') ? '+' : '\u2212';
+        });
+
+        this.container.appendChild(this.canvasNavContainer);
+    }
+
+    private updateCanvasNav() {
+        if (!this.canvasNavContainer || !this.canvasNavList) return;
+
+        // Hide if no manifest or single canvas
+        if (!this._manifest || this._manifest.canvases.length <= 1) {
+            this.canvasNavContainer.style.display = 'none';
+            return;
+        }
+
+        this.canvasNavContainer.style.display = 'flex';
+        this.canvasNavList.innerHTML = '';
+
+        for (let i = 0; i < this._manifest.canvases.length; i++) {
+            const canvas = this._manifest.canvases[i];
+            const item = document.createElement('div');
+            item.className = 'iiif-canvas-nav-item';
+            if (i === this._currentCanvasIndex) {
+                item.classList.add('active');
+            }
+
+            // Build thumbnail URL from first image service
+            if (canvas.images.length > 0) {
+                const serviceUrl = canvas.images[0].imageServiceUrl.replace(/\/$/, '');
+                const thumbUrl = `${serviceUrl}/full/!120,120/0/default.jpg`;
+
+                const img = document.createElement('img');
+                img.className = 'iiif-canvas-nav-item-img';
+                img.src = thumbUrl;
+                img.alt = canvas.label || `Canvas ${i + 1}`;
+                img.loading = 'lazy';
+                img.onerror = () => {
+                    // If thumbnail fails, show a placeholder
+                    img.style.display = 'none';
+                };
+                item.appendChild(img);
+            }
+
+            const labelEl = document.createElement('div');
+            labelEl.className = 'iiif-canvas-nav-item-label';
+            labelEl.textContent = canvas.label || `${i + 1}`;
+            item.appendChild(labelEl);
+
+            item.addEventListener('click', () => {
+                this.loadCanvas(i);
+            });
+
+            this.canvasNavList.appendChild(item);
+        }
+    }
+
+    private updateCanvasNavActiveState() {
+        if (!this.canvasNavList) return;
+        const items = this.canvasNavList.querySelectorAll('.iiif-canvas-nav-item');
+        items.forEach((item, i) => {
+            item.classList.toggle('active', i === this._currentCanvasIndex);
+        });
     }
 
     private async initializeRenderer() {
@@ -188,7 +284,7 @@ export class IIIFViewer {
         };
 
         // Create TileManager
-        const tileManager = new TileManager(id, iiifImage, 500, this.renderer, 0.35);
+        const tileManager = new TileManager(id, iiifImage, 500, this.renderer);
 
         // Create WorldImage and add to world
         const worldImage = new WorldImage(iiifImage, tileManager, worldPlacement);
@@ -249,6 +345,152 @@ export class IIIFViewer {
      */
     to(worldX: number, worldY: number, cameraZ: number, duration = 500) {
         this.camera.to(worldX, worldY, cameraZ, duration);
+    }
+
+    /**
+     * Clear all images from the world and free GPU resources.
+     */
+    clearWorld() {
+        for (const [id, wi] of this.world.worldImages) {
+            for (const tileId of wi.tileManager.getLoadedTileIds()) {
+                this.renderer?.destroyTexture(tileId);
+            }
+            this.world.removeImage(id);
+        }
+        // Clear IIIF annotations (custom annotations are preserved across loads)
+        this.annotationManager?.clearIIIFAnnotations();
+    }
+
+    /**
+     * Load any IIIF URL (image service, bare URL, or manifest).
+     * Detects the resource type and displays it appropriately.
+     * For manifests, loads the first canvas.
+     */
+    async loadUrl(url: string, focus: boolean = true): Promise<void> {
+        const result = await parseIIIFUrl(url);
+
+        if (result.type === 'image-service-2' || result.type === 'image-service-3') {
+            this.clearWorld();
+            this._manifest = undefined;
+            this._currentCanvasIndex = -1;
+
+            const svc = result as ParsedImageService;
+            const infoUrl = svc.id.replace(/\/$/, '') + '/info.json';
+            await this.addImage('image-0', infoUrl, focus);
+            this.updateCanvasNav();
+        } else {
+            this.clearWorld();
+            this._manifest = result as ParsedManifest;
+            this.updateCanvasNav();
+            await this.loadCanvas(0, focus);
+        }
+    }
+
+    /**
+     * Load a specific canvas from the current manifest.
+     * @param index - Zero-based canvas index
+     * @param focus - Whether to fit viewport to the canvas
+     */
+    async loadCanvas(index: number, focus: boolean = true): Promise<void> {
+        if (!this._manifest) {
+            throw new Error('No manifest loaded. Call loadUrl() with a manifest URL first.');
+        }
+        if (index < 0 || index >= this._manifest.canvases.length) {
+            throw new Error(`Canvas index ${index} out of range (0-${this._manifest.canvases.length - 1})`);
+        }
+
+        this.clearWorld();
+        this._currentCanvasIndex = index;
+        this.updateCanvasNavActiveState();
+
+        const canvas = this._manifest.canvases[index];
+
+        let loadedCount = 0;
+        for (let i = 0; i < canvas.images.length; i++) {
+            const img = canvas.images[i];
+            const infoUrl = img.imageServiceUrl.replace(/\/$/, '') + '/info.json';
+
+            let placement: WorldPlacement | undefined;
+            if (img.target) {
+                placement = {
+                    worldX: img.target.x,
+                    worldY: img.target.y,
+                    worldWidth: img.target.w,
+                    worldHeight: img.target.h
+                };
+            }
+
+            try {
+                const shouldFocus = focus && i === canvas.images.length - 1;
+                await this.addImage(`canvas-${index}-img-${i}`, infoUrl, shouldFocus, placement);
+                loadedCount++;
+            } catch (err) {
+                console.warn(`Failed to load image ${i} for canvas ${index}: ${img.imageServiceUrl}`, err);
+            }
+        }
+
+        // If focus requested but last image failed, fit to whatever loaded
+        if (focus && loadedCount > 0 && this.world.worldImages.size > 0) {
+            this.viewport.fitToWorld(this.world.worldWidth, this.world.worldHeight);
+        }
+
+        // Load IIIF annotations for this canvas
+        await this.loadIIIFAnnotationsForCanvas(canvas);
+    }
+
+    /**
+     * Fetch external annotation lists and load all IIIF annotations for a canvas.
+     */
+    private async loadIIIFAnnotationsForCanvas(canvas: { width: number; height: number; annotations: import('./iiif-parser').ParsedAnnotationPage[]; annotationListUrls: string[] }): Promise<void> {
+        if (!this.annotationManager) return;
+
+        // Clear previous IIIF annotations
+        this.annotationManager.clearIIIFAnnotations();
+
+        // Collect inline annotations already parsed
+        const allPages = [...canvas.annotations];
+
+        // Fetch external annotation lists
+        for (const listUrl of canvas.annotationListUrls) {
+            try {
+                const page = await fetchAnnotationList(listUrl);
+                if (page && page.annotations.length > 0) {
+                    allPages.push(page);
+                }
+            } catch {
+                console.warn(`Failed to fetch annotation list: ${listUrl}`);
+            }
+        }
+
+        if (allPages.length > 0) {
+            this.annotationManager.loadIIIFAnnotations(allPages, canvas.width, canvas.height);
+        }
+    }
+
+    /**
+     * Navigate to the next canvas in the manifest.
+     */
+    async nextCanvas(): Promise<void> {
+        if (!this._manifest || this._currentCanvasIndex >= this._manifest.canvases.length - 1) return;
+        await this.loadCanvas(this._currentCanvasIndex + 1);
+    }
+
+    /**
+     * Navigate to the previous canvas in the manifest.
+     */
+    async previousCanvas(): Promise<void> {
+        if (!this._manifest || this._currentCanvasIndex <= 0) return;
+        await this.loadCanvas(this._currentCanvasIndex - 1);
+    }
+
+    /** Number of canvases in the loaded manifest, or 0 if no manifest. */
+    get canvasCount(): number {
+        return this._manifest?.canvases.length ?? 0;
+    }
+
+    /** Current canvas index, or -1 if no manifest/canvas loaded. */
+    get currentCanvas(): number {
+        return this._currentCanvasIndex;
     }
 
     /**

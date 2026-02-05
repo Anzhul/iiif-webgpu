@@ -238,3 +238,102 @@ body{
   &::-webkit-scrollbar { width: 4px; }
   &::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); }
 }
+
+// --- Canvas Navigator ---
+.iiif-canvas-nav {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 1500;
+  background: rgba(20, 20, 30, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  backdrop-filter: blur(8px);
+  display: flex;
+  flex-direction: column;
+  max-height: 70vh;
+  width: 72px;
+  cursor: default;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+
+  &-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #888;
+  }
+
+  &-collapse {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 14px;
+    cursor: pointer;
+    padding: 0 2px;
+    line-height: 1;
+    &:hover { color: #fff; }
+  }
+
+  &-list {
+    overflow-y: auto;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+
+    &.collapsed { display: none; }
+
+    &::-webkit-scrollbar { width: 4px; }
+    &::-webkit-scrollbar-track { background: transparent; }
+    &::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.12);
+      border-radius: 2px;
+    }
+  }
+
+  &-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: border-color 0.15s, background 0.15s;
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    &.active {
+      border-color: rgba(80, 130, 255, 0.6);
+      background: rgba(80, 130, 255, 0.1);
+    }
+
+    &-img {
+      width: 54px;
+      height: 54px;
+      object-fit: contain;
+      border-radius: 2px;
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    &-label {
+      font-size: 9px;
+      color: #aaa;
+      text-align: center;
+      margin-top: 2px;
+      max-width: 58px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+}

@@ -35,12 +35,32 @@ export interface ParsedCanvasImage {
     target?: { x: number; y: number; w: number; h: number };
 }
 
+export interface ParsedAnnotation {
+    id: string;
+    motivation: string;
+    body: {
+        type: string;
+        value?: string;
+        format?: string;
+        language?: string;
+        id?: string;
+    };
+    target?: { x: number; y: number; w: number; h: number };
+}
+
+export interface ParsedAnnotationPage {
+    id: string;
+    annotations: ParsedAnnotation[];
+}
+
 export interface ParsedCanvas {
     id: string;
     label?: string;
     width: number;
     height: number;
     images: ParsedCanvasImage[];
+    annotations: ParsedAnnotationPage[];
+    annotationListUrls: string[];
 }
 
 export interface ParsedManifest {
@@ -202,12 +222,23 @@ function extractCanvasesV2(json: any): ParsedCanvas[] {
             }
         }
 
+        // Collect annotation list URLs from otherContent
+        const annotationListUrls: string[] = [];
+        if (canvas.otherContent) {
+            for (const oc of canvas.otherContent) {
+                const url = oc['@id'] || oc.id || (typeof oc === 'string' ? oc : '');
+                if (url) annotationListUrls.push(url);
+            }
+        }
+
         canvases.push({
             id: canvas['@id'] || '',
             label: typeof canvas.label === 'string' ? canvas.label : undefined,
             width: canvas.width,
             height: canvas.height,
-            images
+            images,
+            annotations: [],
+            annotationListUrls
         });
     }
 
@@ -277,16 +308,72 @@ function extractCanvasesV3(json: any): ParsedCanvas[] {
             label = values[0]?.[0];
         }
 
+        // Parse non-painting annotations from canvas.annotations
+        const parsedAnnotationPages: ParsedAnnotationPage[] = [];
+        const annotationListUrls: string[] = [];
+
+        const nonPaintingPages = canvas.annotations || [];
+        for (const page of nonPaintingPages) {
+            if (page.type !== 'AnnotationPage') continue;
+
+            // If the page has no items, it might be an external reference
+            if (!page.items || page.items.length === 0) {
+                const pageUrl = page.id || '';
+                if (pageUrl) annotationListUrls.push(pageUrl);
+                continue;
+            }
+
+            const parsed = parseAnnotationPageV3(page);
+            if (parsed.annotations.length > 0) {
+                parsedAnnotationPages.push(parsed);
+            }
+        }
+
         canvases.push({
             id: canvas.id || '',
             label,
             width: canvas.width,
             height: canvas.height,
-            images
+            images,
+            annotations: parsedAnnotationPages,
+            annotationListUrls
         });
     }
 
     return canvases;
+}
+
+function parseAnnotationPageV3(page: any): ParsedAnnotationPage {
+    const annotations: ParsedAnnotation[] = [];
+
+    for (const ann of page.items || []) {
+        if (ann.type !== 'Annotation') continue;
+
+        const motivation = ann.motivation || 'unknown';
+        if (motivation === 'painting') continue; // already handled
+
+        const body = ann.body || {};
+        const bodyValue = body.value || body.chars || '';
+        const bodyType = body.type || (typeof body === 'string' ? 'TextualBody' : 'unknown');
+
+        annotations.push({
+            id: ann.id || '',
+            motivation,
+            body: {
+                type: bodyType,
+                value: bodyValue,
+                format: body.format,
+                language: body.language,
+                id: body.id
+            },
+            target: parseXywhFragment(typeof ann.target === 'string' ? ann.target : ann.target?.source)
+        });
+    }
+
+    return {
+        id: page.id || '',
+        annotations
+    };
 }
 
 // --- Helpers ---
@@ -306,6 +393,85 @@ export function parseXywhFragment(target: string | undefined): { x: number; y: n
         y: parseInt(match[2], 10),
         w: parseInt(match[3], 10),
         h: parseInt(match[4], 10)
+    };
+}
+
+// --- Annotation fetching ---
+
+/**
+ * Fetch an external annotation list (v2 otherContent or v3 AnnotationPage).
+ * Returns parsed annotations from the fetched resource.
+ */
+export async function fetchAnnotationList(url: string): Promise<ParsedAnnotationPage | null> {
+    const json = await fetchJsonSafe(url);
+    if (!json) return null;
+
+    // v2: sc:AnnotationList with resources[]
+    if (json['@type'] === 'sc:AnnotationList' && json.resources) {
+        return parseAnnotationListV2(json);
+    }
+
+    // v3: AnnotationPage with items[]
+    if (json.type === 'AnnotationPage' && json.items) {
+        return parseAnnotationPageV3(json);
+    }
+
+    return null;
+}
+
+function parseAnnotationListV2(json: any): ParsedAnnotationPage {
+    const annotations: ParsedAnnotation[] = [];
+
+    for (const res of json.resources || []) {
+        if (res['@type'] !== 'oa:Annotation') continue;
+
+        const motivation = Array.isArray(res.motivation)
+            ? res.motivation.join(', ')
+            : (res.motivation || 'unknown');
+
+        // Body can be resource array or single object
+        const resources = Array.isArray(res.resource) ? res.resource : [res.resource];
+        const firstResource = resources[0] || {};
+
+        const bodyValue = firstResource.chars || firstResource.value || '';
+        const bodyType = firstResource['@type'] || 'unknown';
+
+        // Target with xywh from "on" field
+        let target: { x: number; y: number; w: number; h: number } | undefined;
+        if (res.on) {
+            // v2 "on" can be a string or an object with selector
+            if (typeof res.on === 'string') {
+                target = parseXywhFragment(res.on);
+            } else if (res.on.selector) {
+                const selectorValue = res.on.selector.value || res.on.selector['@value'] || '';
+                const match = selectorValue.match(/xywh=(\d+),(\d+),(\d+),(\d+)/);
+                if (match) {
+                    target = {
+                        x: parseInt(match[1], 10),
+                        y: parseInt(match[2], 10),
+                        w: parseInt(match[3], 10),
+                        h: parseInt(match[4], 10)
+                    };
+                }
+            }
+        }
+
+        annotations.push({
+            id: res['@id'] || '',
+            motivation,
+            body: {
+                type: bodyType,
+                value: bodyValue,
+                format: firstResource.format,
+                language: firstResource.language
+            },
+            target
+        });
+    }
+
+    return {
+        id: json['@id'] || '',
+        annotations
     };
 }
 
