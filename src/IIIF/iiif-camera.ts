@@ -510,7 +510,8 @@ export class Camera {
         const panYAnimating = state.canvasYSpring.update();
         const zoomAnimating = state.cameraZSpring.update();
 
-        // Update viewport with new spring values
+        // Only update viewport camera Z when zoom is actively animating
+        // This prevents jolts by keeping viewport as source of truth when at rest
         if (zoomAnimating) {
             this.viewport.cameraZ = state.cameraZSpring.current.value;
             this.viewport.updateScale();
@@ -565,6 +566,7 @@ export class Camera {
     updateInteractivePan(canvasX: number, canvasY: number) {
         if (!this.interactiveState.isDragging) return;
 
+        // Animate canvas position with springs for smooth trailing
         this.interactiveState.canvasXSpring.springTo(canvasX);
         this.interactiveState.canvasYSpring.springTo(canvasY);
     }
@@ -585,6 +587,9 @@ export class Camera {
     handleWheel(event: WheelEvent, canvasX: number, canvasY: number) {
         event.preventDefault();
 
+        // Check if we're coming out of idle (need to sync spring timing)
+        const wasIdle = this.isIdle;
+        
         // Wake up from idle state
         this.isIdle = false;
 
@@ -594,6 +599,22 @@ export class Camera {
             return;
         }
         this.lastZoomTime = now;
+
+        // Check if this is the first interactive action
+        const isFirstInteraction = this.interactiveState.anchorWorldX === undefined;
+
+        // Always sync zoom spring to viewport when coming out of idle or first interaction
+        // This ensures the zoom animation starts from the current viewport position
+        if (wasIdle || isFirstInteraction) {
+            this.interactiveState.cameraZSpring.resetTo(this.viewport.cameraZ);
+        }
+        
+        // Refresh spring timing when coming out of idle to prevent stale timestamps
+        if (wasIdle) {
+            this.interactiveState.canvasXSpring.current.time = now;
+            this.interactiveState.canvasYSpring.current.time = now;
+            this.interactiveState.cameraZSpring.current.time = now;
+        }
 
         // Zoom factor for each scroll increment
         const zoomFactor = 1.5;
@@ -613,16 +634,6 @@ export class Camera {
             this.viewport.minZ,
             Math.min(this.viewport.maxZ, targetCameraZ)
         );
-
-        // Check if this is the first interactive action
-        const isFirstInteraction = this.interactiveState.anchorWorldX === undefined;
-
-        // Sync zoom spring if needed
-        const notSynced = Math.abs(this.interactiveState.cameraZSpring.current.value - this.viewport.cameraZ) > 1.0;
-        
-        if (isFirstInteraction || notSynced) {
-            this.interactiveState.cameraZSpring.resetTo(this.viewport.cameraZ);
-        }
 
         // Update target zoom using spring
         this.interactiveState.cameraZSpring.springTo(clampedCameraZ);
