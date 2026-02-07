@@ -147,10 +147,9 @@ export class Viewport {
   getWorldBounds(): { left: number; top: number; right: number; bottom: number; width: number; height: number } {
     if (!this.boundsCacheInvalid && this.worldBoundsCache.bounds) {
       const c = this.worldBoundsCache;
-      const roundedScale = Math.round(this.scale * 1000) / 1000;
       if (c.centerX === this.centerX &&
           c.centerY === this.centerY &&
-          c.scale === roundedScale &&
+          c.scale === this.scale &&
           c.containerWidth === this.containerWidth &&
           c.containerHeight === this.containerHeight) {
         return c.bounds!;
@@ -171,12 +170,11 @@ export class Viewport {
       height: worldHeight
     };
 
-    const roundedScale = Math.round(this.scale * 1000) / 1000;
     this.worldBoundsCache = {
       bounds,
       centerX: this.centerX,
       centerY: this.centerY,
-      scale: roundedScale,
+      scale: this.scale,
       containerWidth: this.containerWidth,
       containerHeight: this.containerHeight,
     };

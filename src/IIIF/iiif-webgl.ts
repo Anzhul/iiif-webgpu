@@ -262,10 +262,11 @@ export class WebGLRenderer implements IIIFRenderer {
 
     /**
      * Get or create cached perspective matrix
+     * Only recalculates when canvas size changes
      */
-    private getPerspectiveMatrix(fov: number, aspectRatio: number, near: number, far: number): Float32Array {
-        if (this.perspectiveCache.fov === fov &&
-            this.perspectiveCache.aspectRatio === aspectRatio &&
+    private getPerspectiveMatrix(aspectRatio: number, fov: number, near: number, far: number): Float32Array {
+        if (this.perspectiveCache.aspectRatio === aspectRatio &&
+            this.perspectiveCache.fov === fov &&
             this.perspectiveCache.near === near &&
             this.perspectiveCache.far === far &&
             this.cachedPerspectiveMatrix) {
@@ -273,8 +274,7 @@ export class WebGLRenderer implements IIIFRenderer {
         }
 
         const projection = mat4.create();
-        const fovRadians = (fov * Math.PI) / 180;
-        mat4.perspective(projection, fovRadians, aspectRatio, near, far);
+        mat4.perspective(projection, fov, aspectRatio, near, far);
 
         this.cachedPerspectiveMatrix = projection as Float32Array;
 
@@ -299,41 +299,48 @@ export class WebGLRenderer implements IIIFRenderer {
         near: number,
         far: number
     ): Float32Array {
-        const roundedCenterX = Math.round(centerX * 1000000) / 1000000;
-        const roundedCenterY = Math.round(centerY * 1000000) / 1000000;
-        const roundedCameraZ = Math.round(cameraZ * 10000) / 10000;
+        // Use small threshold to match tile manager viewport change detection (0.001)
+        // This prevents cache thrashing from floating point precision while maintaining smooth animation
+        const threshold = 0.001;
 
-        if (this.mvpCache.centerX === roundedCenterX &&
-            this.mvpCache.centerY === roundedCenterY &&
+        const centerXDiff = Math.abs(this.mvpCache.centerX - centerX);
+        const centerYDiff = Math.abs(this.mvpCache.centerY - centerY);
+        const cameraZDiff = Math.abs(this.mvpCache.cameraZ - cameraZ);
+
+        const cacheHit = centerXDiff < threshold &&
+            centerYDiff < threshold &&
             this.mvpCache.canvasWidth === canvasWidth &&
             this.mvpCache.canvasHeight === canvasHeight &&
-            this.mvpCache.cameraZ === roundedCameraZ &&
+            cameraZDiff < threshold &&
             this.mvpCache.fov === fov &&
             this.mvpCache.near === near &&
             this.mvpCache.far === far &&
-            this.cachedMVPMatrix) {
-            return this.cachedMVPMatrix;
+            this.cachedMVPMatrix;
+
+        if (cacheHit) {
+            return this.cachedMVPMatrix!;
         }
 
+        // Projection matrix
         const aspectRatio = canvasWidth / canvasHeight;
-        const projection = this.getPerspectiveMatrix(fov, aspectRatio, near, far);
+        const projection = this.getPerspectiveMatrix(aspectRatio, fov, near, far);
 
-        const lookAtX = centerX;
-        const lookAtY = centerY;
-
+        // View matrix: camera looking at (centerX, centerY, 0) from (0, 0, cameraZ)
+        // Order: move camera back in Z, flip Y, then center the world point
         const view = mat4.create();
-        mat4.translate(view, view, [-lookAtX, lookAtY, -cameraZ]);
+        mat4.translate(view, view, [0, 0, -cameraZ]);
         mat4.scale(view, view, [1, -1, 1]);
+        mat4.translate(view, view, [-centerX, -centerY, 0]);
 
         mat4.multiply(this.reusableVP, projection as mat4, view as mat4);
 
         this.cachedMVPMatrix = new Float32Array(this.reusableVP);
 
-        this.mvpCache.centerX = roundedCenterX;
-        this.mvpCache.centerY = roundedCenterY;
+        this.mvpCache.centerX = centerX;
+        this.mvpCache.centerY = centerY;
         this.mvpCache.canvasWidth = canvasWidth;
         this.mvpCache.canvasHeight = canvasHeight;
-        this.mvpCache.cameraZ = roundedCameraZ;
+        this.mvpCache.cameraZ = cameraZ;
         this.mvpCache.fov = fov;
         this.mvpCache.near = near;
         this.mvpCache.far = far;

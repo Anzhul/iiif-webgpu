@@ -1,4 +1,3 @@
-
 import { IIIFImage } from './iiif-image';
 import { Viewport } from './iiif-view';
 import { TileManager } from './iiif-tile';
@@ -6,21 +5,49 @@ import { WebGPURenderer } from './iiif-webgpu';
 import { WebGLRenderer } from './iiif-webgl';
 import type { IIIFRenderer, TileRenderData } from './iiif-renderer';
 import { ToolBar } from './iiif-toolbar';
-import { AnnotationManager } from './iiif-annotations'
+import { AnnotationManager } from './iiif-annotations';
 import { Camera } from './iiif-camera';
 import { IIIFOverlayManager } from './iiif-overlay';
 import { World, WorldImage } from './iiif-world';
 import type { WorldPlacement } from './iiif-world';
 import { parseIIIFUrl, fetchAnnotationList } from './iiif-parser';
-import type { ParsedManifest, ParsedImageService } from './iiif-parser';
+import type { ParsedManifest, ParsedImageService, ParsedAnnotationPage } from './iiif-parser';
 
-// Re-export overlay and annotation types for convenience
+// Re-export types for convenience
 export type { OverlayElement } from './iiif-overlay';
 export type { CustomAnnotation, Annotation, IIIFAnnotation } from './iiif-annotations';
 export { IIIFOverlayManager } from './iiif-overlay';
 export type { WorldPlacement } from './iiif-world';
 
+/**
+ * IIIFViewer - Main viewer class orchestrating all components
+ *
+ * Design principles:
+ * - Render-on-demand with dirty flag pattern (only render when needed)
+ * - Proper resource cleanup with destroy methods
+ * - Centralized configuration
+ * - Type-safe event handling
+ * - Efficient viewport change detection
+ * - Lazy loading and caching where possible
+ */
+
+export interface IIIFViewerOptions {
+    renderer?: 'webgpu' | 'webgl' | 'auto';
+    enableOverlays?: boolean;
+    enableToolbar?: boolean;
+    maxCacheSize?: number;
+    toolbar?: any;
+}
+
+interface CanvasInfo {
+    width: number;
+    height: number;
+    annotations: ParsedAnnotationPage[];
+    annotationListUrls: string[];
+}
+
 export class IIIFViewer {
+    // Core components
     container: HTMLElement;
     world: World;
     viewport: Viewport;
@@ -29,64 +56,86 @@ export class IIIFViewer {
     toolbar?: ToolBar;
     annotationManager?: AnnotationManager;
     overlayManager?: IIIFOverlayManager;
+
+    // UI elements
     private overlayContainer?: HTMLElement;
     private canvasNavContainer?: HTMLElement;
     private canvasNavList?: HTMLElement;
-    private eventListeners: { event: string, handler: EventListener }[];
+
+    // State
+    private manifest?: ParsedManifest;
+    private currentCanvasIndex: number = -1;
     private renderLoopActive: boolean = false;
     private animationFrameId?: number;
-    private cachedContainerRect: DOMRect;
-    private _manifest?: ParsedManifest;
-    private _currentCanvasIndex: number = -1;
+    private needsRender: boolean = true;
 
-    constructor(container: HTMLElement, options: any = {}) {
+    // Cached values for performance
+    private cachedContainerRect: DOMRect;
+    private lastViewportState = {
+        centerX: NaN,
+        centerY: NaN,
+        scale: NaN
+    };
+
+    // Event tracking
+    private eventHandlers: Map<Element, Map<string, EventListener>> = new Map();
+    private abortController: AbortController = new AbortController();
+
+    // Configuration
+    private readonly CONFIG: IIIFViewerOptions;
+
+    constructor(container: HTMLElement, options: IIIFViewerOptions = {}) {
         this.container = container;
+        this.CONFIG = {
+            renderer: options.renderer ?? 'auto',
+            enableOverlays: options.enableOverlays ?? true,
+            enableToolbar: options.enableToolbar ?? true,
+            maxCacheSize: options.maxCacheSize ?? 500,
+            toolbar: options.toolbar
+        };
+
+        // Initialize core components
         this.world = new World();
         this.viewport = new Viewport(container.clientWidth, container.clientHeight);
-        this.toolbar = new ToolBar(container, options.toolbar);
         this.camera = new Camera(this.viewport, this.world);
 
-        this.eventListeners = [];
-
-        // Cache the container's bounding rect
+        // Cache container rect
         this.cachedContainerRect = container.getBoundingClientRect();
 
-        // Set up overlay container and manager if enabled
-        if (options.enableOverlays !== false) {
+        // Set up UI components
+        if (this.CONFIG.enableOverlays) {
             this.setupOverlayContainer();
         }
-
-        // Initialize annotation manager with overlay manager
         this.annotationManager = new AnnotationManager(this.overlayManager);
-
-        // Set up canvas navigator
         this.setupCanvasNav();
 
-        // Set up resize observer to update cached rect and viewport
-        this.setupResizeHandler();
+        if (this.CONFIG.enableToolbar) {
+            this.toolbar = new ToolBar(container, this.CONFIG.toolbar);
+        }
 
-        // Check if webGPU is supported and initialize renderer
+        // Set up handlers
+        this.setupResizeHandler();
         this.initializeRenderer();
     }
 
+    // ============================================================
+    // INITIALIZATION
+    // ============================================================
+
     private setupOverlayContainer() {
-        // Create a div that overlays the canvas
         this.overlayContainer = document.createElement('div');
-        this.overlayContainer.style.position = 'absolute';
-        this.overlayContainer.style.top = '0';
-        this.overlayContainer.style.left = '0';
-        this.overlayContainer.style.width = '100%';
-        this.overlayContainer.style.height = '100%';
-        this.overlayContainer.style.pointerEvents = 'none';
-        this.overlayContainer.style.zIndex = '11';
+        Object.assign(this.overlayContainer.style, {
+            position: 'absolute',
+            top: '0',
+            left: '0',
+            width: '100%',
+            height: '100%',
+            pointerEvents: 'none',
+            zIndex: '11'
+        });
 
         this.container.appendChild(this.overlayContainer);
-
-        // Initialize overlay manager
-        this.overlayManager = new IIIFOverlayManager(
-            this.overlayContainer,
-            this.viewport
-        );
+        this.overlayManager = new IIIFOverlayManager(this.overlayContainer, this.viewport);
     }
 
     private setupCanvasNav() {
@@ -103,7 +152,7 @@ export class IIIFViewer {
 
         const collapseBtn = document.createElement('button');
         collapseBtn.className = 'iiif-canvas-nav-collapse';
-        collapseBtn.textContent = '\u2212';
+        collapseBtn.textContent = '−';
         header.appendChild(collapseBtn);
 
         this.canvasNavContainer.appendChild(header);
@@ -112,181 +161,187 @@ export class IIIFViewer {
         this.canvasNavList.className = 'iiif-canvas-nav-list';
         this.canvasNavContainer.appendChild(this.canvasNavList);
 
-        collapseBtn.addEventListener('click', () => {
+        this.addEventListener(collapseBtn, 'click', () => {
             this.canvasNavList!.classList.toggle('collapsed');
-            collapseBtn.textContent = this.canvasNavList!.classList.contains('collapsed') ? '+' : '\u2212';
+            collapseBtn.textContent = this.canvasNavList!.classList.contains('collapsed') ? '+' : '−';
         });
 
         this.container.appendChild(this.canvasNavContainer);
     }
 
-    private updateCanvasNav() {
-        if (!this.canvasNavContainer || !this.canvasNavList) return;
+    private async initializeRenderer() {
+        const rendererType = this.CONFIG.renderer;
 
-        // Hide if no manifest or single canvas
-        if (!this._manifest || this._manifest.canvases.length <= 1) {
-            this.canvasNavContainer.style.display = 'none';
+        if (rendererType === 'webgl') {
+            await this.initializeWebGL();
             return;
         }
 
-        this.canvasNavContainer.style.display = 'flex';
-        this.canvasNavList.innerHTML = '';
-
-        for (let i = 0; i < this._manifest.canvases.length; i++) {
-            const canvas = this._manifest.canvases[i];
-            const item = document.createElement('div');
-            item.className = 'iiif-canvas-nav-item';
-            if (i === this._currentCanvasIndex) {
-                item.classList.add('active');
-            }
-
-            // Build thumbnail URL from first image service
-            if (canvas.images.length > 0) {
-                const serviceUrl = canvas.images[0].imageServiceUrl.replace(/\/$/, '');
-                const thumbUrl = `${serviceUrl}/full/!120,120/0/default.jpg`;
-
-                const img = document.createElement('img');
-                img.className = 'iiif-canvas-nav-item-img';
-                img.src = thumbUrl;
-                img.alt = canvas.label || `Canvas ${i + 1}`;
-                img.loading = 'lazy';
-                img.onerror = () => {
-                    // If thumbnail fails, show a placeholder
-                    img.style.display = 'none';
-                };
-                item.appendChild(img);
-            }
-
-            const labelEl = document.createElement('div');
-            labelEl.className = 'iiif-canvas-nav-item-label';
-            labelEl.textContent = canvas.label || `${i + 1}`;
-            item.appendChild(labelEl);
-
-            item.addEventListener('click', () => {
-                this.loadCanvas(i);
-            });
-
-            this.canvasNavList.appendChild(item);
+        if (rendererType === 'webgpu') {
+            await this.initializeWebGPU();
+            return;
         }
-    }
 
-    private updateCanvasNavActiveState() {
-        if (!this.canvasNavList) return;
-        const items = this.canvasNavList.querySelectorAll('.iiif-canvas-nav-item');
-        items.forEach((item, i) => {
-            item.classList.toggle('active', i === this._currentCanvasIndex);
-        });
-    }
-
-    private async initializeRenderer() {
+        // Auto mode: try WebGPU, fallback to WebGL
         if (await this.isWebGPUAvailable()) {
-            try {
-                console.log('Initializing WebGPU renderer');
-                this.renderer = new WebGPURenderer(this.container);
-                await this.renderer.initialize();
-
-                // Set renderer for all existing TileManagers
-                for (const wi of this.world.worldImages.values()) {
-                    wi.tileManager.setRenderer(this.renderer);
-                }
-            } catch (error) {
-                console.error('Failed to initialize WebGPU renderer:', error);
-                this.renderer = undefined;
-                await this.initializeWebGLFallback();
+            const success = await this.initializeWebGPU();
+            if (!success) {
+                console.warn('WebGPU initialization failed, falling back to WebGL');
+                await this.initializeWebGL();
             }
         } else {
-            console.warn('WebGPU is not available in this browser, using WebGL fallback');
-            await this.initializeWebGLFallback();
+            console.log('WebGPU not available, using WebGL');
+            await this.initializeWebGL();
         }
     }
 
-    private async initializeWebGLFallback() {
+    private async initializeWebGPU(): Promise<boolean> {
+        try {
+            console.log('Initializing WebGPU renderer');
+            this.renderer = new WebGPURenderer(this.container);
+            await this.renderer.initialize();
+            this.updateRendererForAllTileManagers();
+            return true;
+        } catch (error) {
+            console.error('Failed to initialize WebGPU renderer:', error);
+            this.renderer = undefined;
+            return false;
+        }
+    }
+
+    private async initializeWebGL(): Promise<boolean> {
         try {
             console.log('Initializing WebGL renderer');
             this.renderer = new WebGLRenderer(this.container);
             await this.renderer.initialize();
-
-            // Set renderer for all existing TileManagers
-            for (const wi of this.world.worldImages.values()) {
-                wi.tileManager.setRenderer(this.renderer);
-            }
+            this.updateRendererForAllTileManagers();
+            return true;
         } catch (error) {
             console.error('Failed to initialize WebGL renderer:', error);
             this.renderer = undefined;
+            return false;
         }
     }
 
     private async isWebGPUAvailable(): Promise<boolean> {
-        if (!navigator.gpu) {
-            return false;
-        }
+        if (!navigator.gpu) return false;
         try {
             const adapter = await navigator.gpu.requestAdapter();
             return adapter !== null;
-        } catch (error) {
-            console.error('Error checking WebGPU availability:', error);
+        } catch {
             return false;
+        }
+    }
+
+    private updateRendererForAllTileManagers() {
+        if (!this.renderer) return;
+        for (const wi of this.world.worldImages.values()) {
+            wi.tileManager.setRenderer(this.renderer);
         }
     }
 
     private setupResizeHandler() {
-        const resizeHandler = () => {
+        const resizeObserver = new ResizeObserver(() => {
             this.handleResize();
-        };
-
-        window.addEventListener('resize', resizeHandler);
-        this.eventListeners.push({ event: 'resize', handler: resizeHandler as EventListener });
+        });
+        resizeObserver.observe(this.container);
     }
 
     private handleResize() {
-        // Update cached rect
         this.cachedContainerRect = this.container.getBoundingClientRect();
-
-        // Update viewport dimensions
         this.viewport.containerWidth = this.container.clientWidth;
         this.viewport.containerHeight = this.container.clientHeight;
 
-        // Update renderer canvas size if available
-        if (this.renderer) {
-            this.renderer.resize();
-        }
+        this.renderer?.resize();
+        this.requestTilesForAllVisibleImages();
+        this.overlayManager?.updateAllOverlays();
+        this.markDirty();
+    }
 
-        // Request new tiles for all visible images
-        const bounds = this.viewport.getWorldBounds();
-        const visibleImages = this.world.getVisibleImages(bounds.left, bounds.top, bounds.right, bounds.bottom);
-        for (const wi of visibleImages) {
-            wi.tileManager.requestTilesForViewport(this.viewport);
-        }
+    // ============================================================
+    // EVENT HANDLING
+    // ============================================================
 
-        // Update overlay positions after resize
-        if (this.overlayManager) {
-            this.overlayManager.updateAllOverlays();
+    private addEventListener<K extends keyof HTMLElementEventMap>(
+        element: Element,
+        type: K,
+        handler: (event: HTMLElementEventMap[K]) => void
+    ) {
+        if (!this.eventHandlers.has(element)) {
+            this.eventHandlers.set(element, new Map());
         }
+        const listener = handler as EventListener;
+        this.eventHandlers.get(element)!.set(type, listener);
+        element.addEventListener(type, listener, { signal: this.abortController.signal });
     }
 
     /**
-     * Add an image to the viewer
-     * @param id - Unique identifier for the image
-     * @param url - IIIF Image API info.json URL
-     * @param focus - Whether to fit viewport to this image
-     * @param placement - Optional world placement (defaults to origin with image dimensions)
+     * Set up mouse/wheel event listeners for interactive navigation
      */
-    async addImage(id: string, url: string, focus: boolean = false, placement?: WorldPlacement) {
+    listen() {
+        this.addEventListener(this.container, 'mousedown', (event: MouseEvent) => {
+            event.preventDefault();
+
+            const canvasX = event.clientX - this.cachedContainerRect.left;
+            const canvasY = event.clientY - this.cachedContainerRect.top;
+
+            this.camera.startInteractivePan(canvasX, canvasY);
+
+            const onMouseMove = (moveEvent: MouseEvent) => {
+                const newCanvasX = moveEvent.clientX - this.cachedContainerRect.left;
+                const newCanvasY = moveEvent.clientY - this.cachedContainerRect.top;
+                this.camera.updateInteractivePan(newCanvasX, newCanvasY);
+            };
+
+            const cleanup = () => {
+                this.camera.endInteractivePan();
+                document.removeEventListener('mousemove', onMouseMove);
+                document.removeEventListener('mouseup', cleanup);
+                document.removeEventListener('mouseleave', cleanup);
+            };
+
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', cleanup);
+            document.addEventListener('mouseleave', cleanup);
+        });
+
+        this.addEventListener(this.container, 'wheel', (event: WheelEvent) => {
+            const canvasX = event.clientX - this.cachedContainerRect.left;
+            const canvasY = event.clientY - this.cachedContainerRect.top;
+            this.camera.handleWheel(event, canvasX, canvasY);
+        });
+    }
+
+    // ============================================================
+    // IMAGE MANAGEMENT
+    // ============================================================
+
+    /**
+     * Add an image to the viewer
+     */
+    async addImage(
+        id: string,
+        url: string,
+        focus: boolean = false,
+        placement?: WorldPlacement
+    ): Promise<void> {
         const iiifImage = new IIIFImage(id, url);
         await iiifImage.loadManifest(url);
 
-        // Default placement: origin at (0,0) with world dimensions = image dimensions
-        const worldPlacement: WorldPlacement = placement || {
+        const worldPlacement: WorldPlacement = placement ?? {
             worldX: 0,
             worldY: 0,
             worldWidth: iiifImage.width,
             worldHeight: iiifImage.height
         };
 
-        // Create TileManager
-        const tileManager = new TileManager(id, iiifImage, 500, this.renderer);
+        const tileManager = new TileManager(
+            id,
+            iiifImage,
+            this.CONFIG.maxCacheSize,
+            this.renderer
+        );
 
-        // Create WorldImage and add to world
         const worldImage = new WorldImage(iiifImage, tileManager, worldPlacement);
         tileManager.setWorldImage(worldImage);
         this.world.addImage(id, worldImage);
@@ -295,60 +350,13 @@ export class IIIFViewer {
             this.viewport.fitToWorld(this.world.worldWidth, this.world.worldHeight);
         }
 
-        // Request initial tiles for the viewport
         tileManager.requestTilesForViewport(this.viewport);
-
-        // Load low-resolution thumbnail for background
         await tileManager.loadThumbnail();
-    }
-
-    private updateAnimations() {
-        if (!this.camera.isAnimating()) {
-            this.camera.updateInteractiveAnimation();
-        }
+        this.markDirty();
     }
 
     /**
-     * Zoom to a specific scale value
-     * @param targetScale - The target scale to zoom to
-     * @param duration - Animation duration in milliseconds
-     */
-    zoom(targetScale: number, duration = 500) {
-        this.camera.zoom(targetScale, duration);
-    }
-
-    /**
-     * Zoom by a factor
-     * @param factor - Zoom factor (>1 = zoom in, <1 = zoom out)
-     * @param duration - Animation duration in milliseconds
-     */
-    zoomByFactor(factor: number, duration = 500) {
-        this.camera.zoomByFactor(factor, duration);
-    }
-
-    /**
-     * Pan by delta amounts in world coordinates
-     * @param deltaX - X delta in world units
-     * @param deltaY - Y delta in world units
-     * @param duration - Animation duration in milliseconds
-     */
-    pan(deltaX: number, deltaY: number, duration = 500) {
-        this.camera.pan(deltaX, deltaY, duration);
-    }
-
-    /**
-     * Navigate to a specific position in world coordinates
-     * @param worldX - X coordinate in world space
-     * @param worldY - Y coordinate in world space
-     * @param cameraZ - Camera Z distance
-     * @param duration - Animation duration in milliseconds
-     */
-    to(worldX: number, worldY: number, cameraZ: number, duration = 500) {
-        this.camera.to(worldX, worldY, cameraZ, duration);
-    }
-
-    /**
-     * Clear all images from the world and free GPU resources.
+     * Clear all images and free GPU resources
      */
     clearWorld() {
         for (const [id, wi] of this.world.worldImages) {
@@ -357,22 +365,24 @@ export class IIIFViewer {
             }
             this.world.removeImage(id);
         }
-        // Clear IIIF annotations (custom annotations are preserved across loads)
         this.annotationManager?.clearIIIFAnnotations();
+        this.markDirty();
     }
 
+    // ============================================================
+    // IIIF MANIFEST LOADING
+    // ============================================================
+
     /**
-     * Load any IIIF URL (image service, bare URL, or manifest).
-     * Detects the resource type and displays it appropriately.
-     * For manifests, loads the first canvas.
+     * Load any IIIF URL (image service, bare URL, or manifest)
      */
     async loadUrl(url: string, focus: boolean = true): Promise<void> {
         const result = await parseIIIFUrl(url);
 
         if (result.type === 'image-service-2' || result.type === 'image-service-3') {
             this.clearWorld();
-            this._manifest = undefined;
-            this._currentCanvasIndex = -1;
+            this.manifest = undefined;
+            this.currentCanvasIndex = -1;
 
             const svc = result as ParsedImageService;
             const infoUrl = svc.id.replace(/\/$/, '') + '/info.json';
@@ -380,81 +390,70 @@ export class IIIFViewer {
             this.updateCanvasNav();
         } else {
             this.clearWorld();
-            this._manifest = result as ParsedManifest;
+            this.manifest = result as ParsedManifest;
             this.updateCanvasNav();
             await this.loadCanvas(0, focus);
         }
     }
 
     /**
-     * Load a specific canvas from the current manifest.
-     * @param index - Zero-based canvas index
-     * @param focus - Whether to fit viewport to the canvas
+     * Load a specific canvas from the current manifest
      */
     async loadCanvas(index: number, focus: boolean = true): Promise<void> {
-        if (!this._manifest) {
+        if (!this.manifest) {
             throw new Error('No manifest loaded. Call loadUrl() with a manifest URL first.');
         }
-        if (index < 0 || index >= this._manifest.canvases.length) {
-            throw new Error(`Canvas index ${index} out of range (0-${this._manifest.canvases.length - 1})`);
+        if (index < 0 || index >= this.manifest.canvases.length) {
+            throw new Error(`Canvas index ${index} out of range (0-${this.manifest.canvases.length - 1})`);
         }
 
         this.clearWorld();
-        this._currentCanvasIndex = index;
+        this.currentCanvasIndex = index;
         this.updateCanvasNavActiveState();
 
-        const canvas = this._manifest.canvases[index];
-
+        const canvas = this.manifest.canvases[index];
         let loadedCount = 0;
+
         for (let i = 0; i < canvas.images.length; i++) {
             const img = canvas.images[i];
             const infoUrl = img.imageServiceUrl.replace(/\/$/, '') + '/info.json';
 
-            let placement: WorldPlacement | undefined;
-            if (img.target) {
-                placement = {
+            const placement: WorldPlacement | undefined = img.target
+                ? {
                     worldX: img.target.x,
                     worldY: img.target.y,
                     worldWidth: img.target.w,
                     worldHeight: img.target.h
-                };
-            }
+                }
+                : undefined;
 
             try {
                 const shouldFocus = focus && i === canvas.images.length - 1;
                 await this.addImage(`canvas-${index}-img-${i}`, infoUrl, shouldFocus, placement);
                 loadedCount++;
             } catch (err) {
-                console.warn(`Failed to load image ${i} for canvas ${index}: ${img.imageServiceUrl}`, err);
+                console.warn(`Failed to load image ${i} for canvas ${index}:`, err);
             }
         }
 
-        // If focus requested but last image failed, fit to whatever loaded
         if (focus && loadedCount > 0 && this.world.worldImages.size > 0) {
             this.viewport.fitToWorld(this.world.worldWidth, this.world.worldHeight);
         }
 
-        // Load IIIF annotations for this canvas
         await this.loadIIIFAnnotationsForCanvas(canvas);
     }
 
-    /**
-     * Fetch external annotation lists and load all IIIF annotations for a canvas.
-     */
-    private async loadIIIFAnnotationsForCanvas(canvas: { width: number; height: number; annotations: import('./iiif-parser').ParsedAnnotationPage[]; annotationListUrls: string[] }): Promise<void> {
+    private async loadIIIFAnnotationsForCanvas(canvas: CanvasInfo): Promise<void> {
         if (!this.annotationManager) return;
 
-        // Clear previous IIIF annotations
         this.annotationManager.clearIIIFAnnotations();
 
-        // Collect inline annotations already parsed
         const allPages = [...canvas.annotations];
 
-        // Fetch external annotation lists
         for (const listUrl of canvas.annotationListUrls) {
             try {
                 const page = await fetchAnnotationList(listUrl);
-                if (page && page.annotations.length > 0) {
+                if (page && page.annotations && page.annotations.length > 0) {
                     allPages.push(page);
                 }
             } catch {
@@ -468,34 +467,141 @@ export class IIIFViewer {
     }
 
     /**
-     * Navigate to the next canvas in the manifest.
+     * Navigate to next canvas
      */
     async nextCanvas(): Promise<void> {
-        if (!this._manifest || this._currentCanvasIndex >= this._manifest.canvases.length - 1) return;
-        await this.loadCanvas(this._currentCanvasIndex + 1);
+        if (!this.manifest || this.currentCanvasIndex >= this.manifest.canvases.length - 1) {
+            return;
+        }
+        await this.loadCanvas(this.currentCanvasIndex + 1);
     }
 
     /**
-     * Navigate to the previous canvas in the manifest.
+     * Navigate to previous canvas
      */
     async previousCanvas(): Promise<void> {
-        if (!this._manifest || this._currentCanvasIndex <= 0) return;
-        await this.loadCanvas(this._currentCanvasIndex - 1);
+        if (!this.manifest || this.currentCanvasIndex <= 0) {
+            return;
+        }
+        await this.loadCanvas(this.currentCanvasIndex - 1);
     }
 
-    /** Number of canvases in the loaded manifest, or 0 if no manifest. */
+    /** Number of canvases in the loaded manifest */
     get canvasCount(): number {
-        return this._manifest?.canvases.length ?? 0;
+        return this.manifest?.canvases.length ?? 0;
     }
 
-    /** Current canvas index, or -1 if no manifest/canvas loaded. */
+    /** Current canvas index */
     get currentCanvas(): number {
-        return this._currentCanvasIndex;
+        return this.currentCanvasIndex;
     }
+
+    // ============================================================
+    // CANVAS NAVIGATION UI
+    // ============================================================
+
+    private updateCanvasNav() {
+        if (!this.canvasNavContainer || !this.canvasNavList) return;
+
+        if (!this.manifest || this.manifest.canvases.length <= 1) {
+            this.canvasNavContainer.style.display = 'none';
+            return;
+        }
+
+        this.canvasNavContainer.style.display = 'flex';
+        this.canvasNavList.innerHTML = '';
+
+        for (let i = 0; i < this.manifest.canvases.length; i++) {
+            const canvas = this.manifest.canvases[i];
+            const item = this.createCanvasNavItem(canvas, i);
+            this.canvasNavList.appendChild(item);
+        }
+    }
+
+    private createCanvasNavItem(canvas: any, index: number): HTMLElement {
+        const item = document.createElement('div');
+        item.className = 'iiif-canvas-nav-item';
+        if (index === this.currentCanvasIndex) {
+            item.classList.add('active');
+        }
+
+        if (canvas.images.length > 0) {
+            const serviceUrl = canvas.images[0].imageServiceUrl.replace(/\/$/, '');
+            const thumbUrl = `${serviceUrl}/full/!120,120/0/default.jpg`;
+
+            const img = document.createElement('img');
+            img.className = 'iiif-canvas-nav-item-img';
+            img.src = thumbUrl;
+            img.alt = canvas.label || `Canvas ${index + 1}`;
+            img.loading = 'lazy';
+            img.onerror = () => {
+                img.style.display = 'none';
+            };
+            item.appendChild(img);
+        }
+
+        const labelEl = document.createElement('div');
+        labelEl.className = 'iiif-canvas-nav-item-label';
+        labelEl.textContent = canvas.label || `${index + 1}`;
+        item.appendChild(labelEl);
+
+        item.addEventListener('click', () => {
+            this.loadCanvas(index);
+        });
+
+        return item;
+    }
+
+    private updateCanvasNavActiveState() {
+        if (!this.canvasNavList) return;
+        const items = this.canvasNavList.querySelectorAll('.iiif-canvas-nav-item');
+        items.forEach((item, i) => {
+            item.classList.toggle('active', i === this.currentCanvasIndex);
+        });
+    }
+
+    // ============================================================
+    // NAVIGATION API
+    // ============================================================
+
+    /**
+     * Zoom to a specific scale value
+     */
+    zoom(targetScale: number, duration = 500) {
+        this.camera.zoom(targetScale, duration);
+        this.markDirty();
+    }
+
+    /**
+     * Zoom by a factor
+     */
+    zoomByFactor(factor: number, duration = 500) {
+        this.camera.zoomByFactor(factor, duration);
+        this.markDirty();
+    }
+
+    /**
+     * Pan by delta amounts in world coordinates
+     */
+    pan(deltaX: number, deltaY: number, duration = 500) {
+        this.camera.pan(deltaX, deltaY, duration);
+        this.markDirty();
+    }
+
+    /**
+     * Navigate to a specific position
+     */
+    to(worldX: number, worldY: number, cameraZ: number, duration = 500) {
+        this.camera.to(worldX, worldY, cameraZ, duration);
+        this.markDirty();
+    }
+
+    // ============================================================
+    // OVERLAYS & ANNOTATIONS
+    // ============================================================
 
     /**
      * Add an overlay element to the viewer
-     * @param overlay - Overlay configuration with world coordinates
      */
     addOverlay(overlay: {
         id: string;
@@ -515,7 +621,6 @@ export class IIIFViewer {
 
     /**
      * Add an annotation to the viewer
-     * @param annotation - Annotation configuration with world coordinates
      */
     addAnnotation(annotation: {
         id: string;
@@ -524,13 +629,7 @@ export class IIIFViewer {
         y: number;
         width: number;
         height: number;
-        style?: {
-            border?: string;
-            backgroundColor?: string;
-            borderRadius?: string;
-            opacity?: string;
-            [key: string]: string | undefined;
-        };
+        style?: Record<string, string | undefined>;
         content?: {
             element?: HTMLElement;
             text?: string;
@@ -546,67 +645,83 @@ export class IIIFViewer {
         this.annotationManager.addAnnotation(annotation);
     }
 
-    listen() {
-        const mousedownHandler = (event: MouseEvent) => {
-            event.preventDefault();
+    // ============================================================
+    // RENDERING
+    // ============================================================
 
-            // Calculate canvas-relative coordinates
-            const canvasX = event.clientX - this.cachedContainerRect.left;
-            const canvasY = event.clientY - this.cachedContainerRect.top;
+    private markDirty() {
+        this.needsRender = true;
+    }
 
-            // Start pan via camera (world-space, no imageId needed)
-            this.camera.startInteractivePan(canvasX, canvasY);
+    private hasViewportChanged(): boolean {
+        // Check for uninitialized state (NaN values)
+        if (isNaN(this.lastViewportState.centerX)) {
+            return true;
+        }
 
-            const onMouseMove = (moveEvent: MouseEvent) => {
-                const newCanvasX = moveEvent.clientX - this.cachedContainerRect.left;
-                const newCanvasY = moveEvent.clientY - this.cachedContainerRect.top;
-                this.camera.updateInteractivePan(newCanvasX, newCanvasY);
-            };
+        const threshold = 0.001;
+        const centerXDiff = Math.abs(this.viewport.centerX - this.lastViewportState.centerX);
+        const centerYDiff = Math.abs(this.viewport.centerY - this.lastViewportState.centerY);
+        const scaleDiff = Math.abs(this.viewport.scale - this.lastViewportState.scale);
 
-            const cleanup = () => {
-                this.camera.endInteractivePan();
-                document.removeEventListener('mousemove', onMouseMove);
-                document.removeEventListener('mouseup', cleanup);
-                document.removeEventListener('mouseleave', cleanup);
-            };
-
-            document.addEventListener('mousemove', onMouseMove);
-            document.addEventListener('mouseup', cleanup);
-            document.addEventListener('mouseleave', cleanup);
-        };
-
-        const wheelHandler = (event: WheelEvent) => {
-            const canvasX = event.clientX - this.cachedContainerRect.left;
-            const canvasY = event.clientY - this.cachedContainerRect.top;
-            this.camera.handleWheel(event, canvasX, canvasY);
-        };
-
-        this.container.addEventListener('mousedown', mousedownHandler);
-        this.container.addEventListener('wheel', wheelHandler);
-
-        this.eventListeners.push(
-            { event: 'mousedown', handler: mousedownHandler as EventListener },
-            { event: 'wheel', handler: wheelHandler as EventListener }
+        return (
+            centerXDiff > threshold ||
+            centerYDiff > threshold ||
+            scaleDiff > threshold
         );
     }
 
+    private updateViewportState() {
+        this.lastViewportState.centerX = this.viewport.centerX;
+        this.lastViewportState.centerY = this.viewport.centerY;
+        this.lastViewportState.scale = this.viewport.scale;
+    }
+
+    private requestTilesForAllVisibleImages() {
+        const bounds = this.viewport.getWorldBounds();
+        const visibleImages = this.world.getVisibleImages(
+            bounds.left,
+            bounds.top,
+            bounds.right,
+            bounds.bottom
+        );
+        for (const wi of visibleImages) {
+            wi.tileManager.requestTilesForViewport(this.viewport);
+        }
+    }
+
+    /**
+     * Render a single frame
+     */
     render() {
-        // Update animations first (this modifies viewport state)
-        this.updateAnimations();
+        // Update animations (may modify viewport)
+        const animationResult = this.camera.updateInteractiveAnimation();
+        if (animationResult.needsUpdate) {
+            this.markDirty();
+        }
+
+        // Check if we need to render
+        if (!this.needsRender && !this.hasViewportChanged()) {
+            return;
+        }
 
         if (!this.renderer) {
             return;
         }
 
-        // Get visible world bounds
         const bounds = this.viewport.getWorldBounds();
-        const visibleImages = this.world.getVisibleImages(bounds.left, bounds.top, bounds.right, bounds.bottom);
+        const visibleImages = this.world.getVisibleImages(
+            bounds.left,
+            bounds.top,
+            bounds.right,
+            bounds.bottom
+        );
 
         if (visibleImages.length === 0) {
             return;
         }
 
-        // Collect all tiles from all visible images
+        // Collect tiles from all visible images
         const allTiles: TileRenderData[] = [];
         let thumbnail: TileRenderData | undefined;
 
@@ -614,27 +729,31 @@ export class IIIFViewer {
             const tiles = worldImage.tileManager.getLoadedTilesForRender(this.viewport);
             allTiles.push(...tiles);
 
-            // Use first available thumbnail
             if (!thumbnail) {
                 thumbnail = worldImage.tileManager.getThumbnail();
             }
         }
 
-        // Sort by z for proper layering
+        // Sort by z-depth for proper layering
         allTiles.sort((a, b) => a.z - b.z);
 
-        // Render all tiles in a single pass
+        // Render
         this.renderer.render(this.viewport, allTiles, thumbnail);
 
-        // Update overlay positions
-        if (this.overlayManager) {
-            this.overlayManager.updateAllOverlays();
+        // Update overlays only if viewport changed
+        if (this.hasViewportChanged()) {
+            this.overlayManager?.updateAllOverlays();
+            this.updateViewportState();
         }
+
+        this.needsRender = false;
     }
 
+    /**
+     * Start continuous render loop
+     */
     startRenderLoop() {
         if (this.renderLoopActive) {
-            console.log('Render loop already active');
             return;
         }
 
@@ -643,7 +762,6 @@ export class IIIFViewer {
 
         const loop = () => {
             if (!this.renderLoopActive) {
-                console.log('Render loop stopped');
                 return;
             }
             this.render();
@@ -652,8 +770,10 @@ export class IIIFViewer {
         loop();
     }
 
+    /**
+     * Stop render loop
+     */
     stopRenderLoop() {
-        console.log('Stopping render loop');
         this.renderLoopActive = false;
         if (this.animationFrameId !== undefined) {
             cancelAnimationFrame(this.animationFrameId);
@@ -661,4 +781,20 @@ export class IIIFViewer {
         }
     }
 
+    // ============================================================
+    // CLEANUP
+    // ============================================================
+
+    /**
+     * Destroy the viewer and free all resources
+     */
+    destroy() {
+        this.stopRenderLoop();
+        this.abortController.abort();
+        this.clearWorld();
+        this.renderer?.destroy();
+        this.overlayManager = undefined;
+        this.annotationManager = undefined;
+        this.toolbar = undefined;
+    }
 }

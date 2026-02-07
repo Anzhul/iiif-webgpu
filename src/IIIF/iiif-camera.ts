@@ -1,175 +1,114 @@
 import { Viewport } from './iiif-view';
 import { World } from './iiif-world';
 import type { EasingFunction } from './easing';
-import { easeOutQuart, interpolate } from './easing';
+import { easeOutQuart } from './easing';
 import { Spring } from './spring';
 
-interface CameraAnimation {
+/**
+ * Camera system with spring-based interactive animations and easing-based programmatic animations.
+ *
+ * Design principles:
+ * - Single source of truth: Viewport holds all state (centerX, centerY, cameraZ)
+ * - Springs are transient animation state, never the source of truth
+ * - Cursor is always the zoom focal point for interactive zooms
+ * - Anchor point approach: track world point under cursor, keep it fixed during zoom
+ */
+
+interface ProgrammaticAnimation {
     type: 'pan' | 'zoom' | 'to';
     startTime: number;
     duration: number;
+    // Start values
     startCenterX: number;
     startCenterY: number;
     startCameraZ: number;
+    // Target values
     targetCenterX: number;
     targetCenterY: number;
     targetCameraZ: number;
+    // Easing
     easing: EasingFunction;
-    // For zoom animations - anchor point to keep fixed
+    // Zoom anchor (optional — for zoom-to-point)
     zoomAnchorCanvasX?: number;
     zoomAnchorCanvasY?: number;
     zoomAnchorWorldX?: number;
     zoomAnchorWorldY?: number;
-    onUpdate?: () => void;
-    onComplete?: () => void;
-}
-
-/**
- * Strategy pattern for different animation types
- */
-interface AnimationStrategy {
-    updateViewport(viewport: Viewport, progress: number, animation: CameraAnimation): void;
-    shouldConstrainCenter(animation: CameraAnimation): boolean;
-}
-
-class PanAnimationStrategy implements AnimationStrategy {
-    updateViewport(viewport: Viewport, progress: number, animation: CameraAnimation): void {
-        viewport.centerX = interpolate(animation.startCenterX, animation.targetCenterX, progress);
-        viewport.centerY = interpolate(animation.startCenterY, animation.targetCenterY, progress);
-    }
-
-    shouldConstrainCenter(_animation: CameraAnimation): boolean {
-        return true;
-    }
-}
-
-class ZoomAnimationStrategy implements AnimationStrategy {
-    updateViewport(viewport: Viewport, progress: number, animation: CameraAnimation): void {
-        viewport.cameraZ = interpolate(animation.startCameraZ, animation.targetCameraZ, progress);
-        viewport.updateScale();
-    }
-
-    shouldConstrainCenter(animation: CameraAnimation): boolean {
-        // Don't constrain if anchor point is set (anchor takes priority)
-        return !(animation.zoomAnchorWorldX !== undefined &&
-                 animation.zoomAnchorWorldY !== undefined &&
-                 animation.zoomAnchorCanvasX !== undefined &&
-                 animation.zoomAnchorCanvasY !== undefined);
-    }
-}
-
-class ToAnimationStrategy implements AnimationStrategy {
-    private panStrategy = new PanAnimationStrategy();
-    private zoomStrategy = new ZoomAnimationStrategy();
-
-    updateViewport(viewport: Viewport, progress: number, animation: CameraAnimation): void {
-        this.panStrategy.updateViewport(viewport, progress, animation);
-        this.zoomStrategy.updateViewport(viewport, progress, animation);
-    }
-
-    shouldConstrainCenter(_animation: CameraAnimation): boolean {
-        return true;
-    }
 }
 
 interface InteractiveState {
-    isDragging: boolean;
-    // Anchor point approach: track which world point should stay under cursor
-    anchorWorldX?: number;  // The world point we're anchored to
+    // Track which world point is under the cursor (anchor point approach)
+    anchorWorldX?: number;
     anchorWorldY?: number;
-    // Spring animations for smooth, frame-rate independent trailing
+    // Springs for smooth animation (transient state, not source of truth)
     canvasXSpring: Spring;
     canvasYSpring: Spring;
     cameraZSpring: Spring;
+    // Interaction flags
+    isDragging: boolean;
+    isIdle: boolean;
 }
 
 export class Camera {
     viewport: Viewport;
     world: World;
-    private currentAnimation?: CameraAnimation;
-    private animationFrameId?: number;
-    private interactiveState: InteractiveState = {
-        isDragging: false,
-        canvasXSpring: new Spring({
-            initial: 0,
-            springStiffness: 6.5,
-            animationTime: 1.2
-        }),
-        canvasYSpring: new Spring({
-            initial: 0,
-            springStiffness: 6.5,
-            animationTime: 1.2
-        }),
-        cameraZSpring: new Spring({
-            initial: 1,
-            springStiffness: 6.5,
-            animationTime: 1.2,
-            exponential: true
-        })
-    };
-    private lastZoomTime: number = 0;
-    private isIdle: boolean = true; // Track idle state for performance
 
-    // Hybrid tile request strategy (immediate + debounced)
+    private programmaticAnimation?: ProgrammaticAnimation;
+    private animationFrameId?: number;
+
+    private interactiveState: InteractiveState;
+
+    private lastZoomTime: number = 0;
     private lastImmediateRequestTime: number = 0;
     private tileUpdateTimer: number | null = null;
 
-    // Animation strategies (reused to avoid allocation)
-    private readonly strategies = {
-        pan: new PanAnimationStrategy(),
-        zoom: new ZoomAnimationStrategy(),
-        to: new ToAnimationStrategy()
-    };
-
-    // Reusable result object to avoid allocations (performance optimization)
-    private readonly updateResult = {
-        needsUpdate: false
-    };
-
-    // Configuration constants
     private readonly CONFIG = {
-        // Tile request strategy - Hybrid approach (OpenSeadragon-inspired)
-        TILE_IMMEDIATE_THROTTLE: 200,   // Max 5 immediate requests/sec for responsiveness
-        TILE_DEBOUNCE_DELAY: 50,        // Wait 50ms after movement stops for final request
-
-        // Zoom throttling (ms between wheel events)
-        ZOOM_THROTTLE: 80,
-
-        // Interactive animation config
-        INTERACTIVE: {
-            // Spring physics parameters (OpenSeadragon-style)
-            SPRING_STIFFNESS: 6.5,      // Higher = faster response (5.0-10.0 typical)
-            ANIMATION_TIME: 1.2         // Animation time in seconds (1.0-1.5 typical)
-        }
+        TILE_IMMEDIATE_THROTTLE: 200,  // 5 requests/sec max
+        TILE_DEBOUNCE_DELAY: 50,       // 50ms debounce
+        ZOOM_THROTTLE: 80,              // 80ms between wheel events
+        SPRING_STIFFNESS: 6.5,
+        ANIMATION_TIME: 1.2
     } as const;
 
     constructor(viewport: Viewport, world: World) {
         this.viewport = viewport;
         this.world = world;
+
+        // Initialize interactive state with springs
+        this.interactiveState = {
+            anchorWorldX: undefined,
+            anchorWorldY: undefined,
+            canvasXSpring: new Spring({
+                initial: 0,
+                springStiffness: this.CONFIG.SPRING_STIFFNESS,
+                animationTime: this.CONFIG.ANIMATION_TIME
+            }),
+            canvasYSpring: new Spring({
+                initial: 0,
+                springStiffness: this.CONFIG.SPRING_STIFFNESS,
+                animationTime: this.CONFIG.ANIMATION_TIME
+            }),
+            cameraZSpring: new Spring({
+                initial: viewport.cameraZ,
+                springStiffness: this.CONFIG.SPRING_STIFFNESS,
+                animationTime: this.CONFIG.ANIMATION_TIME,
+                exponential: true  // Exponential for zoom feels consistent
+            }),
+            isDragging: false,
+            isIdle: true
+        };
     }
 
-    /**
-     * Animate camera to a specific position in world coordinates
-     * @param worldX - X coordinate in world space
-     * @param worldY - Y coordinate in world space
-     * @param cameraZ - Target camera Z position
-     * @param duration - Animation duration in milliseconds
-     * @param easing - Easing function for the animation
-     */
-    to(
-        worldX: number,
-        worldY: number,
-        cameraZ: number,
-        duration = 500,
-        easing: EasingFunction = easeOutQuart
-    ) {
-        // Clamp camera Z to valid range
-        const targetCameraZ = Math.max(
-            this.viewport.minZ,
-            Math.min(this.viewport.maxZ, cameraZ)
-        );
+    // ============================================================
+    // PUBLIC API - Programmatic Animations
+    // ============================================================
 
-        this.startAnimation({
+    /**
+     * Navigate to a specific world position and zoom level
+     */
+    to(worldX: number, worldY: number, cameraZ: number, duration = 500, easing: EasingFunction = easeOutQuart) {
+        const clampedZ = Math.max(this.viewport.minZ, Math.min(this.viewport.maxZ, cameraZ));
+
+        this.startProgrammaticAnimation({
             type: 'to',
             startTime: performance.now(),
             duration,
@@ -178,48 +117,31 @@ export class Camera {
             startCameraZ: this.viewport.cameraZ,
             targetCenterX: worldX,
             targetCenterY: worldY,
-            targetCameraZ,
+            targetCameraZ: clampedZ,
             easing
         });
     }
 
     /**
-     * Pan the camera by delta amounts in world coordinates
-     * @param deltaX - X delta in world units
-     * @param deltaY - Y delta in world units
-     * @param duration - Animation duration in milliseconds
-     * @param easing - Easing function for the animation
+     * Pan by delta in world coordinates
      */
-    pan(
-        deltaX: number,
-        deltaY: number,
-        duration = 500,
-        easing: EasingFunction = easeOutQuart
-    ) {
-        const targetCenterX = this.viewport.centerX + deltaX;
-        const targetCenterY = this.viewport.centerY + deltaY;
-
-        this.startAnimation({
+    pan(deltaX: number, deltaY: number, duration = 500, easing: EasingFunction = easeOutQuart) {
+        this.startProgrammaticAnimation({
             type: 'pan',
             startTime: performance.now(),
             duration,
             startCenterX: this.viewport.centerX,
             startCenterY: this.viewport.centerY,
             startCameraZ: this.viewport.cameraZ,
-            targetCenterX,
-            targetCenterY,
+            targetCenterX: this.viewport.centerX + deltaX,
+            targetCenterY: this.viewport.centerY + deltaY,
             targetCameraZ: this.viewport.cameraZ,
             easing
         });
     }
 
     /**
-     * Zoom the camera to a target scale
-     * @param targetScale - Target scale value
-     * @param duration - Animation duration in milliseconds
-     * @param easing - Easing function for the animation
-     * @param anchorCanvasX - Optional canvas X coordinate to keep fixed during zoom
-     * @param anchorCanvasY - Optional canvas Y coordinate to keep fixed during zoom
+     * Zoom to a target scale, optionally anchored to a canvas point
      */
     zoom(
         targetScale: number,
@@ -228,32 +150,26 @@ export class Camera {
         anchorCanvasX?: number,
         anchorCanvasY?: number
     ) {
-        // Clamp target scale to valid range
-        targetScale = Math.max(
+        const clampedScale = Math.max(
             this.viewport.minScale,
             Math.min(this.viewport.maxScale, targetScale)
         );
 
-        // Convert target scale to camera Z position
-        const targetCameraZ = (this.viewport.containerHeight / targetScale) / (2 * this.viewport.getTanHalfFov());
+        // Convert scale to cameraZ
+        const targetCameraZ = (this.viewport.containerHeight / clampedScale) / (2 * this.viewport.getTanHalfFov());
+        const clampedZ = Math.max(this.viewport.minZ, Math.min(this.viewport.maxZ, targetCameraZ));
 
-        // Clamp to valid Z range
-        const clampedCameraZ = Math.max(
-            this.viewport.minZ,
-            Math.min(this.viewport.maxZ, targetCameraZ)
-        );
-
-        // If anchor point is provided, calculate the world point to keep fixed
+        // Capture anchor point if provided
         let zoomAnchorWorldX: number | undefined;
         let zoomAnchorWorldY: number | undefined;
 
         if (anchorCanvasX !== undefined && anchorCanvasY !== undefined) {
-            const anchorPoint = this.viewport.canvasToWorldPoint(anchorCanvasX, anchorCanvasY);
-            zoomAnchorWorldX = anchorPoint.x;
-            zoomAnchorWorldY = anchorPoint.y;
+            const anchor = this.viewport.canvasToWorldPoint(anchorCanvasX, anchorCanvasY);
+            zoomAnchorWorldX = anchor.x;
+            zoomAnchorWorldY = anchor.y;
         }
 
-        this.startAnimation({
+        this.startProgrammaticAnimation({
             type: 'zoom',
             startTime: performance.now(),
             duration,
@@ -262,7 +178,7 @@ export class Camera {
             startCameraZ: this.viewport.cameraZ,
             targetCenterX: this.viewport.centerX,
             targetCenterY: this.viewport.centerY,
-            targetCameraZ: clampedCameraZ,
+            targetCameraZ: clampedZ,
             zoomAnchorCanvasX: anchorCanvasX,
             zoomAnchorCanvasY: anchorCanvasY,
             zoomAnchorWorldX,
@@ -272,217 +188,266 @@ export class Camera {
     }
 
     /**
-     * Zoom by a factor (convenience method)
-     * @param factor - Zoom factor (>1 = zoom in, <1 = zoom out)
-     * @param duration - Animation duration in milliseconds
-     * @param easing - Easing function for the animation
+     * Zoom by factor (convenience)
      */
-    zoomByFactor(
-        factor: number,
-        duration = 500,
-        easing: EasingFunction = easeOutQuart
-    ) {
-        const targetScale = this.viewport.scale * factor;
-        this.zoom(targetScale, duration, easing);
+    zoomByFactor(factor: number, duration = 500, easing: EasingFunction = easeOutQuart) {
+        this.zoom(this.viewport.scale * factor, duration, easing);
     }
 
-    /**
-     * Start an animation with the given parameters
-     */
-    private startAnimation(animation: CameraAnimation) {
-        // Cancel any existing animation to prevent leaks
-        if (this.currentAnimation || this.animationFrameId !== undefined) {
-            this.stopAnimation();
-        }
-
-        this.currentAnimation = animation;
-
-        // Schedule the animation loop on the next frame
-        this.animationFrameId = requestAnimationFrame(() => this.runAnimation());
+    isAnimating(): boolean {
+        return this.programmaticAnimation !== undefined;
     }
 
-    /**
-     * Stop the current animation
-     */
     stopAnimation() {
-        // Cancel animation frame first to prevent any further execution
         if (this.animationFrameId !== undefined) {
             cancelAnimationFrame(this.animationFrameId);
             this.animationFrameId = undefined;
         }
+        this.programmaticAnimation = undefined;
+    }
 
-        // Store onComplete callback before clearing currentAnimation
-        const onComplete = this.currentAnimation?.onComplete;
+    // ============================================================
+    // PUBLIC API - Interactive Animations (called from main loop)
+    // ============================================================
 
-        // Clear current animation to prevent re-entry
-        this.currentAnimation = undefined;
+    /**
+     * Update interactive spring animations. Call this every frame from the main render loop.
+     */
+    updateInteractiveAnimation(): { needsUpdate: boolean } {
+        if (this.interactiveState.isIdle) {
+            return { needsUpdate: false };
+        }
 
-        // Call onComplete callback after clearing state
-        if (onComplete) {
-            onComplete();
+        const state = this.interactiveState;
+
+        // Update all springs
+        const panXAnimating = state.canvasXSpring.update();
+        const panYAnimating = state.canvasYSpring.update();
+        const zoomAnimating = state.cameraZSpring.update();
+
+        // Sync viewport from spring (single source of truth)
+        if (zoomAnimating) {
+            this.viewport.cameraZ = state.cameraZSpring.current.value;
+            this.viewport.updateScale();
+        }
+
+        // Apply anchor point transformation
+        const needsUpdate = this.applyAnchorTransform();
+
+        // Check if idle
+        const isAnimating = state.isDragging || panXAnimating || panYAnimating || zoomAnimating;
+        if (!isAnimating) {
+            this.interactiveState.isIdle = true;
+            this.requestTilesImmediate();
+        } else if (needsUpdate) {
+            this.requestTilesHybrid(performance.now());
+        }
+
+        return { needsUpdate };
+    }
+
+    /**
+     * Start pan (mousedown)
+     */
+    startInteractivePan(canvasX: number, canvasY: number) {
+        this.interactiveState.isIdle = false;
+        this.interactiveState.isDragging = true;
+
+        // Establish anchor: world point under cursor
+        const worldPoint = this.viewport.canvasToWorldPoint(canvasX, canvasY);
+        this.interactiveState.anchorWorldX = worldPoint.x;
+        this.interactiveState.anchorWorldY = worldPoint.y;
+
+        // Reset springs to current position (no jump)
+        this.interactiveState.canvasXSpring.resetTo(canvasX);
+        this.interactiveState.canvasYSpring.resetTo(canvasY);
+
+        // Sync zoom spring to viewport (single source of truth)
+        const currentZ = this.viewport.cameraZ;
+        if (!this.interactiveState.cameraZSpring.current.value ||
+            Math.abs(this.interactiveState.cameraZSpring.current.value / currentZ - 1) > 0.01) {
+            this.interactiveState.cameraZSpring.resetTo(currentZ);
         }
     }
 
     /**
-     * Get the animation strategy for a given type
+     * Update pan (mousemove)
      */
-    private getAnimationStrategy(type: 'pan' | 'zoom' | 'to'): AnimationStrategy {
-        return this.strategies[type];
+    updateInteractivePan(canvasX: number, canvasY: number) {
+        if (!this.interactiveState.isDragging) return;
+
+        // Animate canvas position with spring
+        this.interactiveState.canvasXSpring.springTo(canvasX);
+        this.interactiveState.canvasYSpring.springTo(canvasY);
     }
 
     /**
-     * Check if animation has anchor point defined
+     * End pan (mouseup)
      */
-    private hasAnchorPoint(animation: CameraAnimation): boolean {
-        return animation.zoomAnchorWorldX !== undefined &&
-               animation.zoomAnchorWorldY !== undefined &&
-               animation.zoomAnchorCanvasX !== undefined &&
-               animation.zoomAnchorCanvasY !== undefined;
+    endInteractivePan() {
+        this.interactiveState.isDragging = false;
+        this.requestTilesImmediate();
     }
 
     /**
-     * Apply zoom anchor point to viewport
+     * Handle wheel zoom (cursor is always the focal point)
      */
-    private applyZoomAnchor(animation: CameraAnimation): void {
-        if (!this.hasAnchorPoint(animation)) return;
+    handleWheel(event: WheelEvent, canvasX: number, canvasY: number) {
+        event.preventDefault();
 
-        this.viewport.setCenterFromWorldPoint(
-            animation.zoomAnchorWorldX!,
-            animation.zoomAnchorWorldY!,
-            animation.zoomAnchorCanvasX!,
-            animation.zoomAnchorCanvasY!
+        const wasIdle = this.interactiveState.isIdle;
+        this.interactiveState.isIdle = false;
+
+        // Throttle
+        const now = performance.now();
+        if (now - this.lastZoomTime < this.CONFIG.ZOOM_THROTTLE) return;
+        this.lastZoomTime = now;
+
+        const state = this.interactiveState;
+        const isFirstInteraction = state.anchorWorldX === undefined;
+
+        // Sync springs to viewport when waking from idle (single source of truth)
+        if (wasIdle || isFirstInteraction) {
+            state.cameraZSpring.resetTo(this.viewport.cameraZ);
+        }
+
+        if (wasIdle) {
+            // Refresh spring timing to prevent stale timestamps
+            state.canvasXSpring.current.time = now;
+            state.canvasYSpring.current.time = now;
+            state.cameraZSpring.current.time = now;
+        }
+
+        // Calculate new scale
+        const zoomFactor = 1.5;
+        const newScale = event.deltaY < 0
+            ? this.viewport.scale * zoomFactor
+            : this.viewport.scale / zoomFactor;
+
+        const clampedScale = Math.max(
+            this.viewport.minScale,
+            Math.min(this.viewport.maxScale, newScale)
         );
+
+        // Convert to cameraZ
+        const targetZ = (this.viewport.containerHeight / clampedScale) / (2 * this.viewport.getTanHalfFov());
+        const clampedZ = Math.max(this.viewport.minZ, Math.min(this.viewport.maxZ, targetZ));
+
+        // Spring to new zoom
+        state.cameraZSpring.springTo(clampedZ);
+
+        // Update anchor to cursor position (zoom focal point)
+        const worldPoint = this.viewport.canvasToWorldPoint(canvasX, canvasY);
+        state.anchorWorldX = worldPoint.x;
+        state.anchorWorldY = worldPoint.y;
+
+        // Reset canvas springs if cursor moved significantly
+        const dx = canvasX - state.canvasXSpring.current.value;
+        const dy = canvasY - state.canvasYSpring.current.value;
+        const movedSignificantly = (dx * dx + dy * dy) > 100;
+
+        if (isFirstInteraction || movedSignificantly) {
+            state.canvasXSpring.resetTo(canvasX);
+            state.canvasYSpring.resetTo(canvasY);
+        }
+
+        // Animate to cursor for smooth zoom-to-cursor
+        state.canvasXSpring.springTo(canvasX);
+        state.canvasYSpring.springTo(canvasY);
     }
 
-    /**
-     * Request tiles for all visible world images
-     */
-    private requestTilesImmediate(): void {
-        const bounds = this.viewport.getWorldBounds();
-        const visibleImages = this.world.getVisibleImages(bounds.left, bounds.top, bounds.right, bounds.bottom);
-        for (const worldImage of visibleImages) {
-            worldImage.tileManager.requestTilesForViewport(this.viewport);
-        }
-    }
+    // ============================================================
+    // PRIVATE - Programmatic Animation
+    // ============================================================
 
-    /**
-     * Hybrid tile request strategy (OpenSeadragon-inspired)
-     * - Provides immediate feedback on first movement (max 5/sec)
-     * - Debounces during continuous movement (50ms after stopping)
-     * - Ensures final position always gets tiles
-     */
-    private requestTilesHybrid(now: number): void {
-        const timeSinceImmediate = now - this.lastImmediateRequestTime;
-
-        // Immediate request for responsiveness (but throttled to 5/sec max)
-        if (timeSinceImmediate > this.CONFIG.TILE_IMMEDIATE_THROTTLE) {
-            this.requestTilesImmediate();
-            this.lastImmediateRequestTime = now;
-        }
-
-        // Always schedule debounced request for final position
-        if (this.tileUpdateTimer !== null) {
-            clearTimeout(this.tileUpdateTimer);
-        }
-
-        this.tileUpdateTimer = window.setTimeout(() => {
-            this.tileUpdateTimer = null;
-            this.requestTilesImmediate();
-        }, this.CONFIG.TILE_DEBOUNCE_DELAY);
-    }
-
-    /**
-     * Complete animation by snapping to final values
-     */
-    private completeAnimation(animation: CameraAnimation): void {
-        // Snap to final values using strategy
-        const strategy = this.getAnimationStrategy(animation.type);
-        strategy.updateViewport(this.viewport, 1.0, animation);
-
-        // Apply zoom anchor if present
-        if (animation.type === 'zoom') {
-            this.applyZoomAnchor(animation);
-        }
-
+    private startProgrammaticAnimation(animation: ProgrammaticAnimation) {
         this.stopAnimation();
+        this.programmaticAnimation = animation;
+        this.animationFrameId = requestAnimationFrame(() => this.runProgrammaticAnimation());
     }
 
-    /**
-     * Clean up animation frame without calling callbacks
-     */
-    private cleanupAnimationFrame(): void {
-        if (this.animationFrameId !== undefined) {
-            cancelAnimationFrame(this.animationFrameId);
-            this.animationFrameId = undefined;
-        }
-    }
-
-    /**
-     * Run the animation loop
-     */
-    private runAnimation() {
-        const animation = this.currentAnimation;
-
-        // Early exit if no animation exists
-        if (!animation) {
-            this.cleanupAnimationFrame();
+    private runProgrammaticAnimation() {
+        const anim = this.programmaticAnimation;
+        if (!anim) {
+            if (this.animationFrameId !== undefined) {
+                cancelAnimationFrame(this.animationFrameId);
+                this.animationFrameId = undefined;
+            }
             return;
         }
 
         const now = performance.now();
-        const elapsed = now - animation.startTime;
+        const elapsed = now - anim.startTime;
 
-        // Early completion optimization - snap to final values
-        if (elapsed >= animation.duration) {
-            this.completeAnimation(animation);
+        if (elapsed >= anim.duration) {
+            // Complete: snap to final values
+            this.updateProgrammaticAnimation(anim, 1.0);
+            this.applyZoomAnchor(anim);
+            this.stopAnimation();
             return;
         }
 
-        const progress = elapsed / animation.duration;
-        const easedProgress = animation.easing(progress);
+        const progress = elapsed / anim.duration;
+        const easedProgress = anim.easing(progress);
 
-        // Get strategy for animation type and update viewport
-        const strategy = this.getAnimationStrategy(animation.type);
-        strategy.updateViewport(this.viewport, easedProgress, animation);
+        this.updateProgrammaticAnimation(anim, easedProgress);
 
-        // Apply zoom anchor point if present (for zoom animations only)
-        if (animation.type === 'zoom' && this.hasAnchorPoint(animation)) {
-            this.applyZoomAnchor(animation);
+        if (anim.type === 'zoom' && this.hasZoomAnchor(anim)) {
+            this.applyZoomAnchor(anim);
         }
 
-        // Request tiles for new position (hybrid strategy)
         this.requestTilesHybrid(now);
-
-        // Call update callback if provided
-        animation.onUpdate?.();
-
-        // Continue animation
-        this.animationFrameId = requestAnimationFrame(() => this.runAnimation());
+        this.animationFrameId = requestAnimationFrame(() => this.runProgrammaticAnimation());
     }
 
+    private updateProgrammaticAnimation(anim: ProgrammaticAnimation, progress: number) {
+        if (anim.type === 'pan' || anim.type === 'to') {
+            this.viewport.centerX = anim.startCenterX + (anim.targetCenterX - anim.startCenterX) * progress;
+            this.viewport.centerY = anim.startCenterY + (anim.targetCenterY - anim.startCenterY) * progress;
+        }
 
-    /**
-     * Check if an animation is currently active
-     */
-    isAnimating(): boolean {
-        return this.currentAnimation !== undefined;
+        if (anim.type === 'zoom' || anim.type === 'to') {
+            // Exponential interpolation for zoom
+            const startLog = Math.log(anim.startCameraZ);
+            const targetLog = Math.log(anim.targetCameraZ);
+            this.viewport.cameraZ = Math.exp(startLog + (targetLog - startLog) * progress);
+            this.viewport.updateScale();
+        }
     }
 
+    private hasZoomAnchor(anim: ProgrammaticAnimation): boolean {
+        return anim.zoomAnchorWorldX !== undefined &&
+               anim.zoomAnchorWorldY !== undefined &&
+               anim.zoomAnchorCanvasX !== undefined &&
+               anim.zoomAnchorCanvasY !== undefined;
+    }
 
+    private applyZoomAnchor(anim: ProgrammaticAnimation) {
+        if (!this.hasZoomAnchor(anim)) return;
+        this.viewport.setCenterFromWorldPoint(
+            anim.zoomAnchorWorldX!,
+            anim.zoomAnchorWorldY!,
+            anim.zoomAnchorCanvasX!,
+            anim.zoomAnchorCanvasY!
+        );
+    }
 
+    // ============================================================
+    // PRIVATE - Interactive Animation Helpers
+    // ============================================================
 
     /**
-     * Apply interactive transform (anchor point transformation)
+     * Apply anchor point transformation: keep world point under cursor
      * Returns true if transform was applied
      */
-    private applyInteractiveTransform(): boolean {
+    private applyAnchorTransform(): boolean {
         const state = this.interactiveState;
 
         if (state.anchorWorldX === undefined || state.anchorWorldY === undefined) {
             return false;
         }
 
-        // Set viewport center so anchor world point appears at current canvas position
+        // Keep anchor world point at current canvas spring position
         this.viewport.setCenterFromWorldPoint(
             state.anchorWorldX,
             state.anchorWorldY,
@@ -493,170 +458,32 @@ export class Camera {
         return true;
     }
 
-    /**
-     * Update interactive animations (OpenSeadragon-style spring physics)
-     * Should be called every frame when Camera is not running programmatic animations
-     */
-    updateInteractiveAnimation(): { needsUpdate: boolean } {
-        // Skip all work if idle
-        if (this.isIdle) {
-            return this.updateResult;
+    // ============================================================
+    // PRIVATE - Tile Request Strategy
+    // ============================================================
+
+    private requestTilesImmediate() {
+        const bounds = this.viewport.getWorldBounds();
+        const visibleImages = this.world.getVisibleImages(bounds.left, bounds.top, bounds.right, bounds.bottom);
+        for (const img of visibleImages) {
+            img.tileManager.requestTilesForViewport(this.viewport);
         }
+    }
 
-        const state = this.interactiveState;
-
-        // Update all springs and check if any are still animating
-        const panXAnimating = state.canvasXSpring.update();
-        const panYAnimating = state.canvasYSpring.update();
-        const zoomAnimating = state.cameraZSpring.update();
-
-        // Only update viewport camera Z when zoom is actively animating
-        // This prevents jolts by keeping viewport as source of truth when at rest
-        if (zoomAnimating) {
-            this.viewport.cameraZ = state.cameraZSpring.current.value;
-            this.viewport.updateScale();
-        }
-
-        // Apply transform using updated spring values
-        const needsUpdate = this.applyInteractiveTransform();
-
-        // Check if we should go idle (no animations and not dragging)
-        const isAnimating = state.isDragging || panXAnimating || panYAnimating || zoomAnimating;
-        if (!isAnimating) {
-            this.isIdle = true;
-            // Request final tiles before going idle
+    private requestTilesHybrid(now: number) {
+        // Immediate request (throttled)
+        if (now - this.lastImmediateRequestTime > this.CONFIG.TILE_IMMEDIATE_THROTTLE) {
             this.requestTilesImmediate();
-        } else if (needsUpdate) {
-            // Request tiles during animation (throttled)
-            this.requestTilesHybrid(performance.now());
+            this.lastImmediateRequestTime = now;
         }
 
-        this.updateResult.needsUpdate = needsUpdate;
-        return this.updateResult;
+        // Debounced request (ensures final position gets tiles)
+        if (this.tileUpdateTimer !== null) {
+            clearTimeout(this.tileUpdateTimer);
+        }
+        this.tileUpdateTimer = window.setTimeout(() => {
+            this.tileUpdateTimer = null;
+            this.requestTilesImmediate();
+        }, this.CONFIG.TILE_DEBOUNCE_DELAY);
     }
-
-    /**
-     * Start an interactive pan (mouse down)
-     */
-    startInteractivePan(canvasX: number, canvasY: number) {
-        // Wake up from idle state
-        this.isIdle = false;
-
-        this.interactiveState.isDragging = true;
-
-        // Convert to world coordinates to establish anchor point
-        const worldPoint = this.viewport.canvasToWorldPoint(canvasX, canvasY);
-        this.interactiveState.anchorWorldX = worldPoint.x;
-        this.interactiveState.anchorWorldY = worldPoint.y;
-
-        // Initialize springs to current position (no jump)
-        this.interactiveState.canvasXSpring.resetTo(canvasX);
-        this.interactiveState.canvasYSpring.resetTo(canvasY);
-        
-        // Sync zoom spring to current camera Z
-        if (!this.interactiveState.cameraZSpring.current.value || 
-            Math.abs(this.interactiveState.cameraZSpring.current.value - this.viewport.cameraZ) > 1.0) {
-            this.interactiveState.cameraZSpring.resetTo(this.viewport.cameraZ);
-        }
-    }
-
-    /**
-     * Update pan target position (mouse move during drag)
-     */
-    updateInteractivePan(canvasX: number, canvasY: number) {
-        if (!this.interactiveState.isDragging) return;
-
-        // Animate canvas position with springs for smooth trailing
-        this.interactiveState.canvasXSpring.springTo(canvasX);
-        this.interactiveState.canvasYSpring.springTo(canvasY);
-    }
-
-    /**
-     * End interactive pan (mouse up)
-     */
-    endInteractivePan() {
-        this.interactiveState.isDragging = false;
-
-        // Request tiles for final position
-        this.requestTilesImmediate();
-    }
-
-    /**
-     * Handle wheel event for zooming with spring physics
-     */
-    handleWheel(event: WheelEvent, canvasX: number, canvasY: number) {
-        event.preventDefault();
-
-        // Check if we're coming out of idle (need to sync spring timing)
-        const wasIdle = this.isIdle;
-        
-        // Wake up from idle state
-        this.isIdle = false;
-
-        // Throttle zoom events
-        const now = performance.now();
-        if (now - this.lastZoomTime < this.CONFIG.ZOOM_THROTTLE) {
-            return;
-        }
-        this.lastZoomTime = now;
-
-        // Check if this is the first interactive action
-        const isFirstInteraction = this.interactiveState.anchorWorldX === undefined;
-
-        // Always sync zoom spring to viewport when coming out of idle or first interaction
-        // This ensures the zoom animation starts from the current viewport position
-        if (wasIdle || isFirstInteraction) {
-            this.interactiveState.cameraZSpring.resetTo(this.viewport.cameraZ);
-        }
-        
-        // Refresh spring timing when coming out of idle to prevent stale timestamps
-        if (wasIdle) {
-            this.interactiveState.canvasXSpring.current.time = now;
-            this.interactiveState.canvasYSpring.current.time = now;
-            this.interactiveState.cameraZSpring.current.time = now;
-        }
-
-        // Zoom factor for each scroll increment
-        const zoomFactor = 1.5;
-        const newScale = event.deltaY < 0 ? this.viewport.scale * zoomFactor : this.viewport.scale / zoomFactor;
-
-        // Clamp to valid scale range
-        const clampedScale = Math.max(
-            this.viewport.minScale,
-            Math.min(this.viewport.maxScale, newScale)
-        );
-
-        // Convert scale to camera Z
-        const targetCameraZ = (this.viewport.containerHeight / clampedScale) / (2 * this.viewport.getTanHalfFov());
-
-        // Clamp to valid Z range
-        const clampedCameraZ = Math.max(
-            this.viewport.minZ,
-            Math.min(this.viewport.maxZ, targetCameraZ)
-        );
-
-        // Update target zoom using spring
-        this.interactiveState.cameraZSpring.springTo(clampedCameraZ);
-
-        // Always update anchor to world point under current cursor for zoom-to-cursor behavior
-        const worldPoint = this.viewport.canvasToWorldPoint(canvasX, canvasY);
-        
-        this.interactiveState.anchorWorldX = worldPoint.x;
-        this.interactiveState.anchorWorldY = worldPoint.y;
-        
-        // Reset canvas springs if cursor moved significantly or first interaction
-        const cursorDx = canvasX - this.interactiveState.canvasXSpring.current.value;
-        const cursorDy = canvasY - this.interactiveState.canvasYSpring.current.value;
-        const cursorMovedSignificantly = (cursorDx * cursorDx + cursorDy * cursorDy) > 100; // 10 pixel threshold
-        
-        if (isFirstInteraction || cursorMovedSignificantly) {
-            this.interactiveState.canvasXSpring.resetTo(canvasX);
-            this.interactiveState.canvasYSpring.resetTo(canvasY);
-        }
-        
-        // Always animate to new cursor position for smooth zoom-to-cursor
-        this.interactiveState.canvasXSpring.springTo(canvasX);
-        this.interactiveState.canvasYSpring.springTo(canvasY);
-    }
-
 }

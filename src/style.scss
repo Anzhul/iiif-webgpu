@@ -20,6 +20,11 @@ body{
   cursor: grabbing;
 }
 
+// Hide annotation/overlay container
+.iiif-container > div[style*="position: absolute"][style*="pointer-events: none"] {
+  display: none !important;
+}
+
 .page{
   position: absolute;
   top: 0;
