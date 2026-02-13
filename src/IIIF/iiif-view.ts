@@ -3,7 +3,7 @@ import type { WorldImage } from './iiif-world';
 /**
  * Viewport using world coordinates.
  * centerX/centerY are absolute world coordinates (not normalized 0-1).
- * scale = CSS pixels per world unit.
+ * scale = CSS pixels per world unit, derived from cameraZ via perspective formula.
  */
 
 export class Viewport {
@@ -31,25 +31,6 @@ export class Viewport {
   // Cached FOV trigonometric values
   private fovRadians: number;
   private tanHalfFov: number;
-
-  // Cache for world bounds
-  private worldBoundsCache: {
-    bounds: { left: number; top: number; right: number; bottom: number; width: number; height: number } | null;
-    centerX: number;
-    centerY: number;
-    scale: number;
-    containerWidth: number;
-    containerHeight: number;
-  } = {
-    bounds: null,
-    centerX: NaN,
-    centerY: NaN,
-    scale: NaN,
-    containerWidth: NaN,
-    containerHeight: NaN,
-  };
-
-  private boundsCacheInvalid: boolean = false;
 
   constructor(containerWidth: number, containerHeight: number) {
     this.containerWidth = containerWidth;
@@ -92,14 +73,6 @@ export class Viewport {
   updateScale(): void {
     this.scale = this.calculateScale();
     this.updateScaleLimits();
-    this.invalidateBoundsCache();
-  }
-
-  private invalidateBoundsCache(): void {
-    if (!this.boundsCacheInvalid) {
-      this.worldBoundsCache.bounds = null;
-      this.boundsCacheInvalid = true;
-    }
   }
 
   private updateScaleLimits(): void {
@@ -122,11 +95,14 @@ export class Viewport {
   }
 
   /**
-   * Fit the viewport so that a world region fills the container width.
+   * Fit the viewport so that a world region fills the container.
    * Sets center to the middle of the given world dimensions.
    */
   fitToWorld(worldWidth: number, worldHeight: number) {
-    const targetScale = this.containerWidth / worldWidth;
+    const targetScale = Math.min(
+      this.containerWidth / worldWidth,
+      this.containerHeight / worldHeight
+    );
     this.cameraZ = this.containerHeight / (2 * targetScale * this.tanHalfFov);
 
     this.maxZ = this.cameraZ * 5;
@@ -142,26 +118,16 @@ export class Viewport {
   }
 
   /**
-   * Get visible bounds in world coordinates
+   * Get visible bounds in world coordinates.
+   * Cheap computation (4 divisions + additions), no caching needed.
    */
   getWorldBounds(): { left: number; top: number; right: number; bottom: number; width: number; height: number } {
-    if (!this.boundsCacheInvalid && this.worldBoundsCache.bounds) {
-      const c = this.worldBoundsCache;
-      if (c.centerX === this.centerX &&
-          c.centerY === this.centerY &&
-          c.scale === this.scale &&
-          c.containerWidth === this.containerWidth &&
-          c.containerHeight === this.containerHeight) {
-        return c.bounds!;
-      }
-    }
-
     const worldWidth = this.containerWidth / this.scale;
     const worldHeight = this.containerHeight / this.scale;
     const left = this.centerX - worldWidth / 2;
     const top = this.centerY - worldHeight / 2;
 
-    const bounds = {
+    return {
       left,
       top,
       right: left + worldWidth,
@@ -169,18 +135,6 @@ export class Viewport {
       width: worldWidth,
       height: worldHeight
     };
-
-    this.worldBoundsCache = {
-      bounds,
-      centerX: this.centerX,
-      centerY: this.centerY,
-      scale: this.scale,
-      containerWidth: this.containerWidth,
-      containerHeight: this.containerHeight,
-    };
-    this.boundsCacheInvalid = false;
-
-    return bounds;
   }
 
   /**
@@ -191,11 +145,19 @@ export class Viewport {
     const wb = this.getWorldBounds();
     const p = worldImage.placement;
 
-    // Clamp world bounds to this image's world region
-    const clampedLeft = Math.max(wb.left, p.worldX);
-    const clampedTop = Math.max(wb.top, p.worldY);
-    const clampedRight = Math.min(wb.right, p.worldX + p.worldWidth);
-    const clampedBottom = Math.min(wb.bottom, p.worldY + p.worldHeight);
+    // Add generous buffer to viewport bounds (2 world units on each side)
+    // This prevents edge tiles from flickering due to floating-point precision at boundaries
+    const buffer = 2;
+    const bufferedLeft = wb.left - buffer;
+    const bufferedTop = wb.top - buffer;
+    const bufferedRight = wb.right + buffer;
+    const bufferedBottom = wb.bottom + buffer;
+
+    // Clamp buffered world bounds to this image's world region
+    const clampedLeft = Math.max(bufferedLeft, p.worldX);
+    const clampedTop = Math.max(bufferedTop, p.worldY);
+    const clampedRight = Math.min(bufferedRight, p.worldX + p.worldWidth);
+    const clampedBottom = Math.min(bufferedBottom, p.worldY + p.worldHeight);
 
     // Convert world coords to image pixels
     const imgLeft = worldImage.worldToImage(clampedLeft, 0).x;
@@ -214,15 +176,77 @@ export class Viewport {
   }
 
   /**
+   * Determine the optimal IIIF zoom level for rendering a WorldImage
+   * at the current viewport scale.
+   *
+   * No rounding — even tiny scale differences must produce a stable zoom level.
+   * The camera throttles how often tiles are requested, so oscillation at
+   * boundaries is handled by the multi-level coverage in TileManager.
+   */
+  getOptimalZoomLevel(worldImage: WorldImage, distanceDetail: number = 1.0): { zoomLevel: number; scaleFactor: number } {
+    const image = worldImage.image;
+    const imagePixelScale = this.scale * worldImage.worldPerPixel;
+    const imageScale = distanceDetail / imagePixelScale;
+
+    let zoomLevel = image.maxZoomLevel;
+    for (let i = 0; i < image.scaleFactors.length; i++) {
+      if (imageScale <= image.scaleFactors[i]) {
+        zoomLevel = i;
+        break;
+      }
+    }
+    zoomLevel = Math.max(0, Math.min(zoomLevel, image.maxZoomLevel));
+
+    return {
+      zoomLevel,
+      scaleFactor: image.scaleFactors[zoomLevel]
+    };
+  }
+
+  /**
+   * Get the visible tile grid range for a WorldImage at a specific zoom level.
+   * Returns tile coordinate range or null if no tiles are visible.
+   */
+  getTileGridForLevel(
+    worldImage: WorldImage,
+    _zoomLevel: number,
+    scaleFactor: number
+  ): { startX: number; startY: number; endX: number; endY: number; centerX: number; centerY: number } | null {
+    const imageBounds = this.getImageBoundsForWorldImage(worldImage);
+    const tileSize = worldImage.image.tileSize;
+    const tileSizeAtLevel = tileSize * scaleFactor;
+
+    // Epsilon prevents Math.floor/ceil from oscillating during sub-pixel animations
+    const epsilon = 0.5;
+
+    let startX = Math.floor((imageBounds.left - epsilon) / tileSizeAtLevel);
+    let startY = Math.floor((imageBounds.top - epsilon) / tileSizeAtLevel);
+    let endX = Math.ceil((imageBounds.right + epsilon) / tileSizeAtLevel);
+    let endY = Math.ceil((imageBounds.bottom + epsilon) / tileSizeAtLevel);
+
+    const maxTileX = Math.floor((worldImage.image.width - 1) / tileSizeAtLevel);
+    const maxTileY = Math.floor((worldImage.image.height - 1) / tileSizeAtLevel);
+
+    startX = Math.max(0, startX);
+    startY = Math.max(0, startY);
+    endX = Math.min(maxTileX, endX);
+    endY = Math.min(maxTileY, endY);
+
+    if (startX > endX || startY > endY) return null;
+
+    return {
+      startX, startY, endX, endY,
+      centerX: (startX + endX) / 2,
+      centerY: (startY + endY) / 2
+    };
+  }
+
+  /**
    * Constrain center to keep content visible.
    * worldWidth/worldHeight define the total content bounds.
    */
   constrainCenter(worldWidth?: number, worldHeight?: number) {
-    const oldCenterX = this.centerX;
-    const oldCenterY = this.centerY;
-
     if (worldWidth === undefined || worldHeight === undefined) {
-      // No constraint
       return;
     }
 
@@ -239,10 +263,6 @@ export class Viewport {
       const minCenterY = viewHeight / 2;
       const maxCenterY = worldHeight - viewHeight / 2;
       this.centerY = Math.max(minCenterY, Math.min(maxCenterY, this.centerY));
-    }
-
-    if (oldCenterX !== this.centerX || oldCenterY !== this.centerY) {
-      this.invalidateBoundsCache();
     }
   }
 
@@ -270,7 +290,5 @@ export class Viewport {
 
     this.centerX = worldX - (canvasX / this.scale) + worldWidth / 2;
     this.centerY = worldY - (canvasY / this.scale) + worldHeight / 2;
-
-    this.invalidateBoundsCache();
   }
 }

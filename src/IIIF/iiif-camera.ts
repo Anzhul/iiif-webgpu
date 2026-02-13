@@ -53,7 +53,6 @@ export class Camera {
     world: World;
 
     private programmaticAnimation?: ProgrammaticAnimation;
-    private animationFrameId?: number;
 
     private interactiveState: InteractiveState;
 
@@ -66,7 +65,7 @@ export class Camera {
         TILE_DEBOUNCE_DELAY: 50,       // 50ms debounce
         ZOOM_THROTTLE: 80,              // 80ms between wheel events
         SPRING_STIFFNESS: 6.5,
-        ANIMATION_TIME: 1.2
+        ANIMATION_TIME: 1.25
     } as const;
 
     constructor(viewport: Viewport, world: World) {
@@ -199,10 +198,6 @@ export class Camera {
     }
 
     stopAnimation() {
-        if (this.animationFrameId !== undefined) {
-            cancelAnimationFrame(this.animationFrameId);
-            this.animationFrameId = undefined;
-        }
         this.programmaticAnimation = undefined;
     }
 
@@ -211,35 +206,47 @@ export class Camera {
     // ============================================================
 
     /**
-     * Update interactive spring animations. Call this every frame from the main render loop.
+     * Update all animations. Call this every frame from the main render loop.
+     * Handles both interactive (spring-based) and programmatic (easing-based) animations.
      */
     updateInteractiveAnimation(): { needsUpdate: boolean } {
-        if (this.interactiveState.isIdle) {
+        // Update programmatic animation if active (runs in main render loop, not separate rAF)
+        const programmaticActive = this.updateProgrammaticStep();
+
+        if (this.interactiveState.isIdle && !programmaticActive) {
             return { needsUpdate: false };
         }
 
         const state = this.interactiveState;
+        let needsUpdate = programmaticActive;
 
-        // Update all springs
-        const panXAnimating = state.canvasXSpring.update();
-        const panYAnimating = state.canvasYSpring.update();
-        const zoomAnimating = state.cameraZSpring.update();
+        if (!this.interactiveState.isIdle) {
+            // Update all springs
+            const panXAnimating = state.canvasXSpring.update();
+            const panYAnimating = state.canvasYSpring.update();
+            const zoomAnimating = state.cameraZSpring.update();
 
-        // Sync viewport from spring (single source of truth)
-        if (zoomAnimating) {
+            // Always sync viewport from spring — even on the settling frame where
+            // spring.update() snaps current.value to target but returns false.
+            // Without this, viewport.cameraZ retains the previous frame's interpolated
+            // value, causing scale/tile-grid to be slightly off from the MVP matrix.
             this.viewport.cameraZ = state.cameraZSpring.current.value;
             this.viewport.updateScale();
-        }
 
-        // Apply anchor point transformation
-        const needsUpdate = this.applyAnchorTransform();
+            // Apply anchor point transformation
+            if (this.applyAnchorTransform()) {
+                needsUpdate = true;
+            }
 
-        // Check if idle
-        const isAnimating = state.isDragging || panXAnimating || panYAnimating || zoomAnimating;
-        if (!isAnimating) {
-            this.interactiveState.isIdle = true;
-            this.requestTilesImmediate();
-        } else if (needsUpdate) {
+            // Check if idle
+            const isAnimating = state.isDragging || panXAnimating || panYAnimating || zoomAnimating;
+            if (!isAnimating) {
+                this.interactiveState.isIdle = true;
+                this.requestTilesImmediate();
+            } else if (needsUpdate) {
+                this.requestTilesHybrid(performance.now());
+            }
+        } else if (programmaticActive) {
             this.requestTilesHybrid(performance.now());
         }
 
@@ -356,6 +363,60 @@ export class Camera {
         state.canvasYSpring.springTo(canvasY);
     }
 
+    /**
+     * Handle pinch zoom (two-finger gesture, continuous)
+     * scaleFactor is the ratio: newPinchDistance / previousPinchDistance
+     */
+    handlePinchZoom(scaleFactor: number, centerCanvasX: number, centerCanvasY: number) {
+        const wasIdle = this.interactiveState.isIdle;
+        this.interactiveState.isIdle = false;
+
+        const state = this.interactiveState;
+        const now = performance.now();
+        const isFirstInteraction = state.anchorWorldX === undefined;
+
+        // Sync springs on first interaction or wake from idle
+        if (wasIdle || isFirstInteraction) {
+            state.cameraZSpring.resetTo(this.viewport.cameraZ);
+            state.canvasXSpring.resetTo(centerCanvasX);
+            state.canvasYSpring.resetTo(centerCanvasY);
+            state.canvasXSpring.current.time = now;
+            state.canvasYSpring.current.time = now;
+            state.cameraZSpring.current.time = now;
+        }
+
+        // Calculate target scale from current scale * pinch ratio
+        const newScale = this.viewport.scale * scaleFactor;
+        const clampedScale = Math.max(
+            this.viewport.minScale,
+            Math.min(this.viewport.maxScale, newScale)
+        );
+
+        // Convert to cameraZ
+        const targetZ = (this.viewport.containerHeight / clampedScale) / (2 * this.viewport.getTanHalfFov());
+        const clampedZ = Math.max(this.viewport.minZ, Math.min(this.viewport.maxZ, targetZ));
+
+        // Spring zoom to target
+        state.cameraZSpring.springTo(clampedZ);
+
+        // Update anchor to pinch midpoint (zoom focal point)
+        const worldPoint = this.viewport.canvasToWorldPoint(centerCanvasX, centerCanvasY);
+        state.anchorWorldX = worldPoint.x;
+        state.anchorWorldY = worldPoint.y;
+
+        // Spring canvas position to midpoint (enables simultaneous pan)
+        state.canvasXSpring.springTo(centerCanvasX);
+        state.canvasYSpring.springTo(centerCanvasY);
+    }
+
+    /**
+     * Handle double-tap zoom (delegates to programmatic zoom)
+     */
+    handleDoubleTap(canvasX: number, canvasY: number) {
+        const targetScale = this.viewport.scale * 2.0;
+        this.zoom(targetScale, 300, easeOutQuart, canvasX, canvasY);
+    }
+
     // ============================================================
     // PRIVATE - Programmatic Animation
     // ============================================================
@@ -363,44 +424,41 @@ export class Camera {
     private startProgrammaticAnimation(animation: ProgrammaticAnimation) {
         this.stopAnimation();
         this.programmaticAnimation = animation;
-        this.animationFrameId = requestAnimationFrame(() => this.runProgrammaticAnimation());
     }
 
-    private runProgrammaticAnimation() {
+    /**
+     * Advance the programmatic animation by one frame.
+     * Called from updateInteractiveAnimation() in the main render loop.
+     * Returns true if the animation is still active.
+     */
+    private updateProgrammaticStep(): boolean {
         const anim = this.programmaticAnimation;
-        if (!anim) {
-            if (this.animationFrameId !== undefined) {
-                cancelAnimationFrame(this.animationFrameId);
-                this.animationFrameId = undefined;
-            }
-            return;
-        }
+        if (!anim) return false;
 
         const now = performance.now();
         const elapsed = now - anim.startTime;
 
         if (elapsed >= anim.duration) {
             // Complete: snap to final values
-            this.updateProgrammaticAnimation(anim, 1.0);
+            this.updateProgrammaticAnimationProgress(anim, 1.0);
             this.applyZoomAnchor(anim);
-            this.stopAnimation();
-            return;
+            this.programmaticAnimation = undefined;
+            return true; // still needed render for final frame
         }
 
         const progress = elapsed / anim.duration;
         const easedProgress = anim.easing(progress);
 
-        this.updateProgrammaticAnimation(anim, easedProgress);
+        this.updateProgrammaticAnimationProgress(anim, easedProgress);
 
         if (anim.type === 'zoom' && this.hasZoomAnchor(anim)) {
             this.applyZoomAnchor(anim);
         }
 
-        this.requestTilesHybrid(now);
-        this.animationFrameId = requestAnimationFrame(() => this.runProgrammaticAnimation());
+        return true;
     }
 
-    private updateProgrammaticAnimation(anim: ProgrammaticAnimation, progress: number) {
+    private updateProgrammaticAnimationProgress(anim: ProgrammaticAnimation, progress: number) {
         if (anim.type === 'pan' || anim.type === 'to') {
             this.viewport.centerX = anim.startCenterX + (anim.targetCenterX - anim.startCenterX) * progress;
             this.viewport.centerY = anim.startCenterY + (anim.targetCenterY - anim.startCenterY) * progress;

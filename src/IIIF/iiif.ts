@@ -3,6 +3,7 @@ import { Viewport } from './iiif-view';
 import { TileManager } from './iiif-tile';
 import { WebGPURenderer } from './iiif-webgpu';
 import { WebGLRenderer } from './iiif-webgl';
+import { Canvas2DRenderer } from './iiif-canvas2d';
 import type { IIIFRenderer, TileRenderData } from './iiif-renderer';
 import { ToolBar } from './iiif-toolbar';
 import { AnnotationManager } from './iiif-annotations';
@@ -32,7 +33,7 @@ export type { WorldPlacement } from './iiif-world';
  */
 
 export interface IIIFViewerOptions {
-    renderer?: 'webgpu' | 'webgl' | 'auto';
+    renderer?: 'webgpu' | 'webgl' | 'canvas2d' | 'auto';
     enableOverlays?: boolean;
     enableToolbar?: boolean;
     maxCacheSize?: number;
@@ -75,6 +76,16 @@ export class IIIFViewer {
         centerX: NaN,
         centerY: NaN,
         scale: NaN
+    };
+
+    // Touch gesture state
+    private touchState = {
+        activeTouches: new Map<number, { x: number; y: number }>(),
+        lastPinchDistance: 0,
+        isPinching: false,
+        lastTapTime: 0,
+        lastTapX: 0,
+        lastTapY: 0,
     };
 
     // Event tracking
@@ -182,16 +193,29 @@ export class IIIFViewer {
             return;
         }
 
-        // Auto mode: try WebGPU, fallback to WebGL
+        if (rendererType === 'canvas2d') {
+            await this.initializeCanvas2D();
+            return;
+        }
+
+        // Auto mode: try WebGPU → WebGL → Canvas 2D
         if (await this.isWebGPUAvailable()) {
             const success = await this.initializeWebGPU();
             if (!success) {
                 console.warn('WebGPU initialization failed, falling back to WebGL');
-                await this.initializeWebGL();
+                const webglSuccess = await this.initializeWebGL();
+                if (!webglSuccess) {
+                    console.warn('WebGL initialization failed, falling back to Canvas 2D');
+                    await this.initializeCanvas2D();
+                }
             }
         } else {
-            console.log('WebGPU not available, using WebGL');
-            await this.initializeWebGL();
+            console.log('WebGPU not available, trying WebGL');
+            const webglSuccess = await this.initializeWebGL();
+            if (!webglSuccess) {
+                console.warn('WebGL initialization failed, falling back to Canvas 2D');
+                await this.initializeCanvas2D();
+            }
         }
     }
 
@@ -218,6 +242,20 @@ export class IIIFViewer {
             return true;
         } catch (error) {
             console.error('Failed to initialize WebGL renderer:', error);
+            this.renderer = undefined;
+            return false;
+        }
+    }
+
+    private async initializeCanvas2D(): Promise<boolean> {
+        try {
+            console.log('Initializing Canvas 2D renderer');
+            this.renderer = new Canvas2DRenderer(this.container);
+            await this.renderer.initialize();
+            this.updateRendererForAllTileManagers();
+            return true;
+        } catch (error) {
+            console.error('Failed to initialize Canvas 2D renderer:', error);
             this.renderer = undefined;
             return false;
         }
@@ -251,6 +289,7 @@ export class IIIFViewer {
         this.cachedContainerRect = this.container.getBoundingClientRect();
         this.viewport.containerWidth = this.container.clientWidth;
         this.viewport.containerHeight = this.container.clientHeight;
+        this.viewport.updateScale(); // Recalculate scale for new container dimensions
 
         this.renderer?.resize();
         this.requestTilesForAllVisibleImages();
@@ -265,14 +304,15 @@ export class IIIFViewer {
     private addEventListener<K extends keyof HTMLElementEventMap>(
         element: Element,
         type: K,
-        handler: (event: HTMLElementEventMap[K]) => void
+        handler: (event: HTMLElementEventMap[K]) => void,
+        options?: { passive?: boolean }
     ) {
         if (!this.eventHandlers.has(element)) {
             this.eventHandlers.set(element, new Map());
         }
         const listener = handler as EventListener;
         this.eventHandlers.get(element)!.set(type, listener);
-        element.addEventListener(type, listener, { signal: this.abortController.signal });
+        element.addEventListener(type, listener, { signal: this.abortController.signal, ...options });
     }
 
     /**
@@ -300,16 +340,134 @@ export class IIIFViewer {
                 document.removeEventListener('mouseleave', cleanup);
             };
 
-            document.addEventListener('mousemove', onMouseMove);
-            document.addEventListener('mouseup', cleanup);
-            document.addEventListener('mouseleave', cleanup);
+            document.addEventListener('mousemove', onMouseMove, { signal: this.abortController.signal });
+            document.addEventListener('mouseup', cleanup, { signal: this.abortController.signal });
+            document.addEventListener('mouseleave', cleanup, { signal: this.abortController.signal });
         });
 
         this.addEventListener(this.container, 'wheel', (event: WheelEvent) => {
             const canvasX = event.clientX - this.cachedContainerRect.left;
             const canvasY = event.clientY - this.cachedContainerRect.top;
             this.camera.handleWheel(event, canvasX, canvasY);
-        });
+        }, { passive: false });
+
+        // Touch events for mobile/tablet
+        this.addEventListener(this.container, 'touchstart', (event: TouchEvent) => {
+            event.preventDefault();
+
+            const rect = this.cachedContainerRect;
+            for (let i = 0; i < event.changedTouches.length; i++) {
+                const t = event.changedTouches[i];
+                this.touchState.activeTouches.set(t.identifier, {
+                    x: t.clientX - rect.left,
+                    y: t.clientY - rect.top
+                });
+            }
+
+            const touchCount = this.touchState.activeTouches.size;
+
+            if (touchCount === 1) {
+                const touch = event.changedTouches[0];
+                const canvasX = touch.clientX - rect.left;
+                const canvasY = touch.clientY - rect.top;
+
+                // Double-tap detection
+                const now = performance.now();
+                const dt = now - this.touchState.lastTapTime;
+                const dx = canvasX - this.touchState.lastTapX;
+                const dy = canvasY - this.touchState.lastTapY;
+
+                if (dt < 300 && (dx * dx + dy * dy) < 900) {
+                    this.camera.handleDoubleTap(canvasX, canvasY);
+                    this.touchState.lastTapTime = 0;
+                    return;
+                }
+
+                this.touchState.lastTapTime = now;
+                this.touchState.lastTapX = canvasX;
+                this.touchState.lastTapY = canvasY;
+
+                this.camera.startInteractivePan(canvasX, canvasY);
+            }
+
+            if (touchCount === 2) {
+                // End single-finger pan, start pinch
+                this.camera.endInteractivePan();
+
+                const touches = Array.from(this.touchState.activeTouches.values());
+                const dx = touches[1].x - touches[0].x;
+                const dy = touches[1].y - touches[0].y;
+                this.touchState.lastPinchDistance = Math.sqrt(dx * dx + dy * dy);
+                this.touchState.isPinching = true;
+            }
+        }, { passive: false });
+
+        this.addEventListener(this.container, 'touchmove', (event: TouchEvent) => {
+            event.preventDefault();
+
+            const rect = this.cachedContainerRect;
+            for (let i = 0; i < event.changedTouches.length; i++) {
+                const t = event.changedTouches[i];
+                this.touchState.activeTouches.set(t.identifier, {
+                    x: t.clientX - rect.left,
+                    y: t.clientY - rect.top
+                });
+            }
+
+            const touchCount = this.touchState.activeTouches.size;
+
+            if (touchCount === 1 && !this.touchState.isPinching) {
+                const touch = event.changedTouches[0];
+                const canvasX = touch.clientX - rect.left;
+                const canvasY = touch.clientY - rect.top;
+                this.camera.updateInteractivePan(canvasX, canvasY);
+            }
+
+            if (touchCount >= 2 && this.touchState.isPinching) {
+                const touches = Array.from(this.touchState.activeTouches.values());
+                const dx = touches[1].x - touches[0].x;
+                const dy = touches[1].y - touches[0].y;
+                const newDistance = Math.sqrt(dx * dx + dy * dy);
+                const centerX = (touches[0].x + touches[1].x) / 2;
+                const centerY = (touches[0].y + touches[1].y) / 2;
+
+                if (this.touchState.lastPinchDistance > 0) {
+                    const scaleFactor = newDistance / this.touchState.lastPinchDistance;
+                    this.camera.handlePinchZoom(scaleFactor, centerX, centerY);
+                }
+
+                this.touchState.lastPinchDistance = newDistance;
+            }
+        }, { passive: false });
+
+        const onTouchEnd = (event: TouchEvent) => {
+            event.preventDefault();
+
+            for (let i = 0; i < event.changedTouches.length; i++) {
+                this.touchState.activeTouches.delete(event.changedTouches[i].identifier);
+            }
+
+            const remaining = this.touchState.activeTouches.size;
+
+            if (remaining < 2 && this.touchState.isPinching) {
+                this.touchState.isPinching = false;
+
+                if (remaining === 1) {
+                    // One finger still down: resume single-finger pan
+                    const touch = Array.from(this.touchState.activeTouches.values())[0];
+                    this.camera.startInteractivePan(touch.x, touch.y);
+                } else {
+                    this.camera.endInteractivePan();
+                }
+            }
+
+            if (remaining === 0 && !this.touchState.isPinching) {
+                this.camera.endInteractivePan();
+            }
+        };
+
+        this.addEventListener(this.container, 'touchend', onTouchEnd, { passive: false });
+        this.addEventListener(this.container, 'touchcancel', onTouchEnd, { passive: false });
     }
 
     // ============================================================
@@ -339,7 +497,9 @@ export class IIIFViewer {
             id,
             iiifImage,
             this.CONFIG.maxCacheSize,
-            this.renderer
+            this.renderer,
+            1.0,  // distanceDetail
+            () => this.markDirty()  // onTileLoaded callback
         );
 
         const worldImage = new WorldImage(iiifImage, tileManager, worldPlacement);
@@ -359,9 +519,14 @@ export class IIIFViewer {
      * Clear all images and free GPU resources
      */
     clearWorld() {
-        for (const [id, wi] of this.world.worldImages) {
-            for (const tileId of wi.tileManager.getLoadedTileIds()) {
-                this.renderer?.destroyTexture(tileId);
+        // Collect IDs first to avoid modifying Map during iteration
+        const imageIds = Array.from(this.world.worldImages.keys());
+        for (const id of imageIds) {
+            const wi = this.world.worldImages.get(id);
+            if (wi) {
+                for (const tileId of wi.tileManager.getLoadedTileIds()) {
+                    this.renderer?.destroyTexture(tileId);
+                }
             }
             this.world.removeImage(id);
         }
@@ -659,15 +824,10 @@ export class IIIFViewer {
             return true;
         }
 
-        const threshold = 0.001;
-        const centerXDiff = Math.abs(this.viewport.centerX - this.lastViewportState.centerX);
-        const centerYDiff = Math.abs(this.viewport.centerY - this.lastViewportState.centerY);
-        const scaleDiff = Math.abs(this.viewport.scale - this.lastViewportState.scale);
-
         return (
-            centerXDiff > threshold ||
-            centerYDiff > threshold ||
-            scaleDiff > threshold
+            this.viewport.centerX !== this.lastViewportState.centerX ||
+            this.viewport.centerY !== this.lastViewportState.centerY ||
+            this.viewport.scale !== this.lastViewportState.scale
         );
     }
 
@@ -701,7 +861,8 @@ export class IIIFViewer {
         }
 
         // Check if we need to render
-        if (!this.needsRender && !this.hasViewportChanged()) {
+        const viewportChanged = this.hasViewportChanged();
+        if (!this.needsRender && !viewportChanged) {
             return;
         }
 
@@ -741,7 +902,7 @@ export class IIIFViewer {
         this.renderer.render(this.viewport, allTiles, thumbnail);
 
         // Update overlays only if viewport changed
-        if (this.hasViewportChanged()) {
+        if (viewportChanged) {
             this.overlayManager?.updateAllOverlays();
             this.updateViewportState();
         }

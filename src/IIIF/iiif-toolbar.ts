@@ -80,7 +80,6 @@ export class ToolBar {
         this.toolbar.appendChild(this.secondarytools);
     
         if ((this.options.zoom || this.options.annotations || this.options.layers) && (this.options.CVButton || this.options.fullscreen)) {
-            console.log("ADDING DIVIDER");
             this.enableDivider();
         }
         

@@ -1,6 +1,7 @@
 import { mat4 } from 'gl-matrix';
 import { Viewport } from './iiif-view.js';
-import type { IIIFRenderer, TileRenderData } from './iiif-renderer.js';
+import type { TileRenderData } from './iiif-renderer.js';
+import { RendererBase } from './iiif-renderer-base.js';
 
 // WebGL vertex shader
 const vertexShaderSource = `
@@ -8,12 +9,17 @@ attribute vec3 a_position;
 attribute vec2 a_texCoord;
 
 uniform mat4 u_combinedMatrix;
+uniform vec4 u_textureBounds; // (left, top, right, bottom)
 
 varying vec2 v_texCoord;
 
 void main() {
     gl_Position = u_combinedMatrix * vec4(a_position, 1.0);
-    v_texCoord = a_texCoord;
+
+    // Map unit quad (0-1) to trimmed texture coordinates (excludes overlap)
+    float texX = mix(u_textureBounds.x, u_textureBounds.z, a_texCoord.x);
+    float texY = mix(u_textureBounds.y, u_textureBounds.w, a_texCoord.y);
+    v_texCoord = vec2(texX, texY);
 }
 `;
 
@@ -25,20 +31,11 @@ uniform sampler2D u_texture;
 varying vec2 v_texCoord;
 
 void main() {
-    // Add small epsilon to avoid sampling exactly at texture edges
-    // This prevents flickering artifacts at tile boundaries
-    float epsilon = 0.0001;
-    vec2 clampedCoord = clamp(v_texCoord, vec2(epsilon), vec2(1.0 - epsilon));
-
-    gl_FragColor = texture2D(u_texture, clampedCoord);
+    gl_FragColor = texture2D(u_texture, v_texCoord);
 }
 `;
 
-export class WebGLRenderer implements IIIFRenderer {
-    canvas: HTMLCanvasElement;
-    container: HTMLElement;
-    devicePixelRatio: number;
-
+export class WebGLRenderer extends RendererBase {
     // WebGL objects
     private gl?: WebGLRenderingContext;
     private program?: WebGLProgram;
@@ -49,71 +46,22 @@ export class WebGLRenderer implements IIIFRenderer {
     private positionLocation?: number;
     private texCoordLocation?: number;
     private combinedMatrixLocation?: WebGLUniformLocation | null;
+    private textureBoundsLocation?: WebGLUniformLocation | null;
     private textureLocation?: WebGLUniformLocation | null;
 
     // Texture cache: tileId -> WebGLTexture
     private textureCache: Map<string, WebGLTexture> = new Map();
 
-    // Matrix caching for performance
-    private cachedMVPMatrix?: Float32Array;
-    private cachedPerspectiveMatrix?: Float32Array;
-
-    // Cache keys using direct value comparison
-    private mvpCache = {
-        centerX: NaN,
-        centerY: NaN,
-        canvasWidth: NaN,
-        canvasHeight: NaN,
-        cameraZ: NaN,
-        fov: NaN,
-        near: NaN,
-        far: NaN
-    };
-
-    private perspectiveCache = {
-        fov: NaN,
-        aspectRatio: NaN,
-        near: NaN,
-        far: NaN
-    };
-
-    // Reusable matrix objects to avoid allocations
-    private reusableVP: mat4 = mat4.create();
-    private reusableModelMatrix: mat4 = mat4.create();
-    private reusableCombinedMatrix: mat4 = mat4.create();
-
     constructor(container: HTMLElement) {
-        this.container = container;
-        this.devicePixelRatio = window.devicePixelRatio || 1;
-
-        // Create canvas element
-        this.canvas = document.createElement('canvas');
-
-        // Apply styling
-        this.canvas.style.position = 'absolute';
-        this.canvas.style.top = '0';
-        this.canvas.style.left = '0';
-        this.canvas.style.width = '100%';
-        this.canvas.style.height = '100%';
-        this.canvas.style.display = 'block';
-        this.canvas.style.touchAction = 'none';
-        this.canvas.style.zIndex = '10';
-
-        // Set canvas internal resolution
-        this.updateCanvasSize();
-
-        // Append canvas to container
-        container.appendChild(this.canvas);
+        super(container);
     }
 
-    // Initialize WebGL
     async initialize(): Promise<void> {
         try {
-            // Get WebGL context
             this.gl = this.canvas.getContext('webgl', {
                 alpha: false,
-                depth: true,
-                antialias: false,
+                depth: false, // Not used — tiles are z-sorted with painter's algorithm
+                antialias: true,
                 premultipliedAlpha: false
             }) as WebGLRenderingContext;
 
@@ -122,27 +70,8 @@ export class WebGLRenderer implements IIIFRenderer {
                 return;
             }
 
-            // Log WebGL capabilities for debugging
-            const maxTextureSize = this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE);
-            const maxRenderbufferSize = this.gl.getParameter(this.gl.MAX_RENDERBUFFER_SIZE);
-            const maxViewportDims = this.gl.getParameter(this.gl.MAX_VIEWPORT_DIMS);
-            console.log('WebGL Capabilities:', {
-                maxTextureSize,
-                maxRenderbufferSize,
-                maxViewportDims,
-                vendor: this.gl.getParameter(this.gl.VENDOR),
-                renderer: this.gl.getParameter(this.gl.RENDERER)
-            });
-
-            // Create shader program
             this.createShaderProgram();
-
-            // Create buffers
             this.createBuffers();
-
-            // Enable depth testing
-            this.gl.enable(this.gl.DEPTH_TEST);
-            this.gl.depthFunc(this.gl.LESS);
 
             // Enable blending for transparency
             this.gl.enable(this.gl.BLEND);
@@ -157,7 +86,6 @@ export class WebGLRenderer implements IIIFRenderer {
     private createShaderProgram() {
         if (!this.gl) return;
 
-        // Create shaders
         const vertexShader = this.compileShader(this.gl.VERTEX_SHADER, vertexShaderSource);
         const fragmentShader = this.compileShader(this.gl.FRAGMENT_SHADER, fragmentShaderSource);
 
@@ -165,7 +93,6 @@ export class WebGLRenderer implements IIIFRenderer {
             throw new Error('Failed to compile shaders');
         }
 
-        // Create program
         this.program = this.gl.createProgram();
         if (!this.program) {
             throw new Error('Failed to create shader program');
@@ -184,7 +111,14 @@ export class WebGLRenderer implements IIIFRenderer {
         this.positionLocation = this.gl.getAttribLocation(this.program, 'a_position');
         this.texCoordLocation = this.gl.getAttribLocation(this.program, 'a_texCoord');
         this.combinedMatrixLocation = this.gl.getUniformLocation(this.program, 'u_combinedMatrix');
+        this.textureBoundsLocation = this.gl.getUniformLocation(this.program, 'u_textureBounds');
         this.textureLocation = this.gl.getUniformLocation(this.program, 'u_texture');
+
+        // Clean up individual shaders after linking (frees driver memory)
+        this.gl.detachShader(this.program, vertexShader);
+        this.gl.detachShader(this.program, fragmentShader);
+        this.gl.deleteShader(vertexShader);
+        this.gl.deleteShader(fragmentShader);
     }
 
     private compileShader(type: number, source: string): WebGLShader | null {
@@ -209,7 +143,7 @@ export class WebGLRenderer implements IIIFRenderer {
     private createBuffers() {
         if (!this.gl) return;
 
-        // Create vertex buffer for a unit quad (0,0) to (1,1)
+        // Unit quad (0,0) to (1,1)
         const positions = new Float32Array([
             0.0, 0.0, 0.0,
             1.0, 0.0, 0.0,
@@ -223,7 +157,6 @@ export class WebGLRenderer implements IIIFRenderer {
         this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
         this.gl.bufferData(this.gl.ARRAY_BUFFER, positions, this.gl.STATIC_DRAW);
 
-        // Create texture coordinate buffer
         const texCoords = new Float32Array([
             0.0, 0.0,
             1.0, 0.0,
@@ -238,131 +171,26 @@ export class WebGLRenderer implements IIIFRenderer {
         this.gl.bufferData(this.gl.ARRAY_BUFFER, texCoords, this.gl.STATIC_DRAW);
     }
 
-    private updateCanvasSize() {
-        const displayWidth = this.container.clientWidth;
-        const displayHeight = this.container.clientHeight;
-
-        this.canvas.width = Math.floor(displayWidth * this.devicePixelRatio);
-        this.canvas.height = Math.floor(displayHeight * this.devicePixelRatio);
-    }
-
     resize() {
-        this.devicePixelRatio = window.devicePixelRatio || 1;
-        this.updateCanvasSize();
+        super.resize();
 
         if (this.gl) {
             this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
         }
-
-        // Invalidate matrix caches
-        this.mvpCache.canvasWidth = NaN;
-        this.mvpCache.canvasHeight = NaN;
-        this.perspectiveCache.aspectRatio = NaN;
-    }
-
-    /**
-     * Get or create cached perspective matrix
-     * Only recalculates when canvas size changes
-     */
-    private getPerspectiveMatrix(aspectRatio: number, fov: number, near: number, far: number): Float32Array {
-        if (this.perspectiveCache.aspectRatio === aspectRatio &&
-            this.perspectiveCache.fov === fov &&
-            this.perspectiveCache.near === near &&
-            this.perspectiveCache.far === far &&
-            this.cachedPerspectiveMatrix) {
-            return this.cachedPerspectiveMatrix;
-        }
-
-        const projection = mat4.create();
-        mat4.perspective(projection, fov, aspectRatio, near, far);
-
-        this.cachedPerspectiveMatrix = projection as Float32Array;
-
-        this.perspectiveCache.fov = fov;
-        this.perspectiveCache.aspectRatio = aspectRatio;
-        this.perspectiveCache.near = near;
-        this.perspectiveCache.far = far;
-
-        return this.cachedPerspectiveMatrix;
-    }
-
-    /**
-     * Get or create cached MVP matrix
-     */
-    private getMVPMatrix(
-        centerX: number,
-        centerY: number,
-        canvasWidth: number,
-        canvasHeight: number,
-        cameraZ: number,
-        fov: number,
-        near: number,
-        far: number
-    ): Float32Array {
-        // Use small threshold to match tile manager viewport change detection (0.001)
-        // This prevents cache thrashing from floating point precision while maintaining smooth animation
-        const threshold = 0.001;
-
-        const centerXDiff = Math.abs(this.mvpCache.centerX - centerX);
-        const centerYDiff = Math.abs(this.mvpCache.centerY - centerY);
-        const cameraZDiff = Math.abs(this.mvpCache.cameraZ - cameraZ);
-
-        const cacheHit = centerXDiff < threshold &&
-            centerYDiff < threshold &&
-            this.mvpCache.canvasWidth === canvasWidth &&
-            this.mvpCache.canvasHeight === canvasHeight &&
-            cameraZDiff < threshold &&
-            this.mvpCache.fov === fov &&
-            this.mvpCache.near === near &&
-            this.mvpCache.far === far &&
-            this.cachedMVPMatrix;
-
-        if (cacheHit) {
-            return this.cachedMVPMatrix!;
-        }
-
-        // Projection matrix
-        const aspectRatio = canvasWidth / canvasHeight;
-        const projection = this.getPerspectiveMatrix(aspectRatio, fov, near, far);
-
-        // View matrix: camera looking at (centerX, centerY, 0) from (0, 0, cameraZ)
-        // Order: move camera back in Z, flip Y, then center the world point
-        const view = mat4.create();
-        mat4.translate(view, view, [0, 0, -cameraZ]);
-        mat4.scale(view, view, [1, -1, 1]);
-        mat4.translate(view, view, [-centerX, -centerY, 0]);
-
-        mat4.multiply(this.reusableVP, projection as mat4, view as mat4);
-
-        this.cachedMVPMatrix = new Float32Array(this.reusableVP);
-
-        this.mvpCache.centerX = centerX;
-        this.mvpCache.centerY = centerY;
-        this.mvpCache.canvasWidth = canvasWidth;
-        this.mvpCache.canvasHeight = canvasHeight;
-        this.mvpCache.cameraZ = cameraZ;
-        this.mvpCache.fov = fov;
-        this.mvpCache.near = near;
-        this.mvpCache.far = far;
-
-        return this.cachedMVPMatrix;
     }
 
     uploadTextureFromBitmap(tileId: string, bitmap: ImageBitmap): WebGLTexture | undefined {
         if (!this.gl || !this.program) return undefined;
 
-        // Check if texture already exists
         if (this.textureCache.has(tileId)) {
             return this.textureCache.get(tileId)!;
         }
 
-        // Create texture
         const texture = this.gl.createTexture();
         if (!texture) return undefined;
 
         this.gl.bindTexture(this.gl.TEXTURE_2D, texture);
 
-        // Upload bitmap to texture
         this.gl.texImage2D(
             this.gl.TEXTURE_2D,
             0,
@@ -372,72 +200,75 @@ export class WebGLRenderer implements IIIFRenderer {
             bitmap
         );
 
-        // Set texture parameters
         this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_S, this.gl.CLAMP_TO_EDGE);
         this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_T, this.gl.CLAMP_TO_EDGE);
-        this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.LINEAR);
+        this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.LINEAR_MIPMAP_LINEAR);
         this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.LINEAR);
+        this.gl.generateMipmap(this.gl.TEXTURE_2D);
 
-        // Cache the texture
         this.textureCache.set(tileId, texture);
-
         return texture;
     }
 
-    private renderTile(tile: TileRenderData, mvpMatrix: Float32Array) {
-        if (!this.gl || !this.program || !this.textureLocation || !this.combinedMatrixLocation) return;
+    private renderTile(tile: TileRenderData, mvpMatrix: Float32Array, expand: number) {
+        if (!this.gl || !this.program || !this.textureLocation || !this.combinedMatrixLocation || !this.textureBoundsLocation) return;
 
-        // Get or upload texture
         let texture = this.textureCache.get(tile.id);
         if (!texture) {
             texture = this.uploadTextureFromBitmap(tile.id, tile.image);
             if (!texture) return;
         }
 
-        // Create model matrix for this tile
+        // Per-edge expand: skip expand at image edges to prevent sub-pixel
+        // fringe oscillation. Only expand between adjacent tiles (seam prevention).
+        const eL = tile.isEdgeLeft ? 0 : expand;
+        const eT = tile.isEdgeTop ? 0 : expand;
+        const eR = tile.isEdgeRight ? 0 : expand;
+        const eB = tile.isEdgeBottom ? 0 : expand;
+
         mat4.identity(this.reusableModelMatrix);
         mat4.translate(this.reusableModelMatrix, this.reusableModelMatrix, [
-            tile.x,
-            tile.y,
+            tile.x - eL,
+            tile.y - eT,
             tile.z
         ]);
         mat4.scale(this.reusableModelMatrix, this.reusableModelMatrix, [
-            tile.width,
-            tile.height,
+            tile.width + eL + eR,
+            tile.height + eT + eB,
             1
         ]);
 
-        // Combine MVP * Model
         mat4.multiply(this.reusableCombinedMatrix, mvpMatrix as mat4, this.reusableModelMatrix);
 
-        // Bind texture
         this.gl.activeTexture(this.gl.TEXTURE0);
         this.gl.bindTexture(this.gl.TEXTURE_2D, texture);
         this.gl.uniform1i(this.textureLocation, 0);
 
-        // Set combined matrix uniform
         this.gl.uniformMatrix4fv(this.combinedMatrixLocation, false, this.reusableCombinedMatrix);
 
-        // Draw the quad
+        const texLeft = tile.textureLeft ?? 0.0;
+        const texTop = tile.textureTop ?? 0.0;
+        const texRight = tile.textureRight ?? 1.0;
+        const texBottom = tile.textureBottom ?? 1.0;
+        this.gl.uniform4f(this.textureBoundsLocation, texLeft, texTop, texRight, texBottom);
+
         this.gl.drawArrays(this.gl.TRIANGLES, 0, 6);
     }
 
     render(viewport: Viewport, tiles: TileRenderData[], thumbnail?: TileRenderData) {
         if (!this.gl || !this.program) return;
 
-        // Get cached MVP matrix — centerX/centerY are world coordinates directly
         const mvpMatrix = this.getMVPMatrix(
             viewport.centerX,
             viewport.centerY,
             this.canvas.width,
             this.canvas.height,
             viewport.cameraZ,
-            viewport.fov,
+            viewport.getFovRadians(),
             viewport.near,
             viewport.far
         );
 
-        // Prepare all tiles and sort by z-depth
         let allTiles: TileRenderData[];
         if (thumbnail) {
             allTiles = [...tiles, thumbnail].sort((a, b) => a.z - b.z);
@@ -445,36 +276,30 @@ export class WebGLRenderer implements IIIFRenderer {
             allTiles = tiles;
         }
 
-        // Clear the canvas
         this.gl.clearColor(0.1, 0.1, 0.1, 1.0);
-        this.gl.clear(this.gl.COLOR_BUFFER_BIT | this.gl.DEPTH_BUFFER_BIT);
-
-        // Set viewport
+        this.gl.clear(this.gl.COLOR_BUFFER_BIT);
         this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
 
-        // Use shader program
         this.gl.useProgram(this.program);
 
-        // Check all required resources are available
         if (!this.vertexBuffer || !this.texCoordBuffer ||
             this.positionLocation === undefined || this.texCoordLocation === undefined) {
-            console.error('Required WebGL resources not available');
             return;
         }
 
-        // Bind vertex buffer
         this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
         this.gl.enableVertexAttribArray(this.positionLocation);
         this.gl.vertexAttribPointer(this.positionLocation, 3, this.gl.FLOAT, false, 0, 0);
 
-        // Bind texture coordinate buffer
         this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.texCoordBuffer);
         this.gl.enableVertexAttribArray(this.texCoordLocation);
         this.gl.vertexAttribPointer(this.texCoordLocation, 2, this.gl.FLOAT, false, 0, 0);
 
-        // Render each tile
+        // Expand each tile quad by 0.5 physical pixels to prevent border wavering
+        const expand = 0.5 / (viewport.scale * this.devicePixelRatio);
+
         for (const tile of allTiles) {
-            this.renderTile(tile, mvpMatrix);
+            this.renderTile(tile, mvpMatrix, expand);
         }
     }
 

@@ -15,6 +15,7 @@ export class IIIFImage {
     get height() { return this.manifest.height; }
     get aspectRatio() { return this.manifest.width / this.manifest.height; }
     get tileSize() { return this.manifest.tiles?.[0]?.width || 256; }
+    get tileOverlap() { return this.manifest.tiles?.[0]?.overlap || 0; }
     get scaleFactors() { return this.manifest.tiles?.[0]?.scaleFactors || [1]; }
     get maxZoomLevel() { return this.scaleFactors.length - 1; }
 

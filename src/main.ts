@@ -5,6 +5,7 @@ import { parseIIIFUrl, fetchAnnotationList, type ParsedResource, type ParsedImag
 const container = document.getElementById('iiif-container');
 if (container) {
     const viewer = new IIIFViewer(container, {
+        //renderer: 'canvas2d', // 'webgl' or 'canvas'
         toolbar: {
             zoom: true,
             annotations: true,

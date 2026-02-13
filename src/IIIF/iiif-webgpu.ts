@@ -2,93 +2,45 @@
 /// <reference types="@webgpu/types" />
 import { mat4 } from 'gl-matrix';
 import { Viewport } from './iiif-view.js';
-import type { IIIFRenderer, TileRenderData } from './iiif-renderer.js';
+import type { TileRenderData } from './iiif-renderer.js';
+import { RendererBase } from './iiif-renderer-base.js';
 import ShaderModule from './iiif-shader.wgsl?raw';
 
-// Note: Matrix creation functions moved into WebGPURenderer class
-// to enable caching and reuse. See getPerspectiveMatrix() and getMVPMatrix().
-
-export class WebGPURenderer implements IIIFRenderer {
-    canvas: HTMLCanvasElement;
-    container: HTMLElement;
-    devicePixelRatio: number;
-
+export class WebGPURenderer extends RendererBase {
     // WebGPU objects
     private device?: GPUDevice;
     private context?: GPUCanvasContext;
     private pipeline?: GPURenderPipeline;
     private sampler?: GPUSampler;
     private format: GPUTextureFormat = 'bgra8unorm';
-    private depthTexture?: GPUTexture;
-    private depthFormat: GPUTextureFormat = 'depth24plus';
+
+    // MSAA — 4x multi-sample anti-aliasing prevents sub-pixel edge oscillation
+    private static readonly SAMPLE_COUNT = 4;
+    private msaaTexture?: GPUTexture;
+
+    // Mipmap generation pipeline (created once, reused for all texture uploads)
+    private mipPipeline?: GPURenderPipeline;
+    private mipSampler?: GPUSampler;
 
     // Shared storage buffer for all tile uniforms
+    // Each tile = mat4x4<f32> (64 bytes) + 4x f32 texture bounds (16 bytes) = 80 bytes = 20 floats
+    private static readonly FLOATS_PER_TILE = 20;
+    private static readonly BYTES_PER_TILE = WebGPURenderer.FLOATS_PER_TILE * 4; // 80 bytes
+    private static readonly MAX_TILES = 1000;
     private storageBuffer?: GPUBuffer;
-    private storageBufferSize: number = 64 * 1000; // Support up to 1000 tiles (64 bytes per tile)
+    private storageBufferSize: number = WebGPURenderer.BYTES_PER_TILE * WebGPURenderer.MAX_TILES;
 
     // Reusable buffer for uniform data to avoid per-frame allocations
-    private uniformDataBuffer: Float32Array = new Float32Array(new ArrayBuffer(1000 * 16 * 4)); // Pre-allocate for 1000 tiles × 16 floats × 4 bytes
+    private uniformDataBuffer: Float32Array = new Float32Array(WebGPURenderer.MAX_TILES * WebGPURenderer.FLOATS_PER_TILE);
 
     // Texture cache: tileId -> GPUTexture
     private textureCache: Map<string, GPUTexture> = new Map();
     private bindGroupCache: Map<string, GPUBindGroup> = new Map();
 
-    // Matrix caching for performance - using numeric comparison instead of string keys
-    private cachedMVPMatrix?: Float32Array;
-    private cachedPerspectiveMatrix?: Float32Array;
-
-    // Cache keys using direct value comparison (faster than string concatenation)
-    private mvpCache = {
-        centerX: NaN,
-        centerY: NaN,
-        canvasWidth: NaN,
-        canvasHeight: NaN,
-        cameraZ: NaN,
-        fov: NaN,
-        near: NaN,
-        far: NaN
-    };
-
-    private perspectiveCache = {
-        fov: NaN,
-        aspectRatio: NaN,
-        near: NaN,
-        far: NaN
-    };
-
-    // Reusable matrix objects to avoid allocations
-    private reusableVP: mat4 = mat4.create();
-    private reusableModelMatrix: mat4 = mat4.create();
-    private reusableCombinedMatrix: mat4 = mat4.create();
-
     constructor(container: HTMLElement) {
-
-        this.container = container;
-
-        // devicePixelRatio: How many physical pixels per CSS pixel
-        this.devicePixelRatio = window.devicePixelRatio || 1;
-
-        // Create canvas element
-        this.canvas = document.createElement('canvas');
-
-        // Apply styling - CSS dimensions (logical pixels)
-        this.canvas.style.position = 'absolute';
-        this.canvas.style.top = '0';
-        this.canvas.style.left = '0';
-        this.canvas.style.width = '100%';
-        this.canvas.style.height = '100%';
-        this.canvas.style.display = 'block';
-        this.canvas.style.touchAction = 'none';
-        this.canvas.style.zIndex = '10';
-
-        // Set canvas internal resolution accounting for device pixel ratio
-        this.updateCanvasSize();
-
-        // Append canvas to container
-        container.appendChild(this.canvas);
+        super(container);
     }
 
-    // Initialize WebGPU asynchronously
     async initialize(): Promise<void> {
         if (!navigator.gpu) {
             console.error('WebGPU is not supported in this browser');
@@ -96,7 +48,6 @@ export class WebGPURenderer implements IIIFRenderer {
         }
 
         try {
-            // Request adapter and device
             const adapter = await navigator.gpu.requestAdapter();
             if (!adapter) {
                 console.error('Failed to get GPU adapter');
@@ -105,18 +56,15 @@ export class WebGPURenderer implements IIIFRenderer {
 
             this.device = await adapter.requestDevice();
 
-            // Set up error handling
             this.device.addEventListener('uncapturederror', (event) => {
                 console.error('WebGPU uncaptured error:', event.error);
             });
 
-            // Configure canvas context
             this.context = this.canvas.getContext('webgpu') as GPUCanvasContext;
             if (!this.context) {
                 throw new Error('Failed to get WebGPU context from canvas');
             }
 
-            // Get the preferred format for this device
             const preferredFormat = navigator.gpu.getPreferredCanvasFormat();
             this.format = preferredFormat;
             console.log('Using canvas format:', preferredFormat);
@@ -127,32 +75,20 @@ export class WebGPURenderer implements IIIFRenderer {
                 alphaMode: 'opaque',
             });
 
-            // Create resources
             await this.createPipeline();
             this.createSampler();
             this.createStorageBuffer();
-            this.createDepthTexture();
+            this.createMSAATexture();
+            this.createMipPipeline();
 
-            console.log('WebGPU initialized successfully');
+            console.log('WebGPU initialized successfully (4x MSAA)');
         } catch (error) {
             console.error('Failed to initialize WebGPU:', error);
         }
     }
 
-    private updateCanvasSize() {
-        // Get CSS dimensions
-        const displayWidth = this.container.clientWidth;
-        const displayHeight = this.container.clientHeight;
-
-        // Scale internal resolution by device pixel ratio for high-DPI displays
-        this.canvas.width = Math.floor(displayWidth * this.devicePixelRatio);
-        this.canvas.height = Math.floor(displayHeight * this.devicePixelRatio);
-    }
-
     resize() {
-        // Update device pixel ratio in case it changed (e.g., window moved to different monitor)
-        this.devicePixelRatio = window.devicePixelRatio || 1;
-        this.updateCanvasSize();
+        super.resize();
 
         // Reconfigure canvas context
         if (this.context && this.device) {
@@ -161,15 +97,22 @@ export class WebGPURenderer implements IIIFRenderer {
                 format: this.format,
                 alphaMode: 'opaque',
             });
+            this.createMSAATexture();
         }
+    }
 
-        // Recreate depth texture with new size
-        this.createDepthTexture();
+    private createMSAATexture() {
+        if (!this.device) return;
 
-        // Invalidate matrix caches since canvas size changed
-        this.mvpCache.canvasWidth = NaN;
-        this.mvpCache.canvasHeight = NaN;
-        this.perspectiveCache.aspectRatio = NaN;
+        // Destroy previous MSAA texture
+        this.msaaTexture?.destroy();
+
+        this.msaaTexture = this.device.createTexture({
+            size: [this.canvas.width, this.canvas.height],
+            format: this.format,
+            sampleCount: WebGPURenderer.SAMPLE_COUNT,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
     }
 
     private async createPipeline() {
@@ -180,7 +123,6 @@ export class WebGPURenderer implements IIIFRenderer {
             code: ShaderModule,
         });
 
-        // Check for shader compilation errors
         const compilationInfo = await shaderModule.getCompilationInfo();
         for (const message of compilationInfo.messages) {
             if (message.type === 'error') {
@@ -241,131 +183,13 @@ export class WebGPURenderer implements IIIFRenderer {
             },
             primitive: {
                 topology: 'triangle-list',
-                cullMode: 'none',  // Disable culling to ensure triangles are visible
+                cullMode: 'none',
             },
-            depthStencil: {
-                format: this.depthFormat,
-                depthWriteEnabled: true,
-                depthCompare: 'less',  // Closer fragments pass the depth test (smaller depth = closer to camera)
+            multisample: {
+                count: WebGPURenderer.SAMPLE_COUNT,
             },
+            // No depthStencil: tiles are z-sorted for painter's algorithm.
         });
-    }
-
-    private createDepthTexture() {
-        if (!this.device) return;
-
-        // Destroy old depth texture if it exists
-        if (this.depthTexture) {
-            this.depthTexture.destroy();
-        }
-
-        // Create new depth texture matching canvas size
-        this.depthTexture = this.device.createTexture({
-            size: {
-                width: this.canvas.width,
-                height: this.canvas.height,
-                depthOrArrayLayers: 1,
-            },
-            format: this.depthFormat,
-            usage: GPUTextureUsage.RENDER_ATTACHMENT,
-        });
-    }
-
-    /**
-     * Get or create cached perspective matrix
-     * Only recalculates when canvas size changes
-     */
-    private getPerspectiveMatrix(aspectRatio: number, fov: number, near: number, far: number): Float32Array {
-        // Fast cache check using direct value comparison (no string allocation)
-        if (this.perspectiveCache.aspectRatio === aspectRatio &&
-            this.perspectiveCache.fov === fov &&
-            this.perspectiveCache.near === near &&
-            this.perspectiveCache.far === far &&
-            this.cachedPerspectiveMatrix) {
-            return this.cachedPerspectiveMatrix;
-        }
-
-        // Cache miss - recalculate
-        const projection = mat4.create();
-        mat4.perspective(projection, fov, aspectRatio, near, far);
-
-        this.cachedPerspectiveMatrix = projection as Float32Array;
-
-        // Update cache keys
-        this.perspectiveCache.fov = fov;
-        this.perspectiveCache.aspectRatio = aspectRatio;
-        this.perspectiveCache.near = near;
-        this.perspectiveCache.far = far;
-
-        return this.cachedPerspectiveMatrix;
-    }
-
-    /**
-     * Get or create cached MVP matrix
-     * Only recalculates when viewport parameters change
-     * Optimized: uses direct numeric comparison instead of expensive string concatenation with toFixed()
-     */
-    /**
-     * Get or create cached MVP matrix.
-     * centerX/centerY are world coordinates directly (no image dimension multiplication).
-     */
-    private getMVPMatrix(
-        centerX: number,
-        centerY: number,
-        canvasWidth: number,
-        canvasHeight: number,
-        cameraZ: number,
-        fov: number,
-        near: number,
-        far: number
-    ): Float32Array {
-        // Use small threshold to match tile manager viewport change detection (0.001)
-        // This prevents cache thrashing from floating point precision while maintaining smooth animation
-        const threshold = 0.001;
-
-        const centerXDiff = Math.abs(this.mvpCache.centerX - centerX);
-        const centerYDiff = Math.abs(this.mvpCache.centerY - centerY);
-        const cameraZDiff = Math.abs(this.mvpCache.cameraZ - cameraZ);
-
-        const cacheHit = centerXDiff < threshold &&
-            centerYDiff < threshold &&
-            this.mvpCache.canvasWidth === canvasWidth &&
-            this.mvpCache.canvasHeight === canvasHeight &&
-            cameraZDiff < threshold &&
-            this.mvpCache.fov === fov &&
-            this.mvpCache.near === near &&
-            this.mvpCache.far === far &&
-            this.cachedMVPMatrix;
-
-        if (cacheHit) {
-            return this.cachedMVPMatrix!;
-        }
-
-        // Projection matrix
-        const aspectRatio = canvasWidth / canvasHeight;
-        const projection = this.getPerspectiveMatrix(aspectRatio, fov, near, far);
-
-        // View matrix: camera looking at (centerX, centerY, 0) from (0, 0, cameraZ)
-        // Order: move camera back in Z, flip Y, then center the world point
-        const view = mat4.create();
-        mat4.translate(view, view, [0, 0, -cameraZ]);
-        mat4.scale(view, view, [1, -1, 1]);
-        mat4.translate(view, view, [-centerX, -centerY, 0]);
-
-        mat4.multiply(this.reusableVP, projection as mat4, view as mat4);
-
-        this.cachedMVPMatrix = new Float32Array(this.reusableVP);
-
-        this.mvpCache.centerX = centerX;
-        this.mvpCache.centerY = centerY;
-        this.mvpCache.canvasWidth = canvasWidth;
-        this.mvpCache.canvasHeight = canvasHeight;
-        this.mvpCache.cameraZ = cameraZ;
-        this.mvpCache.fov = fov;
-        this.mvpCache.near = near;
-        this.mvpCache.far = far;
-
-        return this.cachedMVPMatrix;
     }
 
     private createSampler() {
@@ -374,6 +198,7 @@ export class WebGPURenderer implements IIIFRenderer {
         this.sampler = this.device.createSampler({
             magFilter: 'linear',
             minFilter: 'linear',
+            mipmapFilter: 'linear',
             addressModeU: 'clamp-to-edge',
             addressModeV: 'clamp-to-edge',
         });
@@ -388,38 +213,138 @@ export class WebGPURenderer implements IIIFRenderer {
         });
     }
 
+    private createMipPipeline() {
+        if (!this.device) return;
+
+        const mipShaderCode = `
+            @group(0) @binding(0) var mipSampler: sampler;
+            @group(0) @binding(1) var mipTexture: texture_2d<f32>;
+
+            struct VertexOutput {
+                @builtin(position) position: vec4<f32>,
+                @location(0) texCoord: vec2<f32>,
+            }
+
+            @vertex
+            fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+                // Full-screen triangle (oversized, clipped to viewport)
+                var pos = array<vec2<f32>, 3>(
+                    vec2<f32>(-1.0, -1.0),
+                    vec2<f32>( 3.0, -1.0),
+                    vec2<f32>(-1.0,  3.0)
+                );
+                var uv = array<vec2<f32>, 3>(
+                    vec2<f32>(0.0, 1.0),
+                    vec2<f32>(2.0, 1.0),
+                    vec2<f32>(0.0, -1.0)
+                );
+                var output: VertexOutput;
+                output.position = vec4<f32>(pos[vertexIndex], 0.0, 1.0);
+                output.texCoord = uv[vertexIndex];
+                return output;
+            }
+
+            @fragment
+            fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+                return textureSample(mipTexture, mipSampler, input.texCoord);
+            }
+        `;
+
+        const shaderModule = this.device.createShaderModule({
+            label: 'Mip Generation Shader',
+            code: mipShaderCode,
+        });
+
+        this.mipPipeline = this.device.createRenderPipeline({
+            label: 'Mip Generation Pipeline',
+            layout: 'auto',
+            vertex: { module: shaderModule, entryPoint: 'vs_main' },
+            fragment: {
+                module: shaderModule,
+                entryPoint: 'fs_main',
+                targets: [{ format: this.format }],
+            },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        this.mipSampler = this.device.createSampler({
+            minFilter: 'linear',
+            magFilter: 'linear',
+        });
+    }
+
+    private generateMipmaps(texture: GPUTexture) {
+        if (!this.device || !this.mipPipeline || !this.mipSampler) return;
+
+        const mipLevelCount = texture.mipLevelCount;
+        if (mipLevelCount <= 1) return;
+
+        const encoder = this.device.createCommandEncoder({ label: 'mip generation' });
+
+        for (let level = 1; level < mipLevelCount; level++) {
+            const srcView = texture.createView({
+                baseMipLevel: level - 1,
+                mipLevelCount: 1,
+            });
+
+            const dstView = texture.createView({
+                baseMipLevel: level,
+                mipLevelCount: 1,
+            });
+
+            const bindGroup = this.device.createBindGroup({
+                layout: this.mipPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: this.mipSampler },
+                    { binding: 1, resource: srcView },
+                ],
+            });
+
+            const pass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: dstView,
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                    clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                }],
+            });
+
+            pass.setPipeline(this.mipPipeline);
+            pass.setBindGroup(0, bindGroup);
+            pass.draw(3);
+            pass.end();
+        }
+
+        this.device.queue.submit([encoder.finish()]);
+    }
+
     uploadTextureFromBitmap(tileId: string, bitmap: ImageBitmap): GPUTexture | undefined {
         if (!this.device || !this.pipeline || !this.sampler || !this.storageBuffer) return undefined;
 
-        // Check if texture already exists
         if (this.textureCache.has(tileId)) {
             return this.textureCache.get(tileId)!;
         }
 
-        // Create texture without mipmaps (single level only for performance)
-        // Mipmaps disabled: IIIF provides multi-resolution tiles, so GPU downsampling not needed
+        const mipLevelCount = Math.floor(Math.log2(Math.max(bitmap.width, bitmap.height))) + 1;
+
         const texture = this.device.createTexture({
             size: [bitmap.width, bitmap.height, 1],
             format: this.format,
-            mipLevelCount: 1,  // No mipmaps - single level only
+            mipLevelCount,
             usage: GPUTextureUsage.TEXTURE_BINDING |
                    GPUTextureUsage.COPY_DST |
-                   GPUTextureUsage.RENDER_ATTACHMENT,  // Required for copyExternalImageToTexture
+                   GPUTextureUsage.RENDER_ATTACHMENT,
         });
 
-        // Upload bitmap to texture
         this.device.queue.copyExternalImageToTexture(
             { source: bitmap },
             { texture: texture, mipLevel: 0 },
             [bitmap.width, bitmap.height]
         );
 
-        // Cache the texture
+        this.generateMipmaps(texture);
+
         this.textureCache.set(tileId, texture);
-
-        // Bind group will be created lazily in renderTile() on first use
-        // This spreads GPU object creation across frames instead of blocking upload
-
         return texture;
     }
 
@@ -430,20 +355,16 @@ export class WebGPURenderer implements IIIFRenderer {
     ) {
         if (!this.device || !this.pipeline || !this.sampler || !this.storageBuffer) return;
 
-        // Get or create bind group lazily (created on first render instead of during upload)
         let bindGroup = this.bindGroupCache.get(tile.id);
 
         if (!bindGroup) {
-            // Get texture from cache
             const texture = this.textureCache.get(tile.id);
             if (!texture) {
-                // Texture not uploaded yet, try to upload
                 this.uploadTextureFromBitmap(tile.id, tile.image);
                 const uploadedTexture = this.textureCache.get(tile.id);
                 if (!uploadedTexture) return;
             }
 
-            // Create bind group on first use (lazy creation)
             const cachedTexture = this.textureCache.get(tile.id)!;
             bindGroup = this.device.createBindGroup({
                 layout: this.pipeline.getBindGroupLayout(0),
@@ -465,104 +386,101 @@ export class WebGPURenderer implements IIIFRenderer {
             this.bindGroupCache.set(tile.id, bindGroup);
         }
 
-        // Draw the tile using instanced rendering with tileIndex
         renderPass.setBindGroup(0, bindGroup);
         renderPass.draw(6, 1, 0, tileIndex);
     }
 
     render(viewport: Viewport, tiles: TileRenderData[], thumbnail?: TileRenderData) {
-        if (!this.device || !this.context || !this.pipeline || !this.storageBuffer) {
+        if (!this.device || !this.context || !this.pipeline || !this.storageBuffer || !this.msaaTexture) {
             return;
         }
 
-        // MVP matrix — centerX/centerY are world coordinates directly
         const mvpMatrix = this.getMVPMatrix(
             viewport.centerX,
             viewport.centerY,
             this.canvas.width,
             this.canvas.height,
             viewport.cameraZ,
-            viewport.fov,
+            viewport.getFovRadians(),
             viewport.near,
             viewport.far
         );
 
-        // Prepare all tiles (including thumbnail) and sort by z-depth
-        // CRITICAL: Must sort thumbnail together with tiles for consistent render order
         let allTiles: TileRenderData[];
         if (thumbnail) {
-            // Combine thumbnail and tiles, then sort by z-depth (back to front: lower z first)
             allTiles = [...tiles, thumbnail].sort((a, b) => a.z - b.z);
         } else {
             allTiles = tiles;
         }
 
-        // Check for storage buffer overflow
-        const maxTiles = this.storageBufferSize / 64; // 64 bytes per tile (single mat4x4)
-        if (allTiles.length > maxTiles) {
-            console.error(`Storage buffer overflow: Trying to render ${allTiles.length} tiles but buffer only supports ${maxTiles} tiles. Truncating to ${maxTiles} tiles.`);
-            allTiles = allTiles.slice(0, maxTiles);
+        if (allTiles.length > WebGPURenderer.MAX_TILES) {
+            console.error(`Storage buffer overflow: Trying to render ${allTiles.length} tiles but buffer only supports ${WebGPURenderer.MAX_TILES} tiles. Truncating.`);
+            allTiles = allTiles.slice(0, WebGPURenderer.MAX_TILES);
         }
 
-        // Batch write all tile uniforms to storage buffer ONCE
-        // WGSL struct layout: mat4x4<f32> combinedMatrix (64 bytes = 16 floats per tile)
-        const floatsPerTile = 16;
+        const floatsPerTile = WebGPURenderer.FLOATS_PER_TILE;
 
-        // Reuse pre-allocated buffer, only process the tiles we need
+        // Expand each tile quad by 0.5 physical pixels to prevent border wavering
+        const expand = 0.5 / (viewport.scale * this.devicePixelRatio);
+
         for (let i = 0; i < allTiles.length; i++) {
             const tile = allTiles[i];
             const offset = i * floatsPerTile;
 
-            // Create model matrix for this tile (position and scale)
+            // Per-edge expand: skip expand at image edges to prevent sub-pixel
+            // fringe oscillation. Only expand between adjacent tiles (seam prevention).
+            const eL = tile.isEdgeLeft ? 0 : expand;
+            const eT = tile.isEdgeTop ? 0 : expand;
+            const eR = tile.isEdgeRight ? 0 : expand;
+            const eB = tile.isEdgeBottom ? 0 : expand;
+
             mat4.identity(this.reusableModelMatrix);
             mat4.translate(this.reusableModelMatrix, this.reusableModelMatrix, [
-                tile.x,
-                tile.y,
+                tile.x - eL,
+                tile.y - eT,
                 tile.z
             ]);
             mat4.scale(this.reusableModelMatrix, this.reusableModelMatrix, [
-                tile.width,
-                tile.height,
+                tile.width + eL + eR,
+                tile.height + eT + eB,
                 1
             ]);
 
-            // Pre-multiply: combinedMatrix = MVP × Model (done on CPU once per tile)
             mat4.multiply(this.reusableCombinedMatrix, mvpMatrix as mat4, this.reusableModelMatrix);
 
-            // Pack combined matrix into pre-allocated buffer (16 floats)
             this.uniformDataBuffer.set(this.reusableCombinedMatrix, offset);
+
+            this.uniformDataBuffer[offset + 16] = tile.textureLeft ?? 0.0;
+            this.uniformDataBuffer[offset + 17] = tile.textureTop ?? 0.0;
+            this.uniformDataBuffer[offset + 18] = tile.textureRight ?? 1.0;
+            this.uniformDataBuffer[offset + 19] = tile.textureBottom ?? 1.0;
         }
 
-        // Single write operation for all tile data (subarray to avoid uploading unused data)
         this.device.queue.writeBuffer(
             this.storageBuffer,
             0,
             this.uniformDataBuffer.buffer,
             0,
-            allTiles.length * floatsPerTile * 4  // Convert float count to byte count
+            allTiles.length * floatsPerTile * 4
         );
 
         const commandEncoder = this.device.createCommandEncoder();
-        const textureView = this.context.getCurrentTexture().createView();
+        const swapChainView = this.context.getCurrentTexture().createView();
+        const msaaView = this.msaaTexture.createView();
 
+        // MSAA: render to multisampled texture, resolve to swap chain
         const renderPass = commandEncoder.beginRenderPass({
             colorAttachments: [{
-                view: textureView,
+                view: msaaView,
+                resolveTarget: swapChainView,
                 clearValue: { r: 0.1, g: 0.1, b: 0.1, a: 1.0 },
                 loadOp: 'clear',
-                storeOp: 'store',
+                storeOp: 'discard', // multisampled data discarded after resolve
             }],
-            depthStencilAttachment: {
-                view: this.depthTexture!.createView(),
-                depthClearValue: 1.0,  // Clear to max depth (far plane)
-                depthLoadOp: 'clear',
-                depthStoreOp: 'store',
-            }
         });
 
         renderPass.setPipeline(this.pipeline);
 
-        // Render each tile with its index
         for (let i = 0; i < allTiles.length; i++) {
             this.renderTile(renderPass, allTiles[i], i);
         }
@@ -573,7 +491,6 @@ export class WebGPURenderer implements IIIFRenderer {
     }
 
     destroyTexture(tileId: string) {
-        // Destroy a specific texture and bind group
         const texture = this.textureCache.get(tileId);
         if (texture) {
             texture.destroy();
@@ -583,7 +500,6 @@ export class WebGPURenderer implements IIIFRenderer {
     }
 
     clearTextureCache() {
-        // Destroy all cached textures
         for (const texture of this.textureCache.values()) {
             texture.destroy();
         }
@@ -593,6 +509,7 @@ export class WebGPURenderer implements IIIFRenderer {
 
     destroy() {
         this.clearTextureCache();
+        this.msaaTexture?.destroy();
         this.device?.destroy();
     }
 }

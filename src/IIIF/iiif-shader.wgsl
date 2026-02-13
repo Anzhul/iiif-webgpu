@@ -2,6 +2,11 @@ struct TileUniforms {
     // Combined transformation matrix: MVP × Model
     // Pre-multiplied on CPU to avoid redundant GPU matrix operations
     combinedMatrix: mat4x4<f32>,    // Transforms tile quad directly to clip space
+    // Texture coordinate trimming (to exclude overlap regions)
+    textureLeft: f32,
+    textureTop: f32,
+    textureRight: f32,
+    textureBottom: f32,
 }
 
 @group(0) @binding(0) var<storage, read> tileData: array<TileUniforms>;
@@ -34,19 +39,18 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) til
     // Matrix was pre-multiplied on CPU: combinedMatrix = MVP × Model
     let clipPos = uniforms.combinedMatrix * vec4<f32>(pos, 1.0);
 
+    // Map unit quad (0-1) to trimmed texture coordinates (excludes overlap)
+    let texX = mix(uniforms.textureLeft, uniforms.textureRight, pos.x);
+    let texY = mix(uniforms.textureTop, uniforms.textureBottom, pos.y);
+
     var output: VertexOutput;
     output.position = clipPos;
-    output.texCoord = vec2<f32>(pos.x, pos.y);
+    output.texCoord = vec2<f32>(texX, texY);
     return output;
 }
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // Add small epsilon to avoid sampling exactly at texture edges (0.0 or 1.0)
-    // This prevents flickering artifacts at tile boundaries due to floating-point precision
-    let epsilon = 0.0001;
-    let clampedCoord = clamp(input.texCoord, vec2<f32>(epsilon), vec2<f32>(1.0 - epsilon));
-
-    // Sample the texture with slightly inset coordinates
-    return textureSample(tileTexture, textureSampler, clampedCoord);
+    // Sample the texture at the trimmed coordinates (overlap already excluded in vertex shader)
+    return textureSample(tileTexture, textureSampler, input.texCoord);
 }
