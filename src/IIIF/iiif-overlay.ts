@@ -18,6 +18,8 @@ export interface OverlayElement {
   worldHeight: number;
   /** Whether to scale the element with zoom (default: true) */
   scaleWithZoom?: boolean;
+  /** Whether this overlay is hidden (toggled off by user) */
+  hidden?: boolean;
 }
 
 /**
@@ -93,6 +95,12 @@ export class IIIFOverlayManager {
   updateOverlay(id: string): void {
     const overlay = this.overlays.get(id);
     if (!overlay) return;
+
+    // Respect user-toggled hidden state
+    if (overlay.hidden) {
+      overlay.element.style.display = 'none';
+      return;
+    }
 
     // Get viewport bounds in world space
     const bounds = this.viewport.getWorldBounds();

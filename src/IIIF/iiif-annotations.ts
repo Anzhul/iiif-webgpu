@@ -1,6 +1,28 @@
 import { IIIFOverlayManager } from './iiif-overlay';
 import type { OverlayElement } from './iiif-overlay';
-import type { ParsedAnnotation, ParsedAnnotationPage } from './iiif-parser';
+import type { ParsedAnnotation, ParsedAnnotationPage, AnnotationBody } from './iiif-parser';
+
+// --- Motivation Color Map ---
+
+export const MOTIVATION_COLORS: Record<string, { border: string; bg: string }> = {
+    'commenting':       { border: '#ff9800', bg: 'rgba(255, 152, 0, 0.15)' },
+    'oa:commenting':    { border: '#ff9800', bg: 'rgba(255, 152, 0, 0.15)' },
+    'tagging':          { border: '#4caf50', bg: 'rgba(76, 175, 80, 0.15)' },
+    'oa:tagging':       { border: '#4caf50', bg: 'rgba(76, 175, 80, 0.15)' },
+    'describing':       { border: '#9c27b0', bg: 'rgba(156, 39, 176, 0.15)' },
+    'oa:describing':    { border: '#9c27b0', bg: 'rgba(156, 39, 176, 0.15)' },
+    'highlighting':     { border: '#ffeb3b', bg: 'rgba(255, 235, 59, 0.20)' },
+    'oa:highlighting':  { border: '#ffeb3b', bg: 'rgba(255, 235, 59, 0.20)' },
+    'bookmarking':      { border: '#2196f3', bg: 'rgba(33, 150, 243, 0.15)' },
+    'oa:bookmarking':   { border: '#2196f3', bg: 'rgba(33, 150, 243, 0.15)' },
+    'linking':          { border: '#00bcd4', bg: 'rgba(0, 188, 212, 0.15)' },
+    'oa:linking':       { border: '#00bcd4', bg: 'rgba(0, 188, 212, 0.15)' },
+    'questioning':      { border: '#ff5722', bg: 'rgba(255, 87, 34, 0.15)' },
+    'classifying':      { border: '#607d8b', bg: 'rgba(96, 125, 139, 0.15)' },
+    'editing':          { border: '#795548', bg: 'rgba(121, 85, 72, 0.15)' },
+    'identifying':      { border: '#e91e63', bg: 'rgba(233, 30, 99, 0.15)' },
+};
+export const DEFAULT_MOTIVATION_COLOR = { border: '#f44336', bg: 'rgba(244, 67, 54, 0.15)' };
 
 /**
  * Custom annotation - user-created, with arbitrary styles and HTML content.
@@ -59,10 +81,18 @@ export interface IIIFAnnotation {
 /**
  * Manages both IIIF and custom annotations using the overlay system
  */
+export interface AnnotationPageGroup {
+    pageId: string;
+    label: string;
+    overlayIds: string[];
+    visible: boolean;
+}
+
 export class AnnotationManager {
     private customAnnotations: Map<string, CustomAnnotation> = new Map();
     private iiifAnnotations: Map<string, IIIFAnnotation> = new Map();
     private overlayManager?: IIIFOverlayManager;
+    private pageGroups: AnnotationPageGroup[] = [];
 
     constructor(overlayManager?: IIIFOverlayManager) {
         this.overlayManager = overlayManager;
@@ -222,20 +252,43 @@ export class AnnotationManager {
         }
 
         for (const page of pages) {
+            const overlayIds: string[] = [];
+
             for (const ann of page.annotations) {
                 const iiifAnn: IIIFAnnotation = {
                     parsed: ann,
                     visible: true
                 };
 
-                // Determine position — use target xywh if available, otherwise full canvas
-                const x = ann.target?.x ?? 0;
-                const y = ann.target?.y ?? 0;
-                const w = ann.target?.w ?? canvasWidth;
-                const h = ann.target?.h ?? canvasHeight;
+                const target = ann.target;
+                let x: number, y: number, w: number, h: number;
+                let scaleWithZoom = true;
+
+                switch (target.type) {
+                    case 'rect':
+                        x = target.x; y = target.y; w = target.w; h = target.h;
+                        break;
+                    case 'svg':
+                        x = target.bounds.x; y = target.bounds.y;
+                        w = target.bounds.w; h = target.bounds.h;
+                        break;
+                    case 'point':
+                        x = target.x; y = target.y; w = 0; h = 0;
+                        scaleWithZoom = false;
+                        break;
+                    case 'full':
+                    default:
+                        x = 0; y = 0; w = canvasWidth; h = canvasHeight;
+                        break;
+                }
 
                 const overlayId = `iiif-ann-${ann.id || page.id + '-' + this.iiifAnnotations.size}`;
                 const element = this.createIIIFAnnotationElement(ann);
+
+                // Point annotations need overflow visible so the pin renders outside the 0x0 box
+                if (target.type === 'point') {
+                    element.style.overflow = 'visible';
+                }
 
                 const overlay: OverlayElement = {
                     id: overlayId,
@@ -244,70 +297,222 @@ export class AnnotationManager {
                     worldY: y,
                     worldWidth: w,
                     worldHeight: h,
-                    scaleWithZoom: true
+                    scaleWithZoom
                 };
 
                 this.iiifAnnotations.set(overlayId, iiifAnn);
                 this.overlayManager.addOverlay(overlay);
+                overlayIds.push(overlayId);
             }
+
+            // Track page group with a derived label
+            const label = this.derivePageLabel(page);
+            this.pageGroups.push({
+                pageId: page.id,
+                label,
+                overlayIds,
+                visible: true,
+            });
         }
     }
 
+    private derivePageLabel(page: ParsedAnnotationPage): string {
+        const motivations = page.annotations.map(a => a.motivation);
+        const unique = [...new Set(motivations)];
+        const count = page.annotations.length;
+
+        if (unique.length === 1 && unique[0] !== 'unknown') {
+            // Strip OA prefix and capitalize
+            const raw = unique[0].replace(/^oa:/, '');
+            const capitalized = raw.charAt(0).toUpperCase() + raw.slice(1);
+            return `${capitalized} (${count})`;
+        }
+        return `Annotations (${count})`;
+    }
+
     /**
-     * Create the HTML element for an IIIF annotation
+     * Create the HTML element for an IIIF annotation — dispatches by target type
      */
     private createIIIFAnnotationElement(ann: ParsedAnnotation): HTMLElement {
+        const target = ann.target;
+
+        if (target.type === 'svg') {
+            return this.createSvgAnnotationElement(ann);
+        }
+        if (target.type === 'point') {
+            return this.createPointAnnotationElement(ann);
+        }
+        return this.createRectAnnotationElement(ann);
+    }
+
+    private createRectAnnotationElement(ann: ParsedAnnotation): HTMLElement {
         const container = document.createElement('div');
         container.className = 'iiif-annotation';
         container.style.boxSizing = 'border-box';
         container.style.width = '100%';
         container.style.height = '100%';
 
-        // Style based on motivation
-        if (ann.motivation === 'commenting' || ann.motivation === 'oa:commenting') {
-            container.style.border = '2px solid #ff9800';
-            container.style.backgroundColor = 'rgba(255, 152, 0, 0.15)';
-        } else if (ann.motivation === 'tagging' || ann.motivation === 'oa:tagging') {
-            container.style.border = '2px solid #4caf50';
-            container.style.backgroundColor = 'rgba(76, 175, 80, 0.15)';
-        } else if (ann.motivation === 'describing' || ann.motivation === 'oa:describing') {
-            container.style.border = '2px solid #9c27b0';
-            container.style.backgroundColor = 'rgba(156, 39, 176, 0.15)';
-        } else {
-            container.style.border = '2px solid #f44336';
-            container.style.backgroundColor = 'rgba(244, 67, 54, 0.15)';
-        }
+        const colors = MOTIVATION_COLORS[ann.motivation] || DEFAULT_MOTIVATION_COLOR;
+        container.style.border = `2px solid ${colors.border}`;
+        container.style.backgroundColor = colors.bg;
 
-        // Add body text as tooltip or content
-        const bodyText = ann.body.value?.replace(/<[^>]*>/g, '') || '';
-        if (bodyText) {
-            container.title = bodyText;
-
-            // For annotations with a target region, show a small label on hover
-            const label = document.createElement('div');
-            label.className = 'iiif-annotation-label';
-            label.style.position = 'absolute';
-            label.style.bottom = '0';
-            label.style.left = '0';
-            label.style.right = '0';
-            label.style.padding = '4px 6px';
-            label.style.fontSize = '12px';
-            label.style.fontFamily = 'Arial, sans-serif';
-            label.style.color = '#fff';
-            label.style.backgroundColor = 'rgba(0,0,0,0.7)';
-            label.style.display = 'none';
-            label.style.overflow = 'hidden';
-            label.style.textOverflow = 'ellipsis';
-            label.style.whiteSpace = 'nowrap';
-            label.textContent = bodyText.substring(0, 120);
-
-            container.appendChild(label);
-
-            container.addEventListener('mouseenter', () => { label.style.display = 'block'; });
-            container.addEventListener('mouseleave', () => { label.style.display = 'none'; });
+        if (ann.bodies[0]) {
+            this.attachBodyLabel(container, ann.bodies[0]);
         }
 
         return container;
+    }
+
+    private createSvgAnnotationElement(ann: ParsedAnnotation): HTMLElement {
+        const target = ann.target as { type: 'svg'; svg: string; bounds: { x: number; y: number; w: number; h: number } };
+        const container = document.createElement('div');
+        container.className = 'iiif-annotation iiif-annotation-svg';
+        container.style.boxSizing = 'border-box';
+        container.style.width = '100%';
+        container.style.height = '100%';
+        container.style.overflow = 'visible';
+
+        const colors = MOTIVATION_COLORS[ann.motivation] || DEFAULT_MOTIVATION_COLOR;
+
+        // Parse SVG string safely
+        const parser = new DOMParser();
+        const svgDoc = parser.parseFromString(target.svg, 'image/svg+xml');
+        const svgEl = svgDoc.documentElement;
+
+        if (svgEl.tagName !== 'parsererror' && svgEl instanceof SVGElement) {
+            svgEl.setAttribute('width', '100%');
+            svgEl.setAttribute('height', '100%');
+            if (!svgEl.hasAttribute('viewBox')) {
+                svgEl.setAttribute('viewBox', `${target.bounds.x} ${target.bounds.y} ${target.bounds.w} ${target.bounds.h}`);
+            }
+            svgEl.style.position = 'absolute';
+            svgEl.style.top = '0';
+            svgEl.style.left = '0';
+
+            // Sanitize: remove dangerous elements and attributes
+            this.sanitizeSvg(svgEl);
+
+            // Apply motivation colors to shapes that lack explicit styling
+            const shapes = svgEl.querySelectorAll('path, rect, circle, ellipse, polygon, polyline, line');
+            shapes.forEach(shape => {
+                if (!shape.getAttribute('stroke')) {
+                    shape.setAttribute('stroke', colors.border);
+                }
+                if (!shape.getAttribute('fill')) {
+                    shape.setAttribute('fill', colors.bg);
+                }
+            });
+
+            container.appendChild(svgEl);
+        } else {
+            // Fallback: render as rect
+            container.style.border = `2px solid ${colors.border}`;
+            container.style.backgroundColor = colors.bg;
+        }
+
+        if (ann.bodies[0]) {
+            this.attachBodyLabel(container, ann.bodies[0]);
+        }
+
+        return container;
+    }
+
+    private createPointAnnotationElement(ann: ParsedAnnotation): HTMLElement {
+        const container = document.createElement('div');
+        container.className = 'iiif-annotation iiif-annotation-point';
+
+        const colors = MOTIVATION_COLORS[ann.motivation] || DEFAULT_MOTIVATION_COLOR;
+
+        const pin = document.createElement('div');
+        pin.className = 'iiif-annotation-pin';
+        pin.style.width = '16px';
+        pin.style.height = '16px';
+        pin.style.borderRadius = '50% 50% 50% 0';
+        pin.style.transform = 'rotate(-45deg)';
+        pin.style.backgroundColor = colors.border;
+        pin.style.border = '2px solid white';
+        pin.style.boxShadow = '0 1px 4px rgba(0,0,0,0.4)';
+        pin.style.position = 'relative';
+        pin.style.top = '-16px';
+        pin.style.left = '-8px';
+        container.appendChild(pin);
+
+        if (ann.bodies[0]) {
+            this.attachBodyLabel(container, ann.bodies[0]);
+        }
+
+        return container;
+    }
+
+    /**
+     * Attach a hover label showing the annotation body content
+     */
+    private attachBodyLabel(container: HTMLElement, body: AnnotationBody): void {
+        const isHtml = body.format === 'text/html';
+        const bodyValue = body.value || '';
+        if (!bodyValue) return;
+
+        // Tooltip is always plain text
+        container.title = bodyValue.replace(/<[^>]*>/g, '');
+
+        const label = document.createElement('div');
+        label.className = 'iiif-annotation-label';
+        label.style.position = 'absolute';
+        label.style.bottom = '0';
+        label.style.left = '0';
+        label.style.right = '0';
+        label.style.padding = '4px 6px';
+        label.style.fontSize = '12px';
+        label.style.fontFamily = 'Arial, sans-serif';
+        label.style.color = '#fff';
+        label.style.backgroundColor = 'rgba(0,0,0,0.7)';
+        label.style.display = 'none';
+        label.style.overflow = 'hidden';
+        label.style.maxHeight = '80px';
+
+        if (isHtml) {
+            label.innerHTML = this.sanitizeHtml(bodyValue);
+            label.style.whiteSpace = 'normal';
+        } else {
+            label.style.textOverflow = 'ellipsis';
+            label.style.whiteSpace = 'nowrap';
+            label.textContent = bodyValue.replace(/<[^>]*>/g, '').substring(0, 120);
+        }
+
+        container.appendChild(label);
+        container.addEventListener('mouseenter', () => { label.style.display = 'block'; });
+        container.addEventListener('mouseleave', () => { label.style.display = 'none'; });
+    }
+
+    /**
+     * Sanitize HTML body content — strip dangerous tags and attributes
+     */
+    private sanitizeHtml(html: string): string {
+        return html
+            .replace(/<script[\s\S]*?<\/script>/gi, '')
+            .replace(/<iframe[\s\S]*?<\/iframe>/gi, '')
+            .replace(/<object[\s\S]*?<\/object>/gi, '')
+            .replace(/<embed[\s\S]*?>/gi, '')
+            .replace(/\bon\w+\s*=\s*["'][^"']*["']/gi, '')
+            .replace(/\bon\w+\s*=\s*[^\s>]*/gi, '');
+    }
+
+    /**
+     * Sanitize a parsed SVG DOM — remove dangerous elements and event handlers
+     */
+    private sanitizeSvg(svg: Element): void {
+        const dangerous = svg.querySelectorAll('script, foreignObject, iframe, object, embed');
+        dangerous.forEach(el => el.remove());
+
+        const all = svg.querySelectorAll('*');
+        all.forEach(el => {
+            const attrs = Array.from(el.attributes);
+            for (const attr of attrs) {
+                if (attr.name.startsWith('on')) {
+                    el.removeAttribute(attr.name);
+                }
+            }
+        });
     }
 
     /**
@@ -327,6 +532,35 @@ export class AnnotationManager {
             ann.visible = visible;
             const overlay = this.overlayManager.getOverlay(id);
             if (overlay) {
+                overlay.hidden = !visible;
+                overlay.element.style.display = visible ? 'block' : 'none';
+            }
+        }
+    }
+
+    /**
+     * Get annotation page groups for the UI panel
+     */
+    getAnnotationPages(): AnnotationPageGroup[] {
+        return this.pageGroups;
+    }
+
+    /**
+     * Toggle visibility of a single annotation page
+     */
+    setPageVisible(pageId: string, visible: boolean): void {
+        if (!this.overlayManager) return;
+
+        const group = this.pageGroups.find(g => g.pageId === pageId);
+        if (!group) return;
+
+        group.visible = visible;
+        for (const id of group.overlayIds) {
+            const ann = this.iiifAnnotations.get(id);
+            if (ann) ann.visible = visible;
+            const overlay = this.overlayManager.getOverlay(id);
+            if (overlay) {
+                overlay.hidden = !visible;
                 overlay.element.style.display = visible ? 'block' : 'none';
             }
         }
@@ -342,6 +576,7 @@ export class AnnotationManager {
             this.overlayManager.removeOverlay(id);
         }
         this.iiifAnnotations.clear();
+        this.pageGroups = [];
     }
 
     // --- Combined ---

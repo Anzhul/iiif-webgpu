@@ -273,6 +273,10 @@ export class WebGPURenderer extends RendererBase {
         });
     }
 
+    setVideoSource(_video: HTMLVideoElement | null): void {
+        // No-op: video overlay removed
+    }
+
     private generateMipmaps(texture: GPUTexture) {
         if (!this.device || !this.mipPipeline || !this.mipSampler) return;
 

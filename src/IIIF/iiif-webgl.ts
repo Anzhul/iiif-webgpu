@@ -311,6 +311,10 @@ export class WebGLRenderer extends RendererBase {
         }
     }
 
+    setVideoSource(_video: HTMLVideoElement | null): void {
+        // Video overlay not supported in WebGL fallback
+    }
+
     clearTextureCache() {
         if (this.gl) {
             for (const texture of this.textureCache.values()) {

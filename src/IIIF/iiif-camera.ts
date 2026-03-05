@@ -46,6 +46,8 @@ interface InteractiveState {
     // Interaction flags
     isDragging: boolean;
     isIdle: boolean;
+    // Track current input source for conflict resolution between mouse and keyboard
+    lastInputType: 'none' | 'wheel' | 'drag' | 'pinch' | 'keyboard-zoom' | 'keyboard-pan';
 }
 
 export class Camera {
@@ -93,7 +95,8 @@ export class Camera {
                 exponential: true  // Exponential for zoom feels consistent
             }),
             isDragging: false,
-            isIdle: true
+            isIdle: true,
+            lastInputType: 'none'
         };
     }
 
@@ -202,6 +205,106 @@ export class Camera {
     }
 
     // ============================================================
+    // PUBLIC API - Spring-based (keyboard/button)
+    // ============================================================
+
+    /**
+     * Zoom by factor using springs, centered on viewport.
+     * Feels the same as mouse wheel zoom but without cursor anchoring.
+     * Handles rapid repeated calls naturally (spring targets compose).
+     */
+    springZoomByFactor(factor: number) {
+        this.commitIfNeeded('keyboard-zoom');
+        const wasIdle = this.interactiveState.isIdle;
+        const needsInit = wasIdle || this.interactiveState.anchorWorldX === undefined;
+        this.interactiveState.isIdle = false;
+
+        const state = this.interactiveState;
+        const now = performance.now();
+
+        if (needsInit) {
+            state.cameraZSpring.resetTo(this.viewport.cameraZ);
+            state.canvasXSpring.current.time = now;
+            state.canvasYSpring.current.time = now;
+            state.cameraZSpring.current.time = now;
+        }
+
+        // Compute target scale from the spring's current target (not viewport.scale)
+        // so rapid calls compose correctly
+        const currentTargetZ = state.cameraZSpring.target?.value ?? this.viewport.cameraZ;
+        const currentTargetScale = this.viewport.containerHeight / (currentTargetZ * 2 * this.viewport.getTanHalfFov());
+        const newScale = currentTargetScale * factor;
+        const clampedScale = Math.max(
+            this.viewport.minScale,
+            Math.min(this.viewport.maxScale, newScale)
+        );
+
+        const targetZ = (this.viewport.containerHeight / clampedScale) / (2 * this.viewport.getTanHalfFov());
+        const clampedZ = Math.max(this.viewport.minZ, Math.min(this.viewport.maxZ, targetZ));
+
+        state.cameraZSpring.springTo(clampedZ);
+
+        // Anchor to viewport center — only set on init to prevent drift from
+        // recalculating the world point mid-animation (which causes squiggly zoom)
+        const cx = this.viewport.containerWidth / 2;
+        const cy = this.viewport.containerHeight / 2;
+        if (needsInit) {
+            const worldPoint = this.viewport.canvasToWorldPoint(cx, cy);
+            state.anchorWorldX = worldPoint.x;
+            state.anchorWorldY = worldPoint.y;
+            state.canvasXSpring.resetTo(cx);
+            state.canvasYSpring.resetTo(cy);
+        }
+        state.canvasXSpring.springTo(cx);
+        state.canvasYSpring.springTo(cy);
+    }
+
+    /**
+     * Pan by world delta using springs.
+     * Handles rapid repeated calls naturally (anchor shifts compose).
+     */
+    springPan(worldDeltaX: number, worldDeltaY: number) {
+        this.commitIfNeeded('keyboard-pan');
+        const wasIdle = this.interactiveState.isIdle;
+        this.interactiveState.isIdle = false;
+
+        const state = this.interactiveState;
+        const now = performance.now();
+        const cx = this.viewport.containerWidth / 2;
+        const cy = this.viewport.containerHeight / 2;
+
+        if (wasIdle || state.anchorWorldX === undefined || state.anchorWorldY === undefined) {
+            state.cameraZSpring.resetTo(this.viewport.cameraZ);
+            state.canvasXSpring.current.time = now;
+            state.canvasYSpring.current.time = now;
+            state.cameraZSpring.current.time = now;
+
+            // Target world point is where we want the center to be
+            state.anchorWorldX = this.viewport.centerX + worldDeltaX;
+            state.anchorWorldY = this.viewport.centerY + worldDeltaY;
+
+            // Start canvas springs at where that world point currently appears on screen
+            state.canvasXSpring.resetTo(cx + worldDeltaX * this.viewport.scale);
+            state.canvasYSpring.resetTo(cy + worldDeltaY * this.viewport.scale);
+        } else {
+            // Composable: shift anchor further, canvas spring adjusts naturally
+            state.anchorWorldX += worldDeltaX;
+            state.anchorWorldY += worldDeltaY;
+
+            // Nudge the canvas spring's current position to reflect the new delta,
+            // so the spring has distance to travel and doesn't snap
+            const curr = state.canvasXSpring.current.value;
+            const currY = state.canvasYSpring.current.value;
+            state.canvasXSpring.resetTo(curr + worldDeltaX * this.viewport.scale);
+            state.canvasYSpring.resetTo(currY + worldDeltaY * this.viewport.scale);
+        }
+
+        // Spring to center — pulls the anchor world point to the viewport center
+        state.canvasXSpring.springTo(cx);
+        state.canvasYSpring.springTo(cy);
+    }
+
+    // ============================================================
     // PUBLIC API - Interactive Animations (called from main loop)
     // ============================================================
 
@@ -242,6 +345,7 @@ export class Camera {
             const isAnimating = state.isDragging || panXAnimating || panYAnimating || zoomAnimating;
             if (!isAnimating) {
                 this.interactiveState.isIdle = true;
+                this.interactiveState.lastInputType = 'none';
                 this.requestTilesImmediate();
             } else if (needsUpdate) {
                 this.requestTilesHybrid(performance.now());
@@ -257,6 +361,7 @@ export class Camera {
      * Start pan (mousedown)
      */
     startInteractivePan(canvasX: number, canvasY: number) {
+        this.commitIfNeeded('drag');
         this.interactiveState.isIdle = false;
         this.interactiveState.isDragging = true;
 
@@ -302,13 +407,14 @@ export class Camera {
     handleWheel(event: WheelEvent, canvasX: number, canvasY: number) {
         event.preventDefault();
 
-        const wasIdle = this.interactiveState.isIdle;
-        this.interactiveState.isIdle = false;
-
         // Throttle
         const now = performance.now();
         if (now - this.lastZoomTime < this.CONFIG.ZOOM_THROTTLE) return;
         this.lastZoomTime = now;
+
+        this.commitIfNeeded('wheel');
+        const wasIdle = this.interactiveState.isIdle;
+        this.interactiveState.isIdle = false;
 
         const state = this.interactiveState;
         const isFirstInteraction = state.anchorWorldX === undefined;
@@ -368,6 +474,7 @@ export class Camera {
      * scaleFactor is the ratio: newPinchDistance / previousPinchDistance
      */
     handlePinchZoom(scaleFactor: number, centerCanvasX: number, centerCanvasY: number) {
+        this.commitIfNeeded('pinch');
         const wasIdle = this.interactiveState.isIdle;
         this.interactiveState.isIdle = false;
 
@@ -514,6 +621,39 @@ export class Camera {
         );
 
         return true;
+    }
+
+    /**
+     * Commit current spring state to viewport and reset when switching input types.
+     * Prevents conflicts when transitioning between mouse and keyboard interactions.
+     */
+    private commitIfNeeded(newType: InteractiveState['lastInputType']) {
+        const state = this.interactiveState;
+
+        // No commit needed if idle or same input type
+        if (state.isIdle || state.lastInputType === 'none' || state.lastInputType === newType) {
+            state.lastInputType = newType;
+            return;
+        }
+
+        // Input type changed mid-animation: snapshot viewport from current spring positions
+        this.viewport.cameraZ = state.cameraZSpring.current.value;
+        this.viewport.updateScale();
+        if (state.anchorWorldX !== undefined && state.anchorWorldY !== undefined) {
+            this.viewport.setCenterFromWorldPoint(
+                state.anchorWorldX,
+                state.anchorWorldY,
+                state.canvasXSpring.current.value,
+                state.canvasYSpring.current.value
+            );
+        }
+
+        // Reset to idle so the new input starts fresh
+        state.anchorWorldX = undefined;
+        state.anchorWorldY = undefined;
+        state.isDragging = false;
+        state.isIdle = true;
+        state.lastInputType = newType;
     }
 
     // ============================================================

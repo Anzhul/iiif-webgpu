@@ -74,6 +74,10 @@ export class Canvas2DRenderer extends RendererBase {
         this.textureCache.delete(tileId);
     }
 
+    setVideoSource(_video: HTMLVideoElement | null): void {
+        // Video overlay not supported in Canvas2D fallback
+    }
+
     clearTextureCache() {
         this.textureCache.clear();
     }

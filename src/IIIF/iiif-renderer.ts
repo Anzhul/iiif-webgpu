@@ -30,6 +30,7 @@ export interface IIIFRenderer {
     initialize(): Promise<void>;
     resize(): void;
     render(viewport: Viewport, tiles: TileRenderData[], thumbnail?: TileRenderData): void;
+    setVideoSource(video: HTMLVideoElement | null): void;
     uploadTextureFromBitmap(tileId: string, bitmap: ImageBitmap): any;
     destroyTexture(tileId: string): void;
     clearTextureCache(): void;

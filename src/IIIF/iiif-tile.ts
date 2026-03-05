@@ -73,6 +73,16 @@ export class TileManager {
 
     setRenderer(renderer: IIIFRenderer) {
         this.renderer = renderer;
+
+        // Upload any tiles that were loaded before the renderer was ready
+        for (const [tileId, tile] of this.tileCache) {
+            if (tile.image) {
+                this.queueGPUUpload(tileId, tile.image);
+            }
+        }
+        if (this.thumbnail?.image) {
+            renderer.uploadTextureFromBitmap(this.thumbnail.id, this.thumbnail.image);
+        }
     }
 
     // ============================================================================

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Webcam Diagnostic</title>
+  <style>
+    body { background: #111; color: #fff; font-family: system-ui; margin: 20px; }
+    video { width: 640px; height: 480px; background: #222; display: block; }
+    #info, #fps, #devices { margin-top: 8px; font-size: 13px; color: #aaa; }
+    #fps { color: #0f0; font-size: 18px; font-weight: bold; }
+    button { margin: 8px 4px; padding: 8px 16px; font-size: 14px; cursor: pointer; }
+    .device-item { padding: 4px 0; font-size: 12px; }
+    .device-item.video { color: #4f4; }
+  </style>
+</head>
+<body>
+  <h3>Webcam Diagnostic</h3>
+  <video id="v" autoplay muted playsinline></video>
+  <div id="fps">--</div>
+  <div id="info">Click a button to start</div>
+  <div>
+    <button onclick="startCam({video:true})">{ video: true }</button>
+    <button onclick="startCam({video:{facingMode:'user'}})">facingMode: user</button>
+    <button onclick="startCam({video:{width:{ideal:1280},height:{ideal:720}}})">1280x720</button>
+    <button onclick="startCam({video:{width:{ideal:640},height:{ideal:480}}})">640x480</button>
+  </div>
+  <h4>All media devices:</h4>
+  <div id="devices">Requesting permission...</div>
+
+  <script>
+    const info = document.getElementById('info');
+    const fpsEl = document.getElementById('fps');
+    const video = document.getElementById('v');
+    const devicesEl = document.getElementById('devices');
+    let currentStream = null;
+    let frameCount = 0;
+    let lastTime = performance.now();
+    let measuring = false;
+
+    function countFrame() {
+      if (!measuring) return;
+      frameCount++;
+      const now = performance.now();
+      if (now - lastTime >= 1000) {
+        fpsEl.textContent = `${frameCount} fps (actual frame delivery)`;
+        fpsEl.style.color = frameCount >= 20 ? '#0f0' : frameCount >= 10 ? '#ff0' : '#f00';
+        frameCount = 0;
+        lastTime = now;
+      }
+      if ('requestVideoFrameCallback' in video) {
+        video.requestVideoFrameCallback(countFrame);
+      } else {
+        requestAnimationFrame(countFrame);
+      }
+    }
+
+    async function startCam(constraints) {
+      // Stop previous stream
+      if (currentStream) {
+        currentStream.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
+      }
+
+      info.textContent = `Requesting: ${JSON.stringify(constraints)}`;
+      fpsEl.textContent = 'Starting...';
+
+      try {
+        currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = currentStream;
+
+        video.addEventListener('loadeddata', () => {
+          const track = currentStream.getVideoTracks()[0];
+          const s = track.getSettings();
+          info.textContent = `${s.width}x${s.height} @ ${s.frameRate}fps | Device: ${track.label} | ID: ${s.deviceId?.slice(0,8)}...`;
+
+          // Log capabilities
+          if (track.getCapabilities) {
+            const caps = track.getCapabilities();
+            console.log('Track capabilities:', caps);
+            console.log('Frame rate range:', caps.frameRate);
+            console.log('Resolution range:', caps.width, 'x', caps.height);
+          }
+        }, { once: true });
+
+        measuring = true;
+        frameCount = 0;
+        lastTime = performance.now();
+        if ('requestVideoFrameCallback' in video) {
+          video.requestVideoFrameCallback(countFrame);
+        } else {
+          requestAnimationFrame(countFrame);
+        }
+      } catch (err) {
+        info.textContent = `Error: ${err.message}`;
+        fpsEl.textContent = 'Failed';
+      }
+    }
+
+    // List all devices
+    navigator.mediaDevices.enumerateDevices().then(devices => {
+      devicesEl.innerHTML = '';
+      devices.forEach(d => {
+        const div = document.createElement('div');
+        div.className = 'device-item' + (d.kind === 'videoinput' ? ' video' : '');
+        div.textContent = `[${d.kind}] ${d.label || '(no label - grant permission first)'} | ID: ${d.deviceId?.slice(0,12)}...`;
+        devicesEl.appendChild(div);
+      });
+      const videoDevices = devices.filter(d => d.kind === 'videoinput');
+      if (videoDevices.length > 1) {
+        // Add buttons for each specific camera
+        const btnContainer = document.createElement('div');
+        btnContainer.innerHTML = '<h4>Select specific camera:</h4>';
+        videoDevices.forEach(d => {
+          const btn = document.createElement('button');
+          btn.textContent = d.label || d.deviceId.slice(0, 12);
+          btn.onclick = () => startCam({ video: { deviceId: { exact: d.deviceId } } });
+          btnContainer.appendChild(btn);
+        });
+        devicesEl.after(btnContainer);
+      }
+    });
+  </script>
+</body>
+</html>
