@@ -257,7 +257,7 @@ export class AnnotationManager {
             for (const ann of page.annotations) {
                 const iiifAnn: IIIFAnnotation = {
                     parsed: ann,
-                    visible: true
+                    visible: false
                 };
 
                 const target = ann.target;
@@ -297,8 +297,12 @@ export class AnnotationManager {
                     worldY: y,
                     worldWidth: w,
                     worldHeight: h,
-                    scaleWithZoom
+                    scaleWithZoom,
+                    hidden: true
                 };
+
+                // Hide initially - user must click to show
+                element.style.display = 'none';
 
                 this.iiifAnnotations.set(overlayId, iiifAnn);
                 this.overlayManager.addOverlay(overlay);
@@ -311,7 +315,7 @@ export class AnnotationManager {
                 pageId: page.id,
                 label,
                 overlayIds,
-                visible: true,
+                visible: false,
             });
         }
     }

@@ -1,13 +1,13 @@
 
 interface ToolbarOptions {
     zoom?: boolean;
+    reset?: boolean;
     annotations?: boolean;
     layers?: boolean;
 
     fullscreen?: boolean;
-    info?: boolean;
     compare?: boolean;
-    position?: 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left';
+    position?: 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left' | 'bottom-center';
     theme?: 'dark' | 'light';
     variant?: string;
     customStyles?: Partial<CSSStyleDeclaration>;
@@ -21,10 +21,10 @@ export class ToolBar {
     divider: HTMLDivElement | undefined;
     zoomInButton: HTMLButtonElement | undefined;
     zoomOutButton: HTMLButtonElement | undefined;
+    resetButton: HTMLButtonElement | undefined;
     annotationButton: HTMLButtonElement | undefined;
     layersButton: HTMLButtonElement | undefined;
     fullscreenButton: HTMLButtonElement | undefined;
-    infoButton: HTMLButtonElement | undefined;
     compareButton: HTMLButtonElement | undefined;
     private options: ToolbarOptions;
     private stylesInjected = false;
@@ -39,6 +39,9 @@ export class ToolBar {
         if (this.options.zoom) {
             this.enableZoom();
         }
+        if (this.options.reset) {
+            this.enableReset();
+        }
         if (this.options.annotations) {
             this.enableAnnotation();
         }
@@ -49,24 +52,23 @@ export class ToolBar {
         if (this.options.fullscreen) {
             this.enableFullscreen();
         }
-        if (this.options.info) {
-            this.enableInfo();
-        }
         if (this.options.compare) {
             this.enableCompare();
         }
     }
 
     private injectStyles(): void {
-        if (this.stylesInjected || document.getElementById('iiif-toolbar-styles')) {
+        if (this.stylesInjected || document.getElementById('iiif-styles')) {
             return;
         }
 
+        // Inject consolidated IIIF styles
         const link = document.createElement('link');
-        link.id = 'iiif-toolbar-styles';
+        link.id = 'iiif-styles';
         link.rel = 'stylesheet';
-        link.href = new URL('./iiif-toolbar.css', import.meta.url).href;
+        link.href = new URL('./iiif-styles.css', import.meta.url).href;
         document.head.appendChild(link);
+
         this.stylesInjected = true;
     }
 
@@ -87,7 +89,7 @@ export class ToolBar {
         this.secondarytools.className = "iiif-toolbar-secondary-tools";
         this.toolbar.appendChild(this.secondarytools);
     
-        if ((this.options.zoom || this.options.annotations || this.options.layers) && (this.options.fullscreen || this.options.info || this.options.compare)) {
+        if ((this.options.zoom || this.options.annotations || this.options.layers) && (this.options.fullscreen || this.options.compare)) {
             this.enableDivider();
         }
         
@@ -153,6 +155,24 @@ export class ToolBar {
 
         this.maintools?.appendChild(this.zoomOutButton);
     }
+
+    enableReset() {
+        this.resetButton = document.createElement('button');
+        this.resetButton.className = "iiif-toolbar-button iiif-toolbar-button-reset";
+        this.resetButton.id = "reset-view";
+        this.resetButton.title = "Reset View";
+
+        // Reset/home icon SVG
+        this.resetButton.innerHTML = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                <polyline points="9 22 9 12 15 12 15 22"/>
+            </svg>
+        `;
+
+        this.maintools?.appendChild(this.resetButton);
+    }
+
     enableAnnotation(){
         this.annotationButton = document.createElement('button');
         this.annotationButton.className = "iiif-toolbar-button iiif-toolbar-button-annotation";
@@ -199,32 +219,12 @@ export class ToolBar {
         this.divider?.appendChild(divider);
     }
 
-
-    enableInfo() {
-        this.infoButton = document.createElement('button');
-        this.infoButton.className = "iiif-toolbar-button iiif-toolbar-button-info";
-        this.infoButton.id = "info-toggle";
-        this.infoButton.title = "Manifest Info";
-        this.infoButton.innerHTML = `
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" transform="scale(0.75)" transform-origin="center">
-            <circle cx="8" cy="8" r="7" fill="none" stroke="#fff" stroke-width="1.5"/>
-            <text x="8" y="12" text-anchor="middle" fill="#fff" font-size="11" font-weight="bold" font-family="serif">i</text>
-        </svg>
-        `;
-        this.secondarytools?.appendChild(this.infoButton);
-    }
-
     enableCompare() {
         this.compareButton = document.createElement('button');
-        this.compareButton.className = "iiif-toolbar-button iiif-toolbar-button-compare";
+        this.compareButton.className = "iiif-toolbar-button iiif-toolbar-button-compare iiif-toolbar-button-text";
         this.compareButton.id = "compare-toggle";
         this.compareButton.title = "Compare Canvases";
-        this.compareButton.innerHTML = `
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" transform="scale(0.75)" transform-origin="center">
-            <rect x="1" y="1" width="6" height="14" rx="1" fill="none" stroke="#fff" stroke-width="1.5"/>
-            <rect x="9" y="1" width="6" height="14" rx="1" fill="none" stroke="#fff" stroke-width="1.5"/>
-        </svg>
-        `;
+        this.compareButton.textContent = "Compare";
         this.secondarytools?.appendChild(this.compareButton);
     }
 

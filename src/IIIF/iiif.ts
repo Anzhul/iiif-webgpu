@@ -37,9 +37,12 @@ export interface IIIFViewerOptions {
     renderer?: 'webgpu' | 'webgl' | 'canvas2d' | 'auto';
     enableOverlays?: boolean;
     enableToolbar?: boolean;
+    enableCompare?: boolean;
+    enablePanels?: boolean;
     maxCacheSize?: number;
     toolbar?: any;
     suppressNavigation?: boolean;
+    suppressSettings?: boolean;
 }
 
 interface CanvasInfo {
@@ -57,7 +60,6 @@ export class IIIFViewer {
     camera: Camera;
     renderer?: IIIFRenderer;
     canvasToolbar?: ToolBar;
-    universalToolbar?: ToolBar;
     annotationManager?: AnnotationManager;
     overlayManager?: IIIFOverlayManager;
 
@@ -70,7 +72,6 @@ export class IIIFViewer {
     private canvasNavList?: HTMLElement;
     private tocContainer?: HTMLElement;
     private tocList?: HTMLElement;
-    private metadataPanel?: HTMLElement;
     private metadataPanelBody?: HTMLElement;
     private annotationPanel?: HTMLDivElement;
     private annotationPanelBody?: HTMLDivElement;
@@ -83,6 +84,12 @@ export class IIIFViewer {
     private cvToggleBtn?: HTMLButtonElement;
     private cvGestureBtn?: HTMLButtonElement;
     private cvController?: any;
+
+    private comparePanel?: HTMLDivElement;
+    private settingsPanel?: HTMLDivElement;
+    private settingsPanelBody?: HTMLDivElement;
+    private toolsWrapper?: HTMLDivElement;
+    private fullscreenBtn?: HTMLButtonElement;
 
     // State
     private manifest?: ParsedManifest;
@@ -114,7 +121,7 @@ export class IIIFViewer {
     };
 
     // Event tracking
-    private eventHandlers: Map<Element, Map<string, EventListener>> = new Map();
+    private eventHandlers: Map<Element | Document, Map<string, EventListener>> = new Map();
     private abortController: AbortController = new AbortController();
 
     // Configuration
@@ -126,9 +133,12 @@ export class IIIFViewer {
             renderer: options.renderer ?? 'auto',
             enableOverlays: options.enableOverlays ?? true,
             enableToolbar: options.enableToolbar ?? true,
+            enableCompare: options.enableCompare ?? true,
+            enablePanels: options.enablePanels ?? true,
             maxCacheSize: options.maxCacheSize ?? 500,
             toolbar: options.toolbar,
             suppressNavigation: options.suppressNavigation ?? false,
+            suppressSettings: options.suppressSettings ?? false,
         };
 
         // Initialize core components
@@ -146,48 +156,38 @@ export class IIIFViewer {
         this.annotationManager = new AnnotationManager(this.overlayManager);
         if (!this.CONFIG.suppressNavigation) {
             this.setupCanvasNav();
+            this.setupManifestPanel();
+        }
+        if (!this.CONFIG.suppressNavigation && !this.CONFIG.suppressSettings) {
             this.setupTOC();
-            this.setupMetadataPanel();
         }
         this.setupAnnotationPanel();
         this.setupCVPanel();
+        if (this.CONFIG.enableCompare) {
+            this.setupComparePanel();
+        }
+        if (!this.CONFIG.suppressNavigation && !this.CONFIG.suppressSettings) {
+            this.setupSettingsPanel();
+        }
 
         if (this.CONFIG.enableToolbar) {
             const tb = this.CONFIG.toolbar;
 
-            // Canvas toolbar: zoom, annotations, info, layers
-            const hasCanvasButtons = tb?.zoom || tb?.annotations || tb?.info || tb?.layers;
-            if (hasCanvasButtons) {
+            // Navigation toolbar: zoom, reset, annotations, layers (fullscreen moved to tools wrapper)
+            const hasButtons = tb?.zoom || tb?.annotations || tb?.layers;
+            if (hasButtons) {
                 this.canvasToolbar = new ToolBar(container, {
                     zoom: tb?.zoom,
+                    reset: tb?.zoom, // Show reset when zoom is enabled
                     annotations: tb?.annotations,
-                    info: tb?.info,
-
                     layers: tb?.layers,
-                    variant: 'canvas',
-                });
-            }
-
-            // Universal toolbar: fullscreen, compare
-            const hasUniversalButtons = tb?.fullscreen || tb?.compare;
-            if (hasUniversalButtons) {
-                this.universalToolbar = new ToolBar(container, {
-                    fullscreen: tb?.fullscreen,
-                    compare: tb?.compare,
-                    variant: 'universal',
+                    variant: 'navigation',
+                    position: 'bottom-center',
                 });
             }
         }
 
         // Wire canvas toolbar buttons
-        if (this.canvasToolbar?.infoButton) {
-            this.canvasToolbar.infoButton.addEventListener('click', () => {
-                if (this.metadataPanel) {
-                    const isVisible = this.metadataPanel.style.display !== 'none';
-                    this.metadataPanel.style.display = isVisible ? 'none' : 'flex';
-                }
-            });
-        }
         if (this.canvasToolbar?.zoomInButton) {
             this.canvasToolbar.zoomInButton.addEventListener('click', () => {
                 this.camera.springZoomByFactor(1.5);
@@ -200,17 +200,11 @@ export class IIIFViewer {
                 this.markDirty();
             });
         }
-        // Wire universal toolbar buttons
-        if (this.universalToolbar?.compareButton) {
-            this.universalToolbar.compareButton.addEventListener('click', () => {
-                if (this.comparisonController) {
-                    this.exitCompareMode();
-                } else {
-                    this.enterCompareMode();
-                }
+        if (this.canvasToolbar?.resetButton) {
+            this.canvasToolbar.resetButton.addEventListener('click', () => {
+                this.fitToWorld();
             });
         }
-
         // Set up handlers
         this.setupResizeHandler();
         this.initializeRenderer();
@@ -236,148 +230,168 @@ export class IIIFViewer {
         this.overlayManager = new IIIFOverlayManager(this.overlayContainer, this.viewport);
     }
 
-    private setupCanvasNav() {
-        this.canvasNavContainer = document.createElement('div');
-        this.canvasNavContainer.className = 'iiif-canvas-nav';
-        this.canvasNavContainer.style.display = 'none';
+    /** Make a panel draggable by its header */
+    private makePanelDraggable(panel: HTMLElement, header: HTMLElement): void {
+        let isDragging = false;
+        let startX = 0;
+        let startY = 0;
+        let startLeft = 0;
+        let startTop = 0;
+
+        const onMouseDown = (e: MouseEvent) => {
+            // Don't drag if clicking on a button
+            if ((e.target as HTMLElement).tagName === 'BUTTON') return;
+
+            // Prevent viewer from panning
+            e.stopPropagation();
+
+            isDragging = true;
+            panel.classList.add('dragging');
+
+            // Get current position
+            const rect = panel.getBoundingClientRect();
+            const containerRect = this.container.getBoundingClientRect();
+
+            startX = e.clientX;
+            startY = e.clientY;
+            startLeft = rect.left - containerRect.left;
+            startTop = rect.top - containerRect.top;
+
+            // Clear any CSS positioning that might interfere
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
+            panel.style.transform = 'none';
+            panel.style.left = `${startLeft}px`;
+            panel.style.top = `${startTop}px`;
+
+            e.preventDefault();
+        };
+
+        const onMouseMove = (e: MouseEvent) => {
+            if (!isDragging) return;
+
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+
+            const newLeft = startLeft + dx;
+            const newTop = startTop + dy;
+
+            // Constrain to container bounds
+            const containerRect = this.container.getBoundingClientRect();
+            const panelRect = panel.getBoundingClientRect();
+
+            const maxLeft = containerRect.width - panelRect.width;
+            const maxTop = containerRect.height - panelRect.height;
+
+            panel.style.left = `${Math.max(0, Math.min(newLeft, maxLeft))}px`;
+            panel.style.top = `${Math.max(0, Math.min(newTop, maxTop))}px`;
+        };
+
+        const onMouseUp = () => {
+            if (!isDragging) return;
+            isDragging = false;
+            panel.classList.remove('dragging');
+        };
+
+        this.addEventListener(header, 'mousedown', onMouseDown as EventListener);
+        this.addEventListener(document.body, 'mousemove', onMouseMove as EventListener);
+        this.addEventListener(document.body, 'mouseup', onMouseUp as EventListener);
+    }
+
+    /**
+     * Create a standard panel with header, collapse button, and body.
+     * Returns { panel, header, body, collapseBtn } for further customization.
+     */
+    private createPanel(options: {
+        className: string;
+        title: string;
+        initiallyCollapsed?: boolean;
+        hidden?: boolean;
+    }): { panel: HTMLDivElement; header: HTMLDivElement; body: HTMLDivElement; collapseBtn: HTMLButtonElement } {
+        const panel = document.createElement('div');
+        panel.className = `iiif-panel ${options.className}`;
+        if (options.hidden) panel.style.display = 'none';
 
         const header = document.createElement('div');
-        header.className = 'iiif-canvas-nav-header';
+        header.className = `iiif-panel-header ${options.className}-header`;
 
-        const label = document.createElement('span');
-        label.textContent = 'Pages';
-        header.appendChild(label);
+        const title = document.createElement('span');
+        title.textContent = options.title;
+        header.appendChild(title);
 
         const collapseBtn = document.createElement('button');
-        collapseBtn.className = 'iiif-canvas-nav-collapse';
-        collapseBtn.textContent = '−';
+        collapseBtn.className = `iiif-panel-collapse ${options.className}-collapse`;
+        collapseBtn.textContent = options.initiallyCollapsed ? '+' : '−';
         header.appendChild(collapseBtn);
 
-        this.canvasNavContainer.appendChild(header);
+        panel.appendChild(header);
 
-        this.canvasNavList = document.createElement('div');
-        this.canvasNavList.className = 'iiif-canvas-nav-list';
-        this.canvasNavContainer.appendChild(this.canvasNavList);
+        const body = document.createElement('div');
+        body.className = `iiif-panel-body ${options.className}-body`;
+        if (options.initiallyCollapsed) body.classList.add('collapsed');
+        panel.appendChild(body);
 
         this.addEventListener(collapseBtn, 'click', () => {
-            this.canvasNavList!.classList.toggle('collapsed');
-            collapseBtn.textContent = this.canvasNavList!.classList.contains('collapsed') ? '+' : '−';
+            body.classList.toggle('collapsed');
+            collapseBtn.textContent = body.classList.contains('collapsed') ? '+' : '−';
         });
 
-        this.container.appendChild(this.canvasNavContainer);
+        this.makePanelDraggable(panel, header);
+        this.container.appendChild(panel);
+
+        return { panel, header, body, collapseBtn };
+    }
+
+    private setupCanvasNav() {
+        const { panel, body } = this.createPanel({
+            className: 'iiif-canvas-nav',
+            title: 'Pages',
+            hidden: true,
+        });
+        this.canvasNavContainer = panel;
+        this.canvasNavList = body;
+        this.canvasNavList.classList.add('iiif-canvas-nav-list');
     }
 
     private setupTOC() {
-        this.tocContainer = document.createElement('div');
-        this.tocContainer.className = 'iiif-toc';
-        this.tocContainer.style.display = 'none';
-
-        const header = document.createElement('div');
-        header.className = 'iiif-toc-header';
-
-        const label = document.createElement('span');
-        label.textContent = 'Contents';
-        header.appendChild(label);
-
-        const collapseBtn = document.createElement('button');
-        collapseBtn.className = 'iiif-toc-collapse';
-        collapseBtn.textContent = '\u2212';
-        header.appendChild(collapseBtn);
-
-        this.tocContainer.appendChild(header);
-
-        this.tocList = document.createElement('div');
-        this.tocList.className = 'iiif-toc-list';
-        this.tocContainer.appendChild(this.tocList);
-
-        this.addEventListener(collapseBtn, 'click', () => {
-            this.tocList!.classList.toggle('collapsed');
-            collapseBtn.textContent = this.tocList!.classList.contains('collapsed') ? '+' : '\u2212';
+        const { panel, body } = this.createPanel({
+            className: 'iiif-toc',
+            title: 'Contents',
+            hidden: true,
         });
-
-        this.container.appendChild(this.tocContainer);
+        this.tocContainer = panel;
+        this.tocList = body;
+        this.tocList.classList.add('iiif-toc-list');
     }
 
-    private setupMetadataPanel() {
-        this.metadataPanel = document.createElement('div');
-        this.metadataPanel.className = 'iiif-metadata-panel';
-        this.metadataPanel.style.display = 'none';
-
-        const header = document.createElement('div');
-        header.className = 'iiif-metadata-header';
-
-        const title = document.createElement('span');
-        title.textContent = 'Manifest Info';
-        header.appendChild(title);
-
-        const closeBtn = document.createElement('button');
-        closeBtn.className = 'iiif-metadata-close';
-        closeBtn.textContent = '\u00D7';
-        closeBtn.addEventListener('click', () => {
-            this.metadataPanel!.style.display = 'none';
+    private setupManifestPanel() {
+        const { body } = this.createPanel({
+            className: 'iiif-manifest-panel',
+            title: 'Manifest',
+            initiallyCollapsed: true,
         });
-        header.appendChild(closeBtn);
-
-        this.metadataPanel.appendChild(header);
-
-        this.metadataPanelBody = document.createElement('div');
-        this.metadataPanelBody.className = 'iiif-metadata-body';
-        this.metadataPanel.appendChild(this.metadataPanelBody);
-
-        this.container.appendChild(this.metadataPanel);
+        this.metadataPanelBody = body;
     }
 
     private setupAnnotationPanel() {
-        this.annotationPanel = document.createElement('div');
-        this.annotationPanel.className = 'iiif-annotation-panel';
-        this.annotationPanel.style.display = 'none';
-
-        const header = document.createElement('div');
-        header.className = 'iiif-annotation-panel-header';
-
-        const title = document.createElement('span');
-        title.textContent = 'Annotations';
-        header.appendChild(title);
-
-        const collapseBtn = document.createElement('button');
-        collapseBtn.className = 'iiif-annotation-panel-collapse';
-        collapseBtn.textContent = '\u2212';
-        header.appendChild(collapseBtn);
-
-        this.annotationPanel.appendChild(header);
-
-        this.annotationPanelBody = document.createElement('div');
-        this.annotationPanelBody.className = 'iiif-annotation-panel-body';
-        this.annotationPanel.appendChild(this.annotationPanelBody);
-
-        this.addEventListener(collapseBtn, 'click', () => {
-            this.annotationPanelBody!.classList.toggle('collapsed');
-            collapseBtn.textContent = this.annotationPanelBody!.classList.contains('collapsed') ? '+' : '\u2212';
+        const { panel, body } = this.createPanel({
+            className: 'iiif-annotation-panel',
+            title: 'Annotations',
+            initiallyCollapsed: true,
+            hidden: true,
         });
-
-        this.container.appendChild(this.annotationPanel);
+        this.annotationPanel = panel;
+        this.annotationPanelBody = body;
     }
 
     private setupCVPanel() {
-        this.cvPanel = document.createElement('div');
-        this.cvPanel.className = 'iiif-cv-panel';
-
-        const header = document.createElement('div');
-        header.className = 'iiif-cv-panel-header';
-
-        const title = document.createElement('span');
-        title.textContent = 'Vision';
-        header.appendChild(title);
-
-        const collapseBtn = document.createElement('button');
-        collapseBtn.className = 'iiif-cv-panel-collapse';
-        collapseBtn.textContent = '+';
-        header.appendChild(collapseBtn);
-
-        this.cvPanel.appendChild(header);
-
-        this.cvPanelBody = document.createElement('div');
-        this.cvPanelBody.className = 'iiif-cv-panel-body collapsed';
+        const { panel, body } = this.createPanel({
+            className: 'iiif-cv-panel',
+            title: 'Vision',
+            initiallyCollapsed: true,
+        });
+        this.cvPanel = panel;
+        this.cvPanelBody = body;
 
         // Hidden video element — data source only, not displayed.
         // We render to a canvas instead (see below) to bypass Chrome's video
@@ -413,13 +427,6 @@ export class IIIFViewer {
         this.cvGestureBtn.textContent = 'Gestures: ON';
         this.cvGestureBtn.style.display = 'none';
         this.cvPanelBody.appendChild(this.cvGestureBtn);
-
-        this.cvPanel.appendChild(this.cvPanelBody);
-
-        this.addEventListener(collapseBtn, 'click', () => {
-            this.cvPanelBody!.classList.toggle('collapsed');
-            collapseBtn.textContent = this.cvPanelBody!.classList.contains('collapsed') ? '+' : '\u2212';
-        });
 
         this.addEventListener(this.cvGestureBtn!, 'click', () => {
             if (!this.cvController) return;
@@ -469,6 +476,154 @@ export class IIIFViewer {
         this.container.appendChild(this.cvPanel);
     }
 
+    private setupComparePanel() {
+        const { panel, collapseBtn } = this.createPanel({
+            className: 'iiif-compare-panel',
+            title: 'Compare',
+            initiallyCollapsed: true,
+            hidden: true,
+        });
+        this.comparePanel = panel;
+
+        // Override collapse button behavior for compare mode
+        collapseBtn.removeEventListener; // Can't remove, so we override with capture
+        this.addEventListener(collapseBtn, 'click', (e) => {
+            e.stopImmediatePropagation();
+            if (this.comparisonController) {
+                // Toggle collapse state - don't exit compare mode
+                const isCollapsed = this.comparePanel!.classList.toggle('collapsed');
+                collapseBtn.textContent = isCollapsed ? '+' : '−';
+            } else {
+                // Enter compare mode
+                this.enterCompareMode();
+                collapseBtn.textContent = '−';
+                this.comparePanel!.classList.add('active');
+                this.comparePanel!.classList.remove('collapsed');
+            }
+        });
+    }
+
+    private setupSettingsPanel() {
+        // Create wrapper to hold both fullscreen button and tools panel
+        this.toolsWrapper = document.createElement('div');
+        this.toolsWrapper.className = 'iiif-tools-wrapper';
+
+        // Create fullscreen button
+        this.fullscreenBtn = document.createElement('button');
+        this.fullscreenBtn.className = 'iiif-fullscreen-btn';
+        this.fullscreenBtn.title = 'Toggle Fullscreen';
+        this.fullscreenBtn.innerHTML = `
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+            </svg>
+        `;
+        this.addEventListener(this.fullscreenBtn, 'click', () => {
+            if (!document.fullscreenElement) {
+                this.container.requestFullscreen().catch(() => {});
+                this.fullscreenBtn!.classList.add('active');
+            } else {
+                document.exitFullscreen();
+                this.fullscreenBtn!.classList.remove('active');
+            }
+        });
+
+        // Listen for fullscreen changes (e.g., user pressing Escape)
+        this.addEventListener(document, 'fullscreenchange', () => {
+            if (!document.fullscreenElement) {
+                this.fullscreenBtn!.classList.remove('active');
+            }
+        });
+
+        // Create tools panel
+        this.settingsPanel = document.createElement('div');
+        this.settingsPanel.className = 'iiif-panel iiif-settings-panel';
+
+        const header = document.createElement('div');
+        header.className = 'iiif-panel-header iiif-settings-panel-header';
+
+        const title = document.createElement('span');
+        title.textContent = 'Tools';
+        header.appendChild(title);
+
+        const collapseBtn = document.createElement('button');
+        collapseBtn.className = 'iiif-panel-collapse iiif-settings-panel-collapse';
+        collapseBtn.textContent = '+';
+        header.appendChild(collapseBtn);
+
+        this.settingsPanel.appendChild(header);
+
+        this.settingsPanelBody = document.createElement('div');
+        this.settingsPanelBody.className = 'iiif-panel-body iiif-settings-panel-body collapsed';
+
+        // Define panels with their references and labels
+        // All panels use container classes to work globally (including in compare mode)
+        const panelConfigs = [
+            { label: 'Navigation', defaultVisible: true, containerClass: 'hide-navigation' },
+            { label: 'Pages', defaultVisible: false, containerClass: 'hide-pages' },
+            { label: 'Manifest', defaultVisible: true, containerClass: 'hide-manifest' },
+            { label: 'Annotations', defaultVisible: false, containerClass: 'hide-annotations' },
+            { label: 'Vision', defaultVisible: true, containerClass: 'hide-vision' },
+            { label: 'Compare', defaultVisible: false, containerClass: 'hide-compare' },
+        ];
+
+        for (const config of panelConfigs) {
+            const item = document.createElement('label');
+            item.className = 'iiif-settings-panel-item';
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.className = 'iiif-settings-panel-checkbox';
+            checkbox.checked = config.defaultVisible;
+
+            const labelText = document.createElement('span');
+            labelText.textContent = config.label;
+
+            item.appendChild(checkbox);
+            item.appendChild(labelText);
+
+            // Apply initial state using container class
+            if (!config.defaultVisible) {
+                this.container.classList.add(config.containerClass);
+            }
+
+            this.addEventListener(checkbox, 'change', () => {
+                // Toggle container class for global effect
+                if (checkbox.checked) {
+                    this.container.classList.remove(config.containerClass);
+                } else {
+                    this.container.classList.add(config.containerClass);
+                }
+            });
+
+            this.settingsPanelBody.appendChild(item);
+        }
+
+        this.settingsPanel.appendChild(this.settingsPanelBody);
+
+        this.addEventListener(collapseBtn, 'click', () => {
+            this.settingsPanelBody!.classList.toggle('collapsed');
+            collapseBtn.textContent = this.settingsPanelBody!.classList.contains('collapsed') ? '+' : '−';
+        });
+
+        this.toolsWrapper.appendChild(this.settingsPanel);
+        this.toolsWrapper.appendChild(this.fullscreenBtn);
+
+        // Make the wrapper draggable by the tools panel header
+        this.makePanelDraggable(this.toolsWrapper, header);
+        this.container.appendChild(this.toolsWrapper);
+    }
+
+    private updateComparePanel() {
+        if (!this.comparePanel || !this.manifest) return;
+
+        // Show compare panel when manifest has multiple canvases
+        if (this.manifest.canvases.length > 1) {
+            this.comparePanel.style.display = 'flex';
+        } else {
+            this.comparePanel.style.display = 'none';
+        }
+    }
+
     private updateAnnotationPanel() {
         if (!this.annotationPanelBody || !this.annotationManager) return;
 
@@ -513,7 +668,7 @@ export class IIIFViewer {
             item.appendChild(label);
 
             const eyeBtn = document.createElement('button');
-            eyeBtn.className = 'iiif-annotation-panel-eye';
+            eyeBtn.className = 'iiif-eye-btn iiif-annotation-panel-eye';
             if (page.visible) eyeBtn.classList.add('active');
             eyeBtn.innerHTML = eyeSvg;
             eyeBtn.title = 'Toggle visibility';
@@ -656,7 +811,7 @@ export class IIIFViewer {
     // ============================================================
 
     private addEventListener<K extends keyof HTMLElementEventMap>(
-        element: Element,
+        element: Element | Document,
         type: K,
         handler: (event: HTMLElementEventMap[K]) => void,
         options?: { passive?: boolean }
@@ -934,8 +1089,10 @@ export class IIIFViewer {
                         event.preventDefault();
                         if (!document.fullscreenElement) {
                             this.container.requestFullscreen().catch(() => {});
+                            this.fullscreenBtn?.classList.add('active');
                         } else {
                             document.exitFullscreen();
+                            this.fullscreenBtn?.classList.remove('active');
                         }
                     }
                     break;
@@ -1029,7 +1186,7 @@ export class IIIFViewer {
             this.canvasIdToIndex.clear();
             this.updateCanvasNav();
             this.updateTOC();
-            this.updateMetadataPanel();
+            this.updateManifestPanel();
         } else {
             this.clearWorld();
             this.manifest = result as ParsedManifest;
@@ -1042,7 +1199,8 @@ export class IIIFViewer {
 
             this.updateCanvasNav();
             this.updateTOC();
-            this.updateMetadataPanel();
+            this.updateManifestPanel();
+            this.updateComparePanel();
             await this.loadCanvas(0, focus);
         }
     }
@@ -1305,10 +1463,10 @@ export class IIIFViewer {
     }
 
     // ============================================================
-    // METADATA PANEL
+    // MANIFEST PANEL
     // ============================================================
 
-    private updateMetadataPanel() {
+    private updateManifestPanel() {
         if (!this.metadataPanelBody) return;
         this.metadataPanelBody.innerHTML = '';
 
@@ -1316,15 +1474,15 @@ export class IIIFViewer {
         if (!meta) return;
 
         if (this.manifest?.label) {
-            this.appendMetadataField('Title', this.manifest.label);
+            this.appendManifestField('Title', this.manifest.label);
         }
 
         if (meta.description) {
-            this.appendMetadataField('Description', meta.description);
+            this.appendManifestField('Description', meta.description);
         }
 
         if (meta.attribution) {
-            this.appendMetadataField(meta.attributionLabel || 'Attribution', meta.attribution);
+            this.appendManifestField(meta.attributionLabel || 'Attribution', meta.attribution);
         }
 
         if (meta.rights) {
@@ -1333,38 +1491,38 @@ export class IIIFViewer {
             link.target = '_blank';
             link.rel = 'noopener';
             link.textContent = meta.rights;
-            this.appendMetadataFieldElement('Rights', link);
+            this.appendManifestFieldElement('Rights', link);
         }
 
         if (meta.logo) {
             const img = document.createElement('img');
             img.src = meta.logo;
-            img.className = 'iiif-metadata-logo';
+            img.className = 'iiif-manifest-panel-logo';
             img.alt = 'Logo';
-            this.appendMetadataFieldElement('Logo', img);
+            this.appendManifestFieldElement('Logo', img);
         }
 
         if (meta.metadata.length > 0) {
             const separator = document.createElement('div');
-            separator.className = 'iiif-metadata-separator';
+            separator.className = 'iiif-manifest-panel-separator';
             this.metadataPanelBody.appendChild(separator);
 
             for (const item of meta.metadata) {
-                this.appendMetadataField(item.label, item.value);
+                this.appendManifestField(item.label, item.value);
             }
         }
     }
 
-    private appendMetadataField(label: string, value: string) {
+    private appendManifestField(label: string, value: string) {
         const row = document.createElement('div');
-        row.className = 'iiif-metadata-row';
+        row.className = 'iiif-manifest-panel-row';
 
         const labelEl = document.createElement('div');
-        labelEl.className = 'iiif-metadata-label';
+        labelEl.className = 'iiif-manifest-panel-label';
         labelEl.textContent = label;
 
         const valueEl = document.createElement('div');
-        valueEl.className = 'iiif-metadata-value';
+        valueEl.className = 'iiif-manifest-panel-value';
         valueEl.textContent = value;
 
         row.appendChild(labelEl);
@@ -1372,16 +1530,16 @@ export class IIIFViewer {
         this.metadataPanelBody!.appendChild(row);
     }
 
-    private appendMetadataFieldElement(label: string, element: HTMLElement) {
+    private appendManifestFieldElement(label: string, element: HTMLElement) {
         const row = document.createElement('div');
-        row.className = 'iiif-metadata-row';
+        row.className = 'iiif-manifest-panel-row';
 
         const labelEl = document.createElement('div');
-        labelEl.className = 'iiif-metadata-label';
+        labelEl.className = 'iiif-manifest-panel-label';
         labelEl.textContent = label;
 
         const valueEl = document.createElement('div');
-        valueEl.className = 'iiif-metadata-value';
+        valueEl.className = 'iiif-manifest-panel-value';
         valueEl.appendChild(element);
 
         row.appendChild(labelEl);
@@ -1681,7 +1839,11 @@ export class IIIFViewer {
 
         // Hide panels that don't apply in compare mode
         if (this.tocContainer) this.tocContainer.style.display = 'none';
-        if (this.metadataPanel) this.metadataPanel.style.display = 'none';
+
+        // Add compare-active class for expanded styling
+        if (this.comparePanel) {
+            this.comparePanel.classList.add('compare-active');
+        }
 
         const currentCanvas = this.manifest.canvases[this.currentCanvasIndex];
         const canvases = [{
@@ -1695,25 +1857,29 @@ export class IIIFViewer {
                 enableOverlays: this.CONFIG.enableOverlays,
                 maxCacheSize: this.CONFIG.maxCacheSize,
                 enableToolbar: true,
-                toolbar: { zoom: true, info: true },
+                enableCompare: false,
+                suppressSettings: true,
+                toolbar: { zoom: true },
             },
             manifestUrl: this.currentLoadedUrl!,
             canvases,
             currentCanvasIndex: this.currentCanvasIndex,
             savedEntries: this.compareAddedEntries,
+            listPanel: this.comparePanel,
             onExit: () => {
                 this.exitCompareMode();
             },
             onSuspendParent: () => {
                 this.stopRenderLoop();
+                // Mark container as in compare mode to hide main viewer panels via CSS
+                this.container.classList.add('iiif-compare-active');
                 if (this.renderer?.canvas) this.renderer.canvas.style.display = 'none';
                 if (this.overlayContainer) this.overlayContainer.style.display = 'none';
-                if (this.canvasToolbar?.toolbar) this.canvasToolbar.toolbar.style.display = 'none';
             },
             onResumeParent: () => {
+                this.container.classList.remove('iiif-compare-active');
                 if (this.renderer?.canvas) this.renderer.canvas.style.display = '';
                 if (this.overlayContainer) this.overlayContainer.style.display = '';
-                if (this.canvasToolbar?.toolbar) this.canvasToolbar.toolbar.style.display = '';
                 this.startRenderLoop();
                 this.markDirty();
             },
@@ -1741,6 +1907,17 @@ export class IIIFViewer {
         this.updateCanvasNav();
         this.updateTOC();
 
+        // Reset compare panel to original state
+        if (this.comparePanel) {
+            this.comparePanel.classList.remove('compare-active', 'active', 'collapsed');
+            // Reset toggle button and hide close button
+            const toggleBtn = this.comparePanel.querySelector('.iiif-compare-panel-collapse');
+            if (toggleBtn) toggleBtn.textContent = '+';
+            const closeBtn = this.comparePanel.querySelector('.iiif-compare-panel-close') as HTMLElement;
+            if (closeBtn) closeBtn.style.display = 'none';
+        }
+        this.updateComparePanel();
+
         // Ensure render loop is running
         if (!this.renderLoopActive) {
             this.startRenderLoop();
@@ -1765,6 +1942,5 @@ export class IIIFViewer {
         this.overlayManager = undefined;
         this.annotationManager = undefined;
         this.canvasToolbar = undefined;
-        this.universalToolbar = undefined;
     }
 }

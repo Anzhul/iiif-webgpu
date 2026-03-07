@@ -16,6 +16,8 @@ export interface CompareOptions {
     onSuspendParent?: () => void;
     onResumeParent?: () => void;
     savedEntries?: CompareEntry[];
+    /** External panel element to populate with canvas list (instead of creating a new one) */
+    listPanel?: HTMLDivElement;
 }
 
 const EYE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
@@ -108,9 +110,16 @@ export class ComparisonController {
         this.initialEntryIndex = currentIdx !== -1 ? currentIdx : 0;
         this.visibleIndices = [this.initialEntryIndex];
 
-        // Create floating list panel (always overlays the container)
-        this.createListPanel();
-        this.container.appendChild(this.listPanel);
+        // Use external panel - always required
+        if (!options.listPanel) {
+            throw new Error('ComparisonController requires listPanel to be provided');
+        }
+        this.listPanel = options.listPanel;
+        this.populateExternalPanel();
+
+        // Only enter environment mode if we have 2+ visible entries
+        // Otherwise stay in single-parent mode (keep original viewer)
+        this.updateViewers();
     }
 
     // ============================================================
@@ -126,7 +135,10 @@ export class ComparisonController {
             this.environments.clear();
             this.wrapper?.remove();
         }
-        this.listPanel?.remove();
+        // Clear the body and add section from the external panel
+        this.listBody?.remove();
+        const addSection = this.listPanel?.querySelector('.iiif-canvas-list-add');
+        addSection?.remove();
     }
 
     /** Returns entries that were manually added via URL input (not the initial canvas entries) */
@@ -182,10 +194,9 @@ export class ComparisonController {
     // MODE TRANSITIONS
     // ============================================================
 
-    /** True when only the initial canvas is visible (parent viewer stays running) */
+    /** True when only 1 entry is visible - use parent viewer instead of creating new ones */
     private get isSingleParentMode(): boolean {
-        return this.visibleIndices.length === 1 &&
-               this.visibleIndices[0] === this.initialEntryIndex;
+        return this.visibleIndices.length <= 1;
     }
 
     private enterEnvironmentMode(): void {
@@ -291,32 +302,11 @@ export class ComparisonController {
     // DOM CONSTRUCTION
     // ============================================================
 
-    private createListPanel(): void {
-        this.listPanel = document.createElement('div');
-        this.listPanel.className = 'iiif-canvas-list';
-
-        // Header
-        const header = document.createElement('div');
-        header.className = 'iiif-canvas-list-header';
-
-        const label = document.createElement('span');
-        label.textContent = 'Compare';
-        header.appendChild(label);
-
-        const exitBtn = document.createElement('button');
-        exitBtn.className = 'iiif-canvas-list-close';
-        exitBtn.textContent = '\u00D7';
-        exitBtn.title = 'Exit compare';
-        exitBtn.addEventListener('click', () => {
-            this.options.onExit?.();
-        }, { signal: this.abortController.signal });
-        header.appendChild(exitBtn);
-
-        this.listPanel.appendChild(header);
-
+    /** Populate an external panel (provided by parent) with body and add section */
+    private populateExternalPanel(): void {
         // Body (scrollable list of entries)
         this.listBody = document.createElement('div');
-        this.listBody.className = 'iiif-canvas-list-body';
+        this.listBody.className = 'iiif-panel-body iiif-canvas-list-body';
 
         for (let i = 0; i < this.entries.length; i++) {
             const item = this.createListItem(i);
@@ -333,6 +323,9 @@ export class ComparisonController {
         this.addInput.type = 'text';
         this.addInput.placeholder = 'Add IIIF URL...';
         this.addInput.className = 'iiif-canvas-list-add-input';
+        this.addInput.addEventListener('mousedown', (e) => {
+            e.stopPropagation();
+        }, { signal: this.abortController.signal });
         addSection.appendChild(this.addInput);
 
         const addBtn = document.createElement('button');
@@ -355,6 +348,13 @@ export class ComparisonController {
                     this.addEntry(url);
                     this.addInput.value = '';
                 }
+            }
+        }, { signal: this.abortController.signal });
+
+        // Ensure input can receive focus by handling click on the section
+        addSection.addEventListener('click', (e) => {
+            if (e.target === addSection) {
+                this.addInput.focus();
             }
         }, { signal: this.abortController.signal });
 
@@ -381,7 +381,7 @@ export class ComparisonController {
 
         // Eye toggle button
         const eyeBtn = document.createElement('button');
-        eyeBtn.className = 'iiif-canvas-list-eye';
+        eyeBtn.className = 'iiif-eye-btn iiif-canvas-list-eye';
         if (this.visibleIndices.includes(index)) {
             eyeBtn.classList.add('active');
         }

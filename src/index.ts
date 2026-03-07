@@ -1,5 +1,4 @@
-import './IIIF/iiif-toolbar.css';
-import './IIIF/iiif-components.scss';
+import './IIIF/iiif-styles.css';
 
 export { IIIFViewer } from './IIIF/iiif';
 export type { IIIFViewerOptions } from './IIIF/iiif';

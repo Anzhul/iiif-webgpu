@@ -1,0 +1,1014 @@
+/* ============================================
+   IIIF Viewer Styles
+   ============================================
+   Single consolidated stylesheet for all viewer components.
+   Users can override CSS custom properties to customize appearance.
+   ============================================ */
+
+/* =============================================
+   1. CSS Custom Properties (Theme Tokens)
+   ============================================= */
+
+:root {
+  /* --- Core Colors (RGB values for use with rgba()) --- */
+  --color-primary: 80, 130, 255;
+  --color-danger: 255, 80, 80;
+  --color-success: 46, 204, 113;
+  --color-info: 52, 152, 219;
+  --color-error: 231, 76, 60;
+
+  /* --- Backgrounds --- */
+  --panel-bg: rgba(0, 0, 0, 0.5);
+
+  /* --- Borders --- */
+  --border-color: rgba(255, 255, 255, 0);
+  --border-color-light: rgba(255, 255, 255, 0);
+
+  /* --- Text --- */
+  --text-primary: #e0e0e0;
+  --text-secondary: #aaa;
+  --text-muted: #888;
+  --text-dimmed: #555;
+  --text-on-hover: #fff;
+
+  /* --- Interactive States --- */
+  --hover-bg: rgba(255, 255, 255, 0.08);
+  --active-bg: rgba(var(--color-primary), 0.1);
+  --active-border: rgba(var(--color-primary), 0.6);
+  --focus-border: rgba(100, 150, 255, 0.5);
+
+  /* --- Buttons --- */
+  --button-bg: rgba(var(--color-primary), 0.2);
+  --button-bg-hover: rgba(var(--color-primary), 0.4);
+  --button-border: rgba(var(--color-primary), 0.4);
+
+  /* --- Inputs --- */
+  --input-bg: rgba(255, 255, 255, 0.08);
+  --input-border: rgba(255, 255, 255, 0.15);
+  --input-placeholder: rgba(255, 255, 255, 0.3);
+
+  /* --- Links --- */
+  --link-color: rgba(100, 160, 255, 0.9);
+
+  /* --- Scrollbar --- */
+  --scrollbar-thumb: rgba(255, 255, 255, 0.12);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.2);
+
+  /* --- Layout --- */
+  --border-radius: 8px;
+  --backdrop-filter: blur(8px);
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0);
+
+  /* --- Transitions --- */
+  --transition: ease-in-out 0.3s;
+  --transition-fast: 0.15s;
+
+  /* --- Typography --- */
+  --font-family: 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'Consolas', 'Monaco', monospace;
+}
+
+/* =============================================
+   2. Base Panel Class (shared by all panels)
+   ============================================= */
+
+.iiif-panel {
+  position: absolute;
+  z-index: 1500;
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  backdrop-filter: var(--backdrop-filter);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  cursor: default;
+  font-family: var(--font-family);
+}
+
+/* Panel Header - shared across all panels */
+.iiif-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-color-light);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  cursor: grab;
+  user-select: none;
+}
+.iiif-panel-header:active {
+  cursor: grabbing;
+}
+.iiif-panel.dragging {
+  opacity: 0.9;
+  z-index: 3000;
+}
+.iiif-panel.dragging .iiif-panel-header {
+  cursor: grabbing;
+}
+
+/* Panel Collapse Button */
+.iiif-panel-collapse {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+.iiif-panel-collapse:hover {
+  color: var(--text-on-hover);
+}
+
+/* Panel Body */
+.iiif-panel-body {
+  overflow-y: auto;
+  flex: 1;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.iiif-panel-body.collapsed {
+  display: none;
+}
+
+/* Panel Scrollbar */
+.iiif-panel-body::-webkit-scrollbar { width: 4px; }
+.iiif-panel-body::-webkit-scrollbar-track { background: transparent; }
+.iiif-panel-body::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 2px;
+}
+
+/* Panel Close Button */
+.iiif-panel-close {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.iiif-panel-close:hover {
+  color: var(--text-on-hover);
+}
+
+/* =============================================
+   3. Toolbar
+   ============================================= */
+
+.iiif-toolbar {
+  position: absolute;
+  height: 2.2rem;
+  top: clamp(2rem, 5vh, 3rem);
+  right: clamp(2rem, 6vw, 4rem);
+  z-index: 1000;
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  backdrop-filter: var(--backdrop-filter);
+  box-shadow: var(--shadow);
+  transition: var(--transition);
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  padding: 0 0.5rem;
+  cursor: default;
+  font-family: var(--font-family);
+}
+
+.iiif-toolbar.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.iiif-toolbar-main-tools,
+.iiif-toolbar-secondary-tools {
+  height: 100%;
+  display: flex;
+  justify-content: space-around;
+}
+.iiif-toolbar-main-tools { left: 0; }
+.iiif-toolbar-secondary-tools { right: 0; }
+
+.iiif-toolbar-divider {
+  position: relative;
+  display: flex;
+  height: 100%;
+  width: 1rem;
+}
+
+.iiif-toolbar-divider-block {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 1px;
+  height: 40%;
+  background-color: rgba(255, 255, 255, 0.65);
+}
+
+.iiif-toolbar-button {
+  position: relative;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: var(--transition);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-width: 2rem;
+  margin: 0 0.1rem;
+}
+.iiif-toolbar-button:hover {
+  background-color: rgba(0, 0, 0, 0.25);
+}
+.iiif-toolbar-button:active {
+  background-color: rgba(0, 0, 0, 0.45);
+}
+.iiif-toolbar-button-fullscreen.active {
+  background-color: rgba(0, 0, 0, 0.35);
+}
+
+/* Text-based toolbar buttons */
+.iiif-toolbar-button-text {
+  font-size: 11px;
+  font-weight: 500;
+  color: #fff;
+  padding: 0 0.6rem;
+  min-width: auto;
+}
+
+/* Toolbar Position Variants */
+.iiif-toolbar.position-top-left {
+  top: clamp(1rem, 5vh, 2rem);
+  left: clamp(2rem, 5vw, 3rem);
+  right: auto;
+}
+.iiif-toolbar.position-bottom-right {
+  top: auto;
+  bottom: clamp(1rem, 5vh, 2rem);
+  right: clamp(2rem, 5vw, 3rem);
+}
+.iiif-toolbar.position-bottom-left {
+  top: auto;
+  bottom: clamp(1rem, 5vh, 2rem);
+  left: clamp(2rem, 5vw, 3rem);
+  right: auto;
+}
+.iiif-toolbar.position-bottom-center {
+  top: auto;
+  bottom: clamp(1rem, 5vh, 2rem);
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+}
+
+
+/* =============================================
+   4. Canvas Navigator (Pages Panel)
+   ============================================= */
+
+.iiif-canvas-nav {
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  max-height: 70vh;
+  width: 72px;
+}
+
+.iiif-canvas-nav-header {
+  padding: 6px 8px;
+}
+
+.iiif-canvas-nav-list {
+  padding: 4px;
+  gap: 4px;
+}
+
+.iiif-canvas-nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+.iiif-canvas-nav-item:hover {
+  background: var(--hover-bg);
+}
+.iiif-canvas-nav-item.active {
+  border-color: var(--active-border);
+  background: var(--active-bg);
+}
+
+.iiif-canvas-nav-item-img {
+  width: 54px;
+  height: 54px;
+  object-fit: contain;
+  border-radius: 2px;
+  background: var(--input-bg);
+}
+
+.iiif-canvas-nav-item-label {
+  font-size: 9px;
+  color: var(--text-secondary);
+  text-align: center;
+  margin-top: 2px;
+  max-width: 58px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* =============================================
+   5. Table of Contents
+   ============================================= */
+
+.iiif-toc {
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  max-height: 70vh;
+  min-width: 160px;
+  max-width: 280px;
+}
+
+.iiif-toc-list {
+  padding: 4px 0;
+}
+
+.iiif-toc-row {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.iiif-toc-row.iiif-toc-clickable {
+  cursor: pointer;
+}
+.iiif-toc-row.iiif-toc-clickable:hover {
+  background: var(--hover-bg);
+}
+
+.iiif-toc-toggle {
+  font-size: 8px;
+  color: var(--text-muted);
+  cursor: pointer;
+  width: 12px;
+  text-align: center;
+  flex-shrink: 0;
+  user-select: none;
+}
+.iiif-toc-toggle:hover {
+  color: var(--text-on-hover);
+}
+
+.iiif-toc-toggle-spacer {
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.iiif-toc-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* =============================================
+   6. Annotation Panel
+   ============================================= */
+
+.iiif-annotation-panel {
+  left: 8px;
+  bottom: 8px;
+  max-height: 40vh;
+  min-width: 120px;
+  max-width: 240px;
+}
+.iiif-annotation-panel:has(.iiif-panel-body.collapsed) {
+  width: 120px;
+  min-width: 120px;
+}
+
+.iiif-annotation-panel-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: default;
+}
+.iiif-annotation-panel-item:hover {
+  background: var(--hover-bg);
+}
+
+.iiif-annotation-panel-item-label {
+  font-size: 11px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+/* Eye Toggle Button (shared pattern) */
+.iiif-eye-btn {
+  background: none;
+  border: none;
+  color: var(--text-dimmed);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--transition-fast);
+}
+.iiif-eye-btn:hover {
+  color: var(--text-secondary);
+}
+.iiif-eye-btn.active {
+  color: rgba(var(--color-primary), 0.9);
+}
+.iiif-eye-btn.active:hover {
+  color: rgb(var(--color-primary));
+}
+.iiif-eye-btn.disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.iiif-eye-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Legacy class support */
+.iiif-annotation-panel-eye { /* inherits from .iiif-eye-btn */ }
+.iiif-canvas-list-eye { /* inherits from .iiif-eye-btn */ }
+
+/* =============================================
+   7. CV Panel (Vision)
+   ============================================= */
+
+.iiif-cv-panel {
+  left: 8px;
+  bottom: 8px;
+  min-width: 120px;
+  max-width: 200px;
+}
+.iiif-cv-panel:has(.iiif-panel-body.collapsed) {
+  width: 120px;
+  min-width: 120px;
+}
+
+.iiif-cv-panel-body {
+  align-items: center;
+}
+
+.iiif-cv-panel-video {
+  width: 160px;
+  height: 120px;
+  border-radius: 4px;
+  background: #000;
+  margin: 4px auto;
+  display: block;
+}
+
+.iiif-cv-panel-status {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 2px 8px;
+}
+
+.iiif-cv-panel-toggle {
+  margin: 4px 8px 8px;
+  padding: 4px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--button-border);
+  background: var(--button-bg);
+  color: var(--text-on-hover);
+  font-size: 11px;
+  cursor: pointer;
+  width: calc(100% - 16px);
+}
+.iiif-cv-panel-toggle:hover {
+  background: var(--button-bg-hover);
+}
+.iiif-cv-panel-toggle.active {
+  border-color: rgba(var(--color-danger), 0.4);
+  background: rgba(var(--color-danger), 0.2);
+}
+.iiif-cv-panel-toggle.active:hover {
+  background: rgba(var(--color-danger), 0.4);
+}
+
+/* =============================================
+   7b. Compare Panel
+   ============================================= */
+
+.iiif-compare-panel {
+  top: calc(clamp(2rem, 5vh, 3rem) + 2.2rem + 0.5rem);
+  right: clamp(2rem, 6vw, 4rem);
+  min-width: 120px;
+  max-width: 200px;
+  width: 120px;
+}
+
+/* When compare mode is active, expand the panel */
+.iiif-compare-panel.compare-active {
+  width: 280px;
+  max-width: 280px;
+  max-height: 60vh;
+  z-index: 2000;
+  pointer-events: auto;
+}
+
+/* When collapsed, hide the body content */
+.iiif-compare-panel.collapsed .iiif-panel-body,
+.iiif-compare-panel.collapsed .iiif-canvas-list-body,
+.iiif-compare-panel.collapsed .iiif-canvas-list-add {
+  display: none;
+}
+
+/* Button group in header */
+.iiif-panel-header-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.iiif-compare-panel-body {
+  align-items: center;
+}
+
+.iiif-compare-panel-description {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: center;
+  padding: 4px 8px;
+  margin: 0;
+}
+
+.iiif-compare-panel-toggle {
+  margin: 4px 8px 8px;
+  padding: 6px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--button-border);
+  background: var(--button-bg);
+  color: var(--text-on-hover);
+  font-size: 11px;
+  cursor: pointer;
+  width: calc(100% - 16px);
+}
+.iiif-compare-panel-toggle:hover {
+  background: var(--button-bg-hover);
+}
+.iiif-compare-panel-toggle.active {
+  border-color: rgba(var(--color-danger), 0.4);
+  background: rgba(var(--color-danger), 0.2);
+}
+.iiif-compare-panel-toggle.active:hover {
+  background: rgba(var(--color-danger), 0.4);
+}
+
+/* =============================================
+   7c. Tools Panel (Panel Visibility)
+   ============================================= */
+
+/* Wrapper for fullscreen button + tools panel */
+.iiif-tools-wrapper {
+  position: absolute;
+  top: clamp(2rem, 5vh, 3rem);
+  right: clamp(2rem, 6vw, 4rem);
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 6px;
+  z-index: 100;
+  pointer-events: auto;
+}
+.iiif-tools-wrapper.dragging {
+  opacity: 0.9;
+  z-index: 3000;
+}
+
+/* Fullscreen button */
+.iiif-fullscreen-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+.iiif-fullscreen-btn:hover {
+  background: var(--button-bg-hover);
+  color: var(--text-on-hover);
+}
+.iiif-fullscreen-btn.active {
+  background: var(--button-bg-hover);
+  color: var(--text-on-hover);
+}
+.iiif-fullscreen-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.iiif-settings-panel {
+  position: relative;
+  top: auto;
+  right: auto;
+  min-width: 120px;
+  max-width: 160px;
+}
+
+.iiif-settings-panel-body {
+  padding: 6px 8px;
+}
+
+.iiif-settings-panel-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 11px;
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.iiif-settings-panel-item:hover {
+  color: var(--text-on-hover);
+}
+
+.iiif-settings-panel-checkbox {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--link-color);
+  cursor: pointer;
+}
+
+/* User-hidden state for panels and toolbar */
+.iiif-panel.user-hidden,
+.iiif-toolbar.user-hidden {
+  display: none !important;
+}
+
+/* Container-level hiding classes (affects all viewers including compare mode) */
+.hide-navigation .iiif-toolbar {
+  display: none !important;
+}
+.hide-pages .iiif-canvas-nav {
+  display: none !important;
+}
+.hide-manifest .iiif-manifest-panel {
+  display: none !important;
+}
+.hide-annotations .iiif-annotation-panel {
+  display: none !important;
+}
+.hide-vision .iiif-cv-panel {
+  display: none !important;
+}
+.hide-compare .iiif-compare-panel {
+  display: none !important;
+}
+
+/* Hide main viewer's panels when in compare mode (direct children only) */
+.iiif-compare-active > .iiif-canvas-nav,
+.iiif-compare-active > .iiif-manifest-panel,
+.iiif-compare-active > .iiif-annotation-panel,
+.iiif-compare-active > .iiif-cv-panel,
+.iiif-compare-active > .iiif-toolbar,
+.iiif-compare-active > .iiif-toc-container {
+  display: none !important;
+}
+
+/* =============================================
+   8. Manifest Panel
+   ============================================= */
+
+.iiif-manifest-panel {
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  max-height: 70vh;
+  min-width: 120px;
+  max-width: 320px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.iiif-manifest-panel:has(.iiif-panel-body.collapsed) {
+  width: 120px;
+  min-width: 120px;
+}
+
+.iiif-manifest-panel-body {
+  padding: 8px 10px;
+  overflow-y: auto;
+}
+.iiif-manifest-panel-body::-webkit-scrollbar { width: 6px; }
+.iiif-manifest-panel-body::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+}
+
+.iiif-manifest-panel-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0;
+  font-size: 11px;
+}
+.iiif-manifest-panel-row + .iiif-manifest-panel-row {
+  border-top: 1px solid var(--border-color-light);
+}
+
+.iiif-manifest-panel-label {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.iiif-manifest-panel-value {
+  color: var(--text-primary);
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.iiif-manifest-panel-value a {
+  color: var(--link-color);
+  text-decoration: none;
+}
+.iiif-manifest-panel-value a:hover {
+  text-decoration: underline;
+}
+
+.iiif-manifest-panel-logo {
+  max-width: 100px;
+  max-height: 50px;
+  border-radius: 4px;
+  margin-top: 4px;
+}
+
+.iiif-manifest-panel-separator {
+  height: 1px;
+  background: var(--border-color-light);
+  margin: 6px 0;
+}
+
+/* =============================================
+   9. Canvas List (Compare Mode)
+   ============================================= */
+
+.iiif-canvas-list {
+  top: calc(clamp(2rem, 5vh, 3rem) + 2.2rem + 0.5rem);
+  right: clamp(2rem, 6vw, 4rem);
+  width: 280px;
+  max-height: 60vh;
+  z-index: 1000;
+}
+
+.iiif-canvas-list-header {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-secondary);
+}
+
+.iiif-canvas-list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: default;
+}
+.iiif-canvas-list-item:hover {
+  background: var(--hover-bg);
+}
+
+.iiif-canvas-list-item-img {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  border-radius: 2px;
+  background: var(--input-bg);
+  flex-shrink: 0;
+}
+
+.iiif-canvas-list-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.iiif-canvas-list-item-label {
+  font-size: 11px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.iiif-canvas-list-add {
+  display: flex;
+  gap: 4px;
+  padding: 8px;
+  border-top: 1px solid var(--border-color);
+  position: relative;
+  z-index: 10;
+  pointer-events: auto;
+}
+
+.iiif-canvas-list-add-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  color: var(--text-on-hover);
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  outline: none;
+  pointer-events: auto;
+}
+.iiif-canvas-list-add-input::placeholder {
+  color: var(--input-placeholder);
+}
+.iiif-canvas-list-add-input:focus {
+  border-color: var(--focus-border);
+}
+
+.iiif-canvas-list-add-btn {
+  background: var(--button-bg);
+  border: 1px solid var(--button-border);
+  border-radius: 4px;
+  color: var(--text-on-hover);
+  width: 28px;
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  pointer-events: auto;
+}
+.iiif-canvas-list-add-btn:hover {
+  background: var(--button-bg-hover);
+}
+
+/* =============================================
+   10. Comparison Mode
+   ============================================= */
+
+.iiif-compare-wrapper {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+}
+
+.iiif-compare-viewers {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: row;
+}
+
+.iiif-compare-environment {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+  background-color: #000;
+}
+.iiif-compare-environment + .iiif-compare-environment {
+  border-left: 1px solid var(--border-color);
+}
+
+.iiif-compare-environment-header {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--border-color-light);
+  font-family: var(--font-family);
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  z-index: 10;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.iiif-compare-environment-viewer {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+}
+.iiif-compare-environment-viewer:active {
+  cursor: grabbing;
+}
+
+/* =============================================
+   11. Annotation Overlay Elements
+   ============================================= */
+
+.iiif-annotation-point {
+  overflow: visible !important;
+}
+.iiif-annotation-point:hover .iiif-annotation-pin {
+  transform: rotate(-45deg) scale(1.2);
+}
+
+.iiif-annotation-pin {
+  transition: transform var(--transition-fast);
+}
+
+.iiif-annotation-svg {
+  overflow: visible;
+}
+.iiif-annotation-svg svg {
+  pointer-events: all;
+}
+
+.iiif-annotation-label a {
+  color: var(--link-color);
+  text-decoration: underline;
+}
+.iiif-annotation-label p {
+  margin: 2px 0;
+}
+
+/* =============================================
+   12. Light Theme
+   ============================================= */
+
+.theme-light {
+  --panel-bg: rgba(255, 255, 255, 0.9);
+  --border-color: rgba(0, 0, 0, 0.12);
+  --border-color-light: rgba(0, 0, 0, 0.08);
+  --text-primary: #222;
+  --text-secondary: #555;
+  --text-muted: #777;
+  --text-dimmed: #999;
+  --text-on-hover: #000;
+  --hover-bg: rgba(0, 0, 0, 0.06);
+  --active-bg: rgba(var(--color-primary), 0.1);
+  --input-bg: rgba(0, 0, 0, 0.05);
+  --input-border: rgba(0, 0, 0, 0.15);
+  --input-placeholder: rgba(0, 0, 0, 0.4);
+  --scrollbar-thumb: rgba(0, 0, 0, 0.15);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.25);
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  --link-color: rgba(50, 100, 200, 0.9);
+}
+
+.theme-light .iiif-toolbar-button svg {
+  fill: #333;
+}
+.theme-light .iiif-toolbar-button:hover {
+  background-color: rgba(0, 0, 0, 0.1);
+}
+.theme-light .iiif-toolbar-button:active {
+  background-color: rgba(0, 0, 0, 0.15);
+}
+.theme-light .iiif-toolbar-divider-block {
+  background-color: rgba(0, 0, 0, 0.3);
+}
