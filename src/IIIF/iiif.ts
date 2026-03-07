@@ -77,6 +77,7 @@ export class IIIFViewer {
     private cvPanel?: HTMLDivElement;
     private cvPanelBody?: HTMLDivElement;
     private cvVideo?: HTMLVideoElement;
+    private cvDisplayCanvas?: HTMLCanvasElement;
 
     private cvStatusEl?: HTMLSpanElement;
     private cvToggleBtn?: HTMLButtonElement;
@@ -378,19 +379,24 @@ export class IIIFViewer {
         this.cvPanelBody = document.createElement('div');
         this.cvPanelBody.className = 'iiif-cv-panel-body collapsed';
 
-        // Video element — displayed directly with CSS mirroring
-        // autoplay + muted + playsinline: standard AR site pattern for smooth frame delivery
+        // Hidden video element — data source only, not displayed.
+        // We render to a canvas instead (see below) to bypass Chrome's video
+        // compositor, which can be throttled on certain hardware/driver combos.
         this.cvVideo = document.createElement('video');
         this.cvVideo.setAttribute('playsinline', '');
         this.cvVideo.setAttribute('autoplay', '');
-        this.cvVideo.setAttribute('disablepictureinpicture', '');
         this.cvVideo.muted = true;
-        this.cvVideo.className = 'iiif-cv-panel-video';
+        // Must stay in DOM and rendered (not display:none) or Chrome won't start the source.
+        // Make it 1x1px offscreen so it doesn't affect layout.
         Object.assign(this.cvVideo.style, {
-            transform: 'scaleX(-1)',
-            willChange: 'transform',  // GPU layer promotion — avoids compositor repaints
+            position: 'absolute', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none',
         });
         this.cvPanelBody.appendChild(this.cvVideo);
+
+        // Display canvas — webcam feed drawn here via drawImage()
+        this.cvDisplayCanvas = document.createElement('canvas');
+        this.cvDisplayCanvas.className = 'iiif-cv-panel-video';
+        this.cvPanelBody.appendChild(this.cvDisplayCanvas);
 
         this.cvStatusEl = document.createElement('span');
         this.cvStatusEl.className = 'iiif-cv-panel-status';
@@ -428,24 +434,10 @@ export class IIIFViewer {
                 this.cvToggleBtn!.textContent = 'Start';
                 this.cvToggleBtn!.classList.remove('active');
                 this.cvGestureBtn!.style.display = 'none';
-                // DIAGNOSTIC: Reinitialize renderer after CV stops
-                if (!this.renderer) {
-                    console.log('[CV diag] Reinitializing renderer...');
-                    await this.initializeRenderer();
-                }
                 return;
             }
 
             try {
-                // DIAGNOSTIC: Fully destroy WebGPU device to free GPU resources before webcam.
-                // Last test only stopped the render loop but left the device alive.
-                if (this.renderer) {
-                    this.stopRenderLoop();
-                    this.renderer.destroy();
-                    this.renderer = undefined;
-                    console.log('[CV diag] WebGPU device destroyed');
-                }
-
                 if (!this.cvController) {
                     const { CVController } = await import('./iiif-cv');
                     this.cvController = new CVController(this.cvVideo!, {
@@ -460,11 +452,11 @@ export class IIIFViewer {
                             this.camera.springZoomByFactor(factor);
                             this.markDirty();
                         },
-                    }, 800);
+                    }, 800, this.cvDisplayCanvas);
+                    await this.cvController.init();
                 }
 
-                // DIAGNOSTIC: Start video-only (no MediaPipe, no WebGPU) to isolate capture lag.
-                await this.cvController.start(true);
+                await this.cvController.start();
                 this.cvToggleBtn!.textContent = 'Stop';
                 this.cvToggleBtn!.classList.add('active');
                 this.cvGestureBtn!.style.display = '';

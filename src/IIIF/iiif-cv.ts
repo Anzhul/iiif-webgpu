@@ -9,6 +9,10 @@
  * Runs MediaPipe on the main thread with VIDEO running mode.
  * Uses requestVideoFrameCallback to sync detection with actual frame delivery.
  * Passes the video element directly to detectForVideo() — no ImageBitmap overhead.
+ *
+ * Display: Renders webcam feed to a <canvas> via drawImage() instead of displaying
+ * the <video> element directly. This bypasses Chrome's compositor layer for the video,
+ * which can be throttled on certain hardware/driver combos. AR SDKs use this same approach.
  */
 
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
@@ -39,7 +43,14 @@ export interface CVCallbacks {
 }
 
 export class CVController {
+    /** Hidden video element — data source only, not displayed */
     video: HTMLVideoElement;
+    /** Display canvas — webcam feed rendered here via drawImage() */
+    displayCanvas: HTMLCanvasElement | null;
+
+    private displayCtx: CanvasRenderingContext2D | null = null;
+    private displayRafId = 0;
+    private frameReader: ReadableStreamDefaultReader<VideoFrame> | null = null;
 
     private handLandmarker: HandLandmarker | null = null;
     private stream: MediaStream | null = null;
@@ -57,10 +68,14 @@ export class CVController {
     // Callbacks
     private callbacks: CVCallbacks;
 
-    constructor(video: HTMLVideoElement, callbacks: CVCallbacks, panSensitivity = 800) {
+    constructor(video: HTMLVideoElement, callbacks: CVCallbacks, panSensitivity = 800, displayCanvas?: HTMLCanvasElement) {
         this.video = video;
         this.callbacks = callbacks;
         this.panSensitivity = panSensitivity;
+        this.displayCanvas = displayCanvas ?? null;
+        if (this.displayCanvas) {
+            this.displayCtx = this.displayCanvas.getContext('2d');
+        }
     }
 
     async init(): Promise<void> {
@@ -79,20 +94,30 @@ export class CVController {
         this.callbacks.onStatusChange?.('Ready');
     }
 
-    /** Start webcam + detection. Set videoOnly=true to skip detection (diagnostic). */
-    async start(videoOnly = false): Promise<void> {
+    async start(): Promise<void> {
         if (this.running) return;
 
         this.callbacks.onStatusChange?.('Starting webcam...');
 
         try {
-            // No width/height constraints — let the camera use its native resolution.
-            // Forcing non-native resolution on Windows can cause Chrome's MediaFoundation
-            // pipeline to do expensive software downscaling, throttling frame delivery.
+            // Two-step capture — matches Cosium/EyeBuyDirect pattern.
+            // Step 1: "prime" the capture pipeline with a bare request.
+            // This initializes MediaFoundation and gets permission in one shot.
+            const primeStream = await navigator.mediaDevices.getUserMedia({
+                video: true,
+                audio: false,
+            });
+            // Close the priming stream before requesting the real one
+            for (const t of primeStream.getTracks()) t.stop();
+
+            // Step 2: Request the actual stream with specific constraints.
+            // Bare number values (not {ideal:X}) and no frameRate — matches working AR SDKs.
             this.stream = await navigator.mediaDevices.getUserMedia({
+                audio: false,
                 video: {
-                    frameRate: { ideal: 30 },
-                    facingMode: 'user',
+                    width: 640,
+                    height: 480,
+                    facingMode: { ideal: 'user' },
                 },
             });
         } catch (err: any) {
@@ -108,7 +133,7 @@ export class CVController {
 
         this.video.srcObject = this.stream;
 
-        // Wait for actual frame data before playing — matches AR site pattern
+        // Wait for frame data before playing
         await new Promise<void>((resolve) => {
             if (this.video.readyState >= 2) {
                 resolve();
@@ -124,19 +149,29 @@ export class CVController {
             console.log(`Webcam: ${settings.width}x${settings.height} @ ${settings.frameRate}fps`);
         }
 
+        // Size display canvas to match video
+        if (this.displayCanvas && this.displayCtx) {
+            this.displayCanvas.width = this.video.videoWidth || 320;
+            this.displayCanvas.height = this.video.videoHeight || 240;
+        }
+
         this.running = true;
         this.resetTracking();
-
-        if (videoOnly) {
-            this.callbacks.onStatusChange?.('Video only (no detection)');
-        } else {
-            this.callbacks.onStatusChange?.('Tracking');
-            this.scheduleDetection();
-        }
+        this.callbacks.onStatusChange?.('Tracking');
+        this.scheduleDetection();
+        this.startDisplayLoop();
     }
 
     stop(): void {
         this.running = false;
+        if (this.displayRafId) {
+            cancelAnimationFrame(this.displayRafId);
+            this.displayRafId = 0;
+        }
+        if (this.frameReader) {
+            this.frameReader.cancel().catch(() => {});
+            this.frameReader = null;
+        }
         if (this.stream) {
             for (const track of this.stream.getTracks()) {
                 track.stop();
@@ -145,6 +180,10 @@ export class CVController {
         }
         this.video.srcObject = null;
         this.resetTracking();
+        // Clear display canvas
+        if (this.displayCtx && this.displayCanvas) {
+            this.displayCtx.clearRect(0, 0, this.displayCanvas.width, this.displayCanvas.height);
+        }
         this.callbacks.onStatusChange?.('Stopped');
     }
 
@@ -162,17 +201,96 @@ export class CVController {
         this.lastPinchDist = undefined;
     }
 
+    /**
+     * Pull frames directly from the camera track via MediaStreamTrackProcessor.
+     * Completely bypasses the <video> element's decode/compositor pipeline.
+     * Falls back to drawImage(video) if the API isn't available.
+     */
+    private startDisplayLoop(): void {
+        if (!this.displayCtx || !this.displayCanvas) return;
+
+        const track = this.stream?.getVideoTracks()[0];
+
+        // Try MediaStreamTrackProcessor (Insertable Streams API)
+        if (track && typeof (globalThis as any).MediaStreamTrackProcessor !== 'undefined') {
+            console.log('[CV] Using MediaStreamTrackProcessor for frame delivery');
+            this.startTrackProcessorLoop(track);
+        } else {
+            console.log('[CV] Falling back to drawImage(video) for frame delivery');
+            this.startDrawImageLoop();
+        }
+    }
+
+    /** Pull VideoFrames directly from the track — no video element involved */
+    private startTrackProcessorLoop(track: MediaStreamTrack): void {
+        const ctx = this.displayCtx!;
+        const canvas = this.displayCanvas!;
+
+        const processor = new (globalThis as any).MediaStreamTrackProcessor({ track });
+        const reader = processor.readable.getReader() as ReadableStreamDefaultReader<VideoFrame>;
+        this.frameReader = reader;
+
+        const readFrame = async () => {
+            try {
+                while (this.running) {
+                    const { value: frame, done } = await reader.read();
+                    if (done || !this.running) {
+                        frame?.close();
+                        break;
+                    }
+
+                    // Size canvas on first frame
+                    if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+                        canvas.width = frame.displayWidth;
+                        canvas.height = frame.displayHeight;
+                    }
+
+                    // Mirror horizontally and draw
+                    ctx.save();
+                    ctx.scale(-1, 1);
+                    ctx.drawImage(frame, -canvas.width, 0, canvas.width, canvas.height);
+                    ctx.restore();
+
+                    frame.close();
+                }
+            } catch {
+                // Reader cancelled on stop, expected
+            }
+        };
+
+        readFrame();
+    }
+
+    /** Fallback: draw from video element buffer */
+    private startDrawImageLoop(): void {
+        const ctx = this.displayCtx!;
+        const canvas = this.displayCanvas!;
+
+        const draw = () => {
+            if (!this.running) return;
+            if (this.video.readyState >= 2) {
+                ctx.save();
+                ctx.scale(-1, 1);
+                ctx.drawImage(this.video, -canvas.width, 0, canvas.width, canvas.height);
+                ctx.restore();
+            }
+            this.displayRafId = requestAnimationFrame(draw);
+        };
+
+        this.displayRafId = requestAnimationFrame(draw);
+    }
+
     private scheduleDetection(): void {
         if (!this.running) return;
 
         if ('requestVideoFrameCallback' in this.video) {
             (this.video as any).requestVideoFrameCallback((_now: number, metadata: any) => {
                 if (!this.running) return;
+
                 this.detectFrame(metadata.mediaTime * 1000);
                 this.scheduleDetection();
             });
         } else {
-            // Fallback for browsers without requestVideoFrameCallback
             requestAnimationFrame(() => {
                 if (!this.running) return;
                 this.detectFrame(performance.now());
