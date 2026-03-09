@@ -88,7 +88,7 @@ export class IIIFViewer {
     private comparePanel?: HTMLDivElement;
     private settingsPanel?: HTMLDivElement;
     private settingsPanelBody?: HTMLDivElement;
-    private toolsWrapper?: HTMLDivElement;
+    private docks: Map<string, HTMLDivElement> = new Map();
     private fullscreenBtn?: HTMLButtonElement;
 
     // State
@@ -156,31 +156,28 @@ export class IIIFViewer {
         this.annotationManager = new AnnotationManager(this.overlayManager);
         if (!this.CONFIG.suppressNavigation) {
             this.setupCanvasNav();
-            this.setupManifestPanel();
         }
         if (!this.CONFIG.suppressNavigation && !this.CONFIG.suppressSettings) {
             this.setupTOC();
+            this.setupSettingsPanel();
         }
         this.setupAnnotationPanel();
+        if (!this.CONFIG.suppressNavigation) {
+            this.setupManifestPanel();
+        }
         this.setupCVPanel();
         if (this.CONFIG.enableCompare) {
             this.setupComparePanel();
-        }
-        if (!this.CONFIG.suppressNavigation && !this.CONFIG.suppressSettings) {
-            this.setupSettingsPanel();
         }
 
         if (this.CONFIG.enableToolbar) {
             const tb = this.CONFIG.toolbar;
 
-            // Navigation toolbar: zoom, reset, annotations, layers (fullscreen moved to tools wrapper)
-            const hasButtons = tb?.zoom || tb?.annotations || tb?.layers;
-            if (hasButtons) {
+            // Navigation toolbar: zoom in, zoom out, reset
+            if (tb?.zoom) {
                 this.canvasToolbar = new ToolBar(container, {
-                    zoom: tb?.zoom,
-                    reset: tb?.zoom, // Show reset when zoom is enabled
-                    annotations: tb?.annotations,
-                    layers: tb?.layers,
+                    zoom: true,
+                    reset: true,
                     variant: 'navigation',
                     position: 'bottom-center',
                 });
@@ -230,6 +227,47 @@ export class IIIFViewer {
         this.overlayManager = new IIIFOverlayManager(this.overlayContainer, this.viewport);
     }
 
+    /**
+     * FLIP animation for dock children: records positions before a DOM change,
+     * then after the change animates children from old to new positions.
+     */
+    private animateDockReflow(dock: HTMLElement, exclude?: HTMLElement): void {
+        // First: record current positions of all children
+        const children = Array.from(dock.children) as HTMLElement[];
+        const firstRects = new Map<HTMLElement, DOMRect>();
+        for (const child of children) {
+            if (child !== exclude) {
+                firstRects.set(child, child.getBoundingClientRect());
+            }
+        }
+
+        // The DOM change happens outside this call (caller does it).
+        // We use requestAnimationFrame to capture the "Last" positions after layout.
+        requestAnimationFrame(() => {
+            for (const [child, firstRect] of firstRects) {
+                if (!child.isConnected) continue;
+                const lastRect = child.getBoundingClientRect();
+                const dy = firstRect.top - lastRect.top;
+                if (Math.abs(dy) < 1) continue;
+
+                // Invert: offset to old position
+                child.style.transition = 'none';
+                child.style.transform = `translateY(${dy}px)`;
+
+                // Play: animate to new position
+                requestAnimationFrame(() => {
+                    child.style.transition = 'transform 0.25s ease';
+                    child.style.transform = '';
+                    const onEnd = () => {
+                        child.style.transition = '';
+                        child.removeEventListener('transitionend', onEnd);
+                    };
+                    child.addEventListener('transitionend', onEnd);
+                });
+            }
+        });
+    }
+
     /** Make a panel draggable by its header */
     private makePanelDraggable(panel: HTMLElement, header: HTMLElement): void {
         let isDragging = false;
@@ -237,6 +275,38 @@ export class IIIFViewer {
         let startY = 0;
         let startLeft = 0;
         let startTop = 0;
+
+        const getDocks = (): HTMLElement[] => {
+            return Array.from(this.docks.values());
+        };
+
+        const hitTestDock = (clientX: number, clientY: number): HTMLElement | null => {
+            for (const dock of getDocks()) {
+                const rect = dock.getBoundingClientRect();
+                // Use a generous zone: the dock area + 40px margin for easy targeting
+                const margin = 40;
+                if (
+                    clientX >= rect.left - margin &&
+                    clientX <= rect.right + margin &&
+                    clientY >= rect.top - margin &&
+                    clientY <= rect.bottom + margin
+                ) {
+                    return dock;
+                }
+            }
+            return null;
+        };
+
+        const findInsertIndex = (dock: HTMLElement, clientY: number): number => {
+            const children = Array.from(dock.children) as HTMLElement[];
+            for (let i = 0; i < children.length; i++) {
+                const childRect = children[i].getBoundingClientRect();
+                if (clientY < childRect.top + childRect.height / 2) {
+                    return i;
+                }
+            }
+            return children.length;
+        };
 
         const onMouseDown = (e: MouseEvent) => {
             // Don't drag if clicking on a button
@@ -257,7 +327,18 @@ export class IIIFViewer {
             startLeft = rect.left - containerRect.left;
             startTop = rect.top - containerRect.top;
 
+            // Reparent to main container for free dragging
+            const parentDock = panel.parentElement;
+            if (parentDock && parentDock !== this.container) {
+                // Animate remaining dock children before removing
+                if (parentDock.classList.contains('iiif-dock')) {
+                    this.animateDockReflow(parentDock, panel);
+                }
+                this.container.appendChild(panel);
+            }
+
             // Clear any CSS positioning that might interfere
+            panel.style.position = 'absolute';
             panel.style.right = 'auto';
             panel.style.bottom = 'auto';
             panel.style.transform = 'none';
@@ -285,12 +366,46 @@ export class IIIFViewer {
 
             panel.style.left = `${Math.max(0, Math.min(newLeft, maxLeft))}px`;
             panel.style.top = `${Math.max(0, Math.min(newTop, maxTop))}px`;
+
+            // Highlight dock if hovering over one
+            const targetDock = hitTestDock(e.clientX, e.clientY);
+            for (const dock of getDocks()) {
+                dock.classList.toggle('dock-highlight', dock === targetDock);
+            }
         };
 
-        const onMouseUp = () => {
+        const onMouseUp = (e: MouseEvent) => {
             if (!isDragging) return;
             isDragging = false;
             panel.classList.remove('dragging');
+
+            // Clear dock highlights
+            for (const dock of getDocks()) {
+                dock.classList.remove('dock-highlight');
+            }
+
+            // Check if dropped on a dock
+            const targetDock = hitTestDock(e.clientX, e.clientY);
+            if (targetDock) {
+                // Animate existing dock children before inserting
+                this.animateDockReflow(targetDock);
+
+                // Dock the panel: clear inline styles and insert into dock
+                panel.style.position = '';
+                panel.style.left = '';
+                panel.style.top = '';
+                panel.style.right = '';
+                panel.style.bottom = '';
+                panel.style.transform = '';
+
+                const insertIdx = findInsertIndex(targetDock, e.clientY);
+                const children = Array.from(targetDock.children);
+                if (insertIdx < children.length) {
+                    targetDock.insertBefore(panel, children[insertIdx]);
+                } else {
+                    targetDock.appendChild(panel);
+                }
+            }
         };
 
         this.addEventListener(header, 'mousedown', onMouseDown as EventListener);
@@ -307,6 +422,9 @@ export class IIIFViewer {
         title: string;
         initiallyCollapsed?: boolean;
         hidden?: boolean;
+        parent?: HTMLElement;
+        draggable?: boolean;
+        dock?: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
     }): { panel: HTMLDivElement; header: HTMLDivElement; body: HTMLDivElement; collapseBtn: HTMLButtonElement } {
         const panel = document.createElement('div');
         panel.className = `iiif-panel ${options.className}`;
@@ -336,8 +454,19 @@ export class IIIFViewer {
             collapseBtn.textContent = body.classList.contains('collapsed') ? '+' : '−';
         });
 
-        this.makePanelDraggable(panel, header);
-        this.container.appendChild(panel);
+        if (options.draggable !== false) {
+            this.makePanelDraggable(panel, header);
+        }
+        if (options.dock) {
+            const dock = this.docks.get(options.dock);
+            if (dock) {
+                dock.appendChild(panel);
+            } else {
+                this.container.appendChild(panel);
+            }
+        } else {
+            (options.parent ?? this.container).appendChild(panel);
+        }
 
         return { panel, header, body, collapseBtn };
     }
@@ -369,6 +498,7 @@ export class IIIFViewer {
             className: 'iiif-manifest-panel',
             title: 'Manifest',
             initiallyCollapsed: true,
+            dock: 'top-right',
         });
         this.metadataPanelBody = body;
     }
@@ -379,6 +509,7 @@ export class IIIFViewer {
             title: 'Annotations',
             initiallyCollapsed: true,
             hidden: true,
+            dock: 'top-right',
         });
         this.annotationPanel = panel;
         this.annotationPanelBody = body;
@@ -389,6 +520,7 @@ export class IIIFViewer {
             className: 'iiif-cv-panel',
             title: 'Vision',
             initiallyCollapsed: true,
+            dock: 'top-left',
         });
         this.cvPanel = panel;
         this.cvPanelBody = body;
@@ -504,10 +636,6 @@ export class IIIFViewer {
     }
 
     private setupSettingsPanel() {
-        // Create wrapper to hold both fullscreen button and tools panel
-        this.toolsWrapper = document.createElement('div');
-        this.toolsWrapper.className = 'iiif-tools-wrapper';
-
         // Create fullscreen button
         this.fullscreenBtn = document.createElement('button');
         this.fullscreenBtn.className = 'iiif-fullscreen-btn';
@@ -542,7 +670,7 @@ export class IIIFViewer {
         header.className = 'iiif-panel-header iiif-settings-panel-header';
 
         const title = document.createElement('span');
-        title.textContent = 'Tools';
+        title.textContent = 'Settings';
         header.appendChild(title);
 
         const collapseBtn = document.createElement('button');
@@ -598,6 +726,65 @@ export class IIIFViewer {
             this.settingsPanelBody.appendChild(item);
         }
 
+        // --- Divider ---
+        const divider = document.createElement('div');
+        divider.className = 'iiif-settings-divider';
+        this.settingsPanelBody.appendChild(divider);
+
+        // --- Background color picker ---
+        const colorItem = document.createElement('label');
+        colorItem.className = 'iiif-settings-panel-item iiif-settings-color-item';
+
+        const colorLabel = document.createElement('span');
+        colorLabel.textContent = 'Background';
+
+        const colorInput = document.createElement('input');
+        colorInput.type = 'color';
+        colorInput.className = 'iiif-settings-color-input';
+        colorInput.value = '#1a1a1a';
+
+        this.addEventListener(colorInput, 'input', () => {
+            const hex = colorInput.value;
+            const r = parseInt(hex.slice(1, 3), 16) / 255;
+            const g = parseInt(hex.slice(3, 5), 16) / 255;
+            const b = parseInt(hex.slice(5, 7), 16) / 255;
+            if (this.renderer) {
+                this.renderer.setClearColor(r, g, b);
+            }
+        });
+
+        colorItem.appendChild(colorLabel);
+        colorItem.appendChild(colorInput);
+        this.settingsPanelBody.appendChild(colorItem);
+
+        // --- Theme toggle switch ---
+        const themeItem = document.createElement('label');
+        themeItem.className = 'iiif-settings-panel-item iiif-settings-color-item';
+
+        const themeLabel = document.createElement('span');
+        themeLabel.textContent = 'Light theme';
+
+        const toggleWrapper = document.createElement('label');
+        toggleWrapper.className = 'iiif-toggle-switch';
+
+        const themeCheckbox = document.createElement('input');
+        themeCheckbox.type = 'checkbox';
+        themeCheckbox.checked = false;
+
+        const slider = document.createElement('span');
+        slider.className = 'iiif-toggle-slider';
+
+        toggleWrapper.appendChild(themeCheckbox);
+        toggleWrapper.appendChild(slider);
+
+        this.addEventListener(themeCheckbox, 'change', () => {
+            this.container.classList.toggle('theme-light', themeCheckbox.checked);
+        });
+
+        themeItem.appendChild(themeLabel);
+        themeItem.appendChild(toggleWrapper);
+        this.settingsPanelBody.appendChild(themeItem);
+
         this.settingsPanel.appendChild(this.settingsPanelBody);
 
         this.addEventListener(collapseBtn, 'click', () => {
@@ -605,12 +792,22 @@ export class IIIFViewer {
             collapseBtn.textContent = this.settingsPanelBody!.classList.contains('collapsed') ? '+' : '−';
         });
 
-        this.toolsWrapper.appendChild(this.settingsPanel);
-        this.toolsWrapper.appendChild(this.fullscreenBtn);
+        // Make settings panel draggable
+        this.makePanelDraggable(this.settingsPanel, header);
 
-        // Make the wrapper draggable by the tools panel header
-        this.makePanelDraggable(this.toolsWrapper, header);
-        this.container.appendChild(this.toolsWrapper);
+        // Create docks (four corners)
+        const dockPositions = ['top-right', 'top-left', 'bottom-right', 'bottom-left'] as const;
+        for (const pos of dockPositions) {
+            const dock = document.createElement('div');
+            dock.className = `iiif-dock iiif-dock-${pos}`;
+            this.docks.set(pos, dock);
+            this.container.appendChild(dock);
+        }
+
+        // Settings panel in top-right dock
+        this.docks.get('top-right')!.appendChild(this.settingsPanel);
+        // Fullscreen button in bottom-right dock
+        this.docks.get('bottom-right')!.appendChild(this.fullscreenBtn);
     }
 
     private updateComparePanel() {

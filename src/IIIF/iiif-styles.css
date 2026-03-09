@@ -18,7 +18,7 @@
   --color-error: 231, 76, 60;
 
   /* --- Backgrounds --- */
-  --panel-bg: rgba(0, 0, 0, 0.5);
+  --panel-bg: rgba(0, 0, 0, 0.6);
 
   /* --- Borders --- */
   --border-color: rgba(255, 255, 255, 0);
@@ -168,8 +168,10 @@
 .iiif-toolbar {
   position: absolute;
   height: 2.2rem;
+  width: 8rem;
   top: clamp(2rem, 5vh, 3rem);
-  right: clamp(2rem, 6vw, 4rem);
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 1000;
   background: var(--panel-bg);
   border: 1px solid var(--border-color);
@@ -179,10 +181,16 @@
   transition: var(--transition);
   display: flex;
   align-items: center;
-  justify-content: space-around;
-  padding: 0 0.5rem;
+  justify-content: center;
+  padding: 0;
   cursor: default;
   font-family: var(--font-family);
+}
+
+.iiif-toolbar-btn-group {
+  display: flex;
+  align-items: center;
+  height: 100%;
 }
 
 .iiif-toolbar.hidden {
@@ -190,31 +198,6 @@
   pointer-events: none;
 }
 
-.iiif-toolbar-main-tools,
-.iiif-toolbar-secondary-tools {
-  height: 100%;
-  display: flex;
-  justify-content: space-around;
-}
-.iiif-toolbar-main-tools { left: 0; }
-.iiif-toolbar-secondary-tools { right: 0; }
-
-.iiif-toolbar-divider {
-  position: relative;
-  display: flex;
-  height: 100%;
-  width: 1rem;
-}
-
-.iiif-toolbar-divider-block {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 1px;
-  height: 40%;
-  background-color: rgba(255, 255, 255, 0.65);
-}
 
 .iiif-toolbar-button {
   position: relative;
@@ -235,18 +218,6 @@
 }
 .iiif-toolbar-button:active {
   background-color: rgba(0, 0, 0, 0.45);
-}
-.iiif-toolbar-button-fullscreen.active {
-  background-color: rgba(0, 0, 0, 0.35);
-}
-
-/* Text-based toolbar buttons */
-.iiif-toolbar-button-text {
-  font-size: 11px;
-  font-weight: 500;
-  color: #fff;
-  padding: 0 0.6rem;
-  min-width: auto;
 }
 
 /* Toolbar Position Variants */
@@ -394,8 +365,6 @@
    ============================================= */
 
 .iiif-annotation-panel {
-  left: 8px;
-  bottom: 8px;
   max-height: 40vh;
   min-width: 120px;
   max-width: 240px;
@@ -471,8 +440,6 @@
    ============================================= */
 
 .iiif-cv-panel {
-  left: 8px;
-  bottom: 8px;
   min-width: 120px;
   max-width: 200px;
 }
@@ -528,8 +495,8 @@
    ============================================= */
 
 .iiif-compare-panel {
-  top: calc(clamp(2rem, 5vh, 3rem) + 2.2rem + 0.5rem);
-  right: clamp(2rem, 6vw, 4rem);
+  top: clamp(2rem, 5vh, 3rem);
+  right: calc(clamp(2rem, 6vw, 4rem) + 170px);
   min-width: 120px;
   max-width: 200px;
   width: 120px;
@@ -544,7 +511,11 @@
   pointer-events: auto;
 }
 
-/* When collapsed, hide the body content */
+/* When collapsed, hide the body content and reset width */
+.iiif-compare-panel.collapsed {
+  width: 120px;
+  max-width: 200px;
+}
 .iiif-compare-panel.collapsed .iiif-panel-body,
 .iiif-compare-panel.collapsed .iiif-canvas-list-body,
 .iiif-compare-panel.collapsed .iiif-canvas-list-add {
@@ -596,22 +567,62 @@
    7c. Tools Panel (Panel Visibility)
    ============================================= */
 
-/* Wrapper for fullscreen button + tools panel */
-.iiif-tools-wrapper {
+/* Dock containers — four corners */
+.iiif-dock {
   position: absolute;
-  top: clamp(2rem, 5vh, 3rem);
-  right: clamp(2rem, 6vw, 4rem);
   display: flex;
-  flex-direction: row;
-  align-items: flex-start;
+  flex-direction: column;
+  align-items: stretch;
   gap: 6px;
   z-index: 100;
+  pointer-events: none;
+  overflow: visible;
+  min-width: 120px;
+}
+.iiif-dock > * {
   pointer-events: auto;
 }
-.iiif-tools-wrapper.dragging {
-  opacity: 0.9;
-  z-index: 3000;
+.iiif-dock > .iiif-panel {
+  position: relative;
+  right: auto;
+  left: auto;
+  top: auto;
+  bottom: auto;
+  transform: none;
 }
+
+/* Corner positions */
+.iiif-dock-top-right {
+  top: clamp(2rem, 5vh, 3rem);
+  right: clamp(2rem, 6vw, 4rem);
+  align-items: flex-end;
+}
+.iiif-dock-top-left {
+  top: clamp(2rem, 5vh, 3rem);
+  left: clamp(2rem, 6vw, 4rem);
+  align-items: flex-start;
+}
+.iiif-dock-bottom-right {
+  bottom: clamp(2rem, 5vh, 3rem);
+  right: clamp(2rem, 6vw, 4rem);
+  align-items: flex-end;
+  flex-direction: column-reverse;
+}
+.iiif-dock-bottom-left {
+  bottom: clamp(2rem, 5vh, 3rem);
+  left: clamp(2rem, 6vw, 4rem);
+  align-items: flex-start;
+  flex-direction: column-reverse;
+}
+
+/* Dock highlight when a panel is being dragged over it */
+.iiif-dock.dock-highlight {
+  outline: 2px dashed rgba(var(--color-primary), 0.5);
+  outline-offset: 4px;
+  border-radius: 8px;
+  background: rgba(var(--color-primary), 0.04);
+}
+
 
 /* Fullscreen button */
 .iiif-fullscreen-btn {
@@ -676,6 +687,80 @@
   cursor: pointer;
 }
 
+.iiif-settings-divider {
+  height: 1px;
+  background: var(--border-color-light);
+  margin: 6px 0;
+}
+
+.iiif-settings-color-item {
+  justify-content: space-between;
+}
+
+.iiif-settings-color-input {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border-color-light);
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+}
+
+.iiif-settings-color-input::-webkit-color-swatch-wrapper {
+  padding: 2px;
+}
+
+.iiif-settings-color-input::-webkit-color-swatch {
+  border: none;
+  border-radius: 2px;
+}
+
+.iiif-toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 32px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.iiif-toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.iiif-toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.iiif-toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  left: 2px;
+  bottom: 2px;
+  background: #ccc;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+
+.iiif-toggle-switch input:checked + .iiif-toggle-slider {
+  background: rgba(var(--color-primary), 0.6);
+}
+
+.iiif-toggle-switch input:checked + .iiif-toggle-slider::before {
+  transform: translateX(14px);
+  background: #fff;
+}
+
 /* User-hidden state for panels and toolbar */
 .iiif-panel.user-hidden,
 .iiif-toolbar.user-hidden {
@@ -717,10 +802,7 @@
    ============================================= */
 
 .iiif-manifest-panel {
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  max-height: 70vh;
+  max-height: 50vh;
   min-width: 120px;
   max-width: 320px;
   font-size: 13px;

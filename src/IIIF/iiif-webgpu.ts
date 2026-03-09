@@ -33,6 +33,9 @@ export class WebGPURenderer extends RendererBase {
     // Reusable buffer for uniform data to avoid per-frame allocations
     private uniformDataBuffer: Float32Array = new Float32Array(WebGPURenderer.MAX_TILES * WebGPURenderer.FLOATS_PER_TILE);
 
+    // Background clear color
+    private clearColor = { r: 0.1, g: 0.1, b: 0.1 };
+
     // Texture cache: tileId -> GPUTexture
     private textureCache: Map<string, GPUTexture> = new Map();
     private bindGroupCache: Map<string, GPUBindGroup> = new Map();
@@ -477,7 +480,7 @@ export class WebGPURenderer extends RendererBase {
             colorAttachments: [{
                 view: msaaView,
                 resolveTarget: swapChainView,
-                clearValue: { r: 0.1, g: 0.1, b: 0.1, a: 1.0 },
+                clearValue: { r: this.clearColor.r, g: this.clearColor.g, b: this.clearColor.b, a: 1.0 },
                 loadOp: 'clear',
                 storeOp: 'discard', // multisampled data discarded after resolve
             }],
@@ -492,6 +495,10 @@ export class WebGPURenderer extends RendererBase {
         renderPass.end();
         const commandBuffer = commandEncoder.finish();
         this.device.queue.submit([commandBuffer]);
+    }
+
+    setClearColor(r: number, g: number, b: number) {
+        this.clearColor = { r, g, b };
     }
 
     destroyTexture(tileId: string) {

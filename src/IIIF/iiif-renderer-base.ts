@@ -163,6 +163,7 @@ export abstract class RendererBase implements IIIFRenderer {
     abstract render(viewport: Viewport, tiles: TileRenderData[], thumbnail?: TileRenderData): void;
     abstract setVideoSource(video: HTMLVideoElement | null): void;
     abstract uploadTextureFromBitmap(tileId: string, bitmap: ImageBitmap): any;
+    abstract setClearColor(r: number, g: number, b: number): void;
     abstract destroyTexture(tileId: string): void;
     abstract clearTextureCache(): void;
     abstract destroy(): void;

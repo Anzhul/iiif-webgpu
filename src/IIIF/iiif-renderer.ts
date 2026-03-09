@@ -32,6 +32,7 @@ export interface IIIFRenderer {
     render(viewport: Viewport, tiles: TileRenderData[], thumbnail?: TileRenderData): void;
     setVideoSource(video: HTMLVideoElement | null): void;
     uploadTextureFromBitmap(tileId: string, bitmap: ImageBitmap): any;
+    setClearColor(r: number, g: number, b: number): void;
     destroyTexture(tileId: string): void;
     clearTextureCache(): void;
     destroy(): void;

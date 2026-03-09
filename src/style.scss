@@ -544,9 +544,6 @@ body{
 // ============================================================
 
 .iiif-annotation-panel {
-  position: absolute;
-  left: 8px;
-  bottom: 8px;
   z-index: 1500;
   background: rgba(20, 20, 30, 0.9);
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -683,9 +680,6 @@ body{
 // ============================================================
 
 .iiif-cv-panel {
-  position: absolute;
-  right: 8px;
-  bottom: 8px;
   z-index: 1500;
   background: rgba(20, 20, 30, 0.95);
   border: 1px solid rgba(255, 255, 255, 0.12);

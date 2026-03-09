@@ -49,6 +49,9 @@ export class WebGLRenderer extends RendererBase {
     private textureBoundsLocation?: WebGLUniformLocation | null;
     private textureLocation?: WebGLUniformLocation | null;
 
+    // Background clear color
+    private clearColor = { r: 0.1, g: 0.1, b: 0.1 };
+
     // Texture cache: tileId -> WebGLTexture
     private textureCache: Map<string, WebGLTexture> = new Map();
 
@@ -276,7 +279,7 @@ export class WebGLRenderer extends RendererBase {
             allTiles = tiles;
         }
 
-        this.gl.clearColor(0.1, 0.1, 0.1, 1.0);
+        this.gl.clearColor(this.clearColor.r, this.clearColor.g, this.clearColor.b, 1.0);
         this.gl.clear(this.gl.COLOR_BUFFER_BIT);
         this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
 
@@ -301,6 +304,10 @@ export class WebGLRenderer extends RendererBase {
         for (const tile of allTiles) {
             this.renderTile(tile, mvpMatrix, expand);
         }
+    }
+
+    setClearColor(r: number, g: number, b: number) {
+        this.clearColor = { r, g, b };
     }
 
     destroyTexture(tileId: string) {
