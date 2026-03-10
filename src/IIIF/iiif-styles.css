@@ -960,7 +960,10 @@
   gap: 8px;
   padding: 6px 8px;
   border-radius: 4px;
-  cursor: default;
+  cursor: grab;
+}
+.iiif-canvas-list-item:active {
+  cursor: grabbing;
 }
 .iiif-canvas-list-item:hover {
   background: var(--hover-bg);
@@ -986,6 +989,43 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+
+.iiif-canvas-list-rename {
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+.iiif-canvas-list-item:hover .iiif-canvas-list-rename {
+  opacity: 1;
+}
+
+.iiif-canvas-list-rename-input {
+  width: 100%;
+  background: var(--input-bg);
+  border: 1px solid rgba(var(--color-primary), 0.5);
+  border-radius: 3px;
+  color: var(--text-primary);
+  padding: 1px 4px;
+  font-size: 11px;
+  font-family: var(--font-family);
+  outline: none;
+}
+
+.iiif-canvas-list-item.dragging {
+  opacity: 0.85;
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+}
+
+.iiif-canvas-list-drag-placeholder {
+  border: 1px dashed var(--border-color);
+  border-radius: 4px;
+  margin: 2px 0;
+  opacity: 0.5;
 }
 
 .iiif-canvas-list-add {
@@ -1124,6 +1164,56 @@
 }
 .iiif-annotation-label p {
   margin: 2px 0;
+}
+
+/* =============================================
+   11b. Annotation Transition Utilities
+   ============================================= */
+
+/* Fade */
+.iiif-ann-fade-in {
+  opacity: 1;
+  transition: opacity 0.3s ease-in-out;
+}
+.iiif-ann-fade-out {
+  opacity: 0;
+  transition: opacity 0.3s ease-in-out;
+}
+
+/* Scale + Fade */
+.iiif-ann-scale-in {
+  opacity: 1;
+  transform-origin: center center;
+  animation: iiif-scale-in 0.3s ease-out forwards;
+}
+.iiif-ann-scale-out {
+  opacity: 0;
+  transform-origin: center center;
+  animation: iiif-scale-out 0.2s ease-in forwards;
+}
+@keyframes iiif-scale-in {
+  from { opacity: 0; scale: 0.85; }
+  to   { opacity: 1; scale: 1; }
+}
+@keyframes iiif-scale-out {
+  from { opacity: 1; scale: 1; }
+  to   { opacity: 0; scale: 0.85; }
+}
+
+/* Slide up + Fade */
+.iiif-ann-slide-in {
+  animation: iiif-slide-in 0.3s ease-out forwards;
+}
+.iiif-ann-slide-out {
+  animation: iiif-slide-out 0.2s ease-in forwards;
+}
+@keyframes iiif-slide-in {
+  from { opacity: 0; translate: 0 8px; }
+  to   { opacity: 1; translate: 0 0; }
+}
+@keyframes iiif-slide-out {
+  from { opacity: 1; translate: 0 0; }
+  to   { opacity: 0; translate: 0 8px; }
 }
 
 /* =============================================

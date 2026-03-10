@@ -64,6 +64,13 @@ const PANEL_HIDE_CLASS: Record<string, string> = {
     'compare': 'hide-compare',
 };
 
+/** Panels cloned per viewer instance (content-specific) */
+const PER_INSTANCE_PANELS: ReadonlySet<string> = new Set([
+    'navigation', 'pages', 'manifest', 'annotations',
+]);
+
+// Universal panels (settings, compare, gesture) exist only on the main viewer
+
 export interface LayoutState {
     version: 1;
     manifestUrl: string;
@@ -365,12 +372,16 @@ export class IIIFViewer {
         let spacerDock: HTMLElement | null = null;
 
         const getDocks = (): HTMLElement[] => {
-            return Array.from(this.docks.values());
+            // Query all docks in the container tree — includes wrapper docks
+            // and child viewer instance docks during compare mode
+            return Array.from(this.container.querySelectorAll('.iiif-dock')) as HTMLElement[];
         };
 
         const hitTestDock = (clientX: number, clientY: number): HTMLElement | null => {
             for (const dock of getDocks()) {
                 const rect = dock.getBoundingClientRect();
+                // Skip hidden/collapsed docks (display:none → zero-size rect)
+                if (rect.width === 0 && rect.height === 0) continue;
                 const margin = 40;
                 if (
                     clientX >= rect.left - margin &&
@@ -2302,6 +2313,8 @@ export class IIIFViewer {
             id?: string;
             style?: Record<string, string | undefined>;
             scaleWithZoom?: boolean;
+            activeClass?: string;
+            inactiveClass?: string;
         }
     ): string | undefined {
         if (!this.annotationManager) {
@@ -2328,6 +2341,8 @@ export class IIIFViewer {
             style: options?.style,
             content: Object.keys(content).length > 0 ? content : undefined,
             scaleWithZoom: options?.scaleWithZoom,
+            activeClass: options?.activeClass,
+            inactiveClass: options?.inactiveClass,
         });
 
         return id;
@@ -2515,6 +2530,33 @@ export class IIIFViewer {
             thumbnailServiceUrl: currentCanvas?.images[0]?.imageServiceUrl,
         }];
 
+        // Build per-instance panels config for child viewers
+        const childPanels: IIIFViewerPanels = {};
+        for (const key of PER_INSTANCE_PANELS) {
+            const val = this.panels[key as keyof IIIFViewerPanels];
+            if (val !== undefined) {
+                (childPanels as any)[key] = val;
+            }
+        }
+
+        // Collect universal panels with their current dock positions
+        const universalPanels: { element: HTMLElement; dockPosition: string | null }[] = [];
+        const getDockPosition = (el: HTMLElement): string | null => {
+            const parent = el.parentElement;
+            if (parent) {
+                for (const [pos, dock] of this.docks) {
+                    if (parent === dock) return pos;
+                }
+            }
+            return null;
+        };
+        if (this.settingsPanel) {
+            universalPanels.push({ element: this.settingsPanel, dockPosition: getDockPosition(this.settingsPanel) });
+        }
+        if (this.comparePanel) {
+            universalPanels.push({ element: this.comparePanel, dockPosition: getDockPosition(this.comparePanel) });
+        }
+
         this.comparisonController = new ComparisonController(this.container, {
             viewerOptions: {
                 enableOverlays: this.CONFIG.enableOverlays,
@@ -2523,26 +2565,35 @@ export class IIIFViewer {
                 enableCompare: false,
                 suppressSettings: true,
                 toolbar: { zoom: true },
+                panels: childPanels,
             },
             manifestUrl: this.currentLoadedUrl!,
             canvases,
             currentCanvasIndex: this.currentCanvasIndex,
             savedEntries: this.compareAddedEntries,
             listPanel: this.comparePanel,
+            universalPanels,
             onExit: () => {
                 this.exitCompareMode();
             },
             onSuspendParent: () => {
                 this.stopRenderLoop();
-                // Mark container as in compare mode to hide main viewer panels via CSS
                 this.container.classList.add('iiif-compare-active');
                 if (this.renderer?.canvas) this.renderer.canvas.style.display = 'none';
                 if (this.overlayContainer) this.overlayContainer.style.display = 'none';
+                // Hide main docks (universal panels will be in wrapper docks)
+                for (const dock of this.docks.values()) {
+                    dock.style.display = 'none';
+                }
             },
             onResumeParent: () => {
                 this.container.classList.remove('iiif-compare-active');
                 if (this.renderer?.canvas) this.renderer.canvas.style.display = '';
                 if (this.overlayContainer) this.overlayContainer.style.display = '';
+                // Restore main docks
+                for (const dock of this.docks.values()) {
+                    dock.style.display = '';
+                }
                 this.startRenderLoop();
                 this.markDirty();
             },
@@ -2562,9 +2613,14 @@ export class IIIFViewer {
         this.comparisonController = undefined;
 
         // Ensure viewer is fully visible (handles both single-parent and env mode exit)
+        this.container.classList.remove('iiif-compare-active');
         if (this.renderer?.canvas) this.renderer.canvas.style.display = '';
         if (this.overlayContainer) this.overlayContainer.style.display = '';
         if (this.canvasToolbar?.toolbar) this.canvasToolbar.toolbar.style.display = '';
+        // Restore main docks
+        for (const dock of this.docks.values()) {
+            dock.style.display = '';
+        }
 
         // Restore panels based on manifest data (they set their own display)
         this.updateCanvasNav();

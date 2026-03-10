@@ -62,6 +62,10 @@ export interface CustomAnnotation {
     };
     /** Whether annotation scales with zoom (default: true) */
     scaleWithZoom?: boolean;
+    /** CSS class applied when annotation is active/visible */
+    activeClass?: string;
+    /** CSS class applied when annotation is inactive/hidden */
+    inactiveClass?: string;
 }
 
 /** @deprecated Use CustomAnnotation instead */
@@ -125,7 +129,9 @@ export class AnnotationManager {
             worldY: annotation.y,
             worldWidth: annotation.width,
             worldHeight: annotation.height,
-            scaleWithZoom: annotation.scaleWithZoom !== false
+            scaleWithZoom: annotation.scaleWithZoom !== false,
+            activeClass: annotation.activeClass,
+            inactiveClass: annotation.inactiveClass,
         };
 
         this.customAnnotations.set(annotation.id, annotation);

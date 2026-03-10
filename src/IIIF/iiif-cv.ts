@@ -27,11 +27,25 @@ const PINKY_TIP = 20;
 
 const FINGERTIPS = [THUMB_TIP, INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP];
 
+// Hand skeleton connections (pairs of landmark indices)
+const HAND_CONNECTIONS = [
+    // Thumb
+    [0, 1], [1, 2], [2, 3], [3, 4],
+    // Index
+    [0, 5], [5, 6], [6, 7], [7, 8],
+    // Middle
+    [0, 9], [9, 10], [10, 11], [11, 12],
+    // Ring
+    [0, 13], [13, 14], [14, 15], [15, 16],
+    // Pinky
+    [0, 17], [17, 18], [18, 19], [19, 20],
+    // Palm
+    [5, 9], [9, 13], [13, 17],
+];
+
 // Thresholds
-const OPEN_HAND_THRESHOLD = 0.22; // avg fingertip-to-wrist distance (normalized coords)
-const PINCH_DEADZONE = 0.03;      // ignore pinch ratio changes smaller than this
-const PINCH_MIN = 0.85;           // clamp zoom factor
-const PINCH_MAX = 1.15;
+const PINCH_THRESHOLD = 0.06;       // thumb-to-index distance to detect pinch (normalized)
+const ZOOM_DEADZONE = 0.02;         // ignore zoom ratio changes smaller than this
 
 const WASM_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm';
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
@@ -58,9 +72,14 @@ export class CVController {
     gesturesEnabled = true;
 
     // Tracking state
-    private lastWristX?: number;
-    private lastWristY?: number;
-    private lastPinchDist?: number;
+    private gesture: 'none' | 'pan' | 'zoom' = 'none';
+    // Pan state (single-hand pinch)
+    private lastPanX?: number;
+    private lastPanY?: number;
+    // Zoom state (two-hand pinch)
+    private zoomBaseDist?: number; // distance between pinch points when zoom started
+    // All detected hands' landmarks for drawing
+    private allHandLandmarks: Array<Array<{ x: number; y: number; z: number }>> = [];
 
     // Sensitivity
     private panSensitivity: number;
@@ -88,7 +107,7 @@ export class CVController {
                 delegate: 'GPU',
             },
             runningMode: 'VIDEO',
-            numHands: 1,
+            numHands: 2,
         });
 
         this.callbacks.onStatusChange?.('Ready');
@@ -179,6 +198,7 @@ export class CVController {
             this.stream = null;
         }
         this.video.srcObject = null;
+        this.allHandLandmarks = [];
         this.resetTracking();
         // Clear display canvas
         if (this.displayCtx && this.displayCanvas) {
@@ -196,9 +216,43 @@ export class CVController {
     }
 
     private resetTracking(): void {
-        this.lastWristX = undefined;
-        this.lastWristY = undefined;
-        this.lastPinchDist = undefined;
+        this.lastPanX = undefined;
+        this.lastPanY = undefined;
+        this.zoomBaseDist = undefined;
+        this.gesture = 'none';
+    }
+
+    /** Draw hand landmarks and skeleton on the display canvas */
+    private drawLandmarks(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+        const colors = ['rgba(0, 255, 128, 0.6)', 'rgba(128, 128, 255, 0.6)'];
+
+        for (let hand = 0; hand < this.allHandLandmarks.length; hand++) {
+            const lm = this.allHandLandmarks[hand];
+
+            // Connections (skeleton lines)
+            ctx.strokeStyle = colors[hand % colors.length];
+            ctx.lineWidth = 2;
+            for (const [a, b] of HAND_CONNECTIONS) {
+                const ax = (1 - lm[a].x) * w, ay = lm[a].y * h;
+                const bx = (1 - lm[b].x) * w, by = lm[b].y * h;
+                ctx.beginPath();
+                ctx.moveTo(ax, ay);
+                ctx.lineTo(bx, by);
+                ctx.stroke();
+            }
+
+            // Landmark dots
+            for (let i = 0; i < lm.length; i++) {
+                const x = (1 - lm[i].x) * w;
+                const y = lm[i].y * h;
+                const isTip = FINGERTIPS.includes(i);
+
+                ctx.beginPath();
+                ctx.arc(x, y, isTip ? 4 : 2.5, 0, Math.PI * 2);
+                ctx.fillStyle = i === WRIST ? '#ff4444' : isTip ? (hand === 0 ? '#44ff88' : '#8888ff') : '#ffffff';
+                ctx.fill();
+            }
+        }
     }
 
     /**
@@ -250,6 +304,7 @@ export class CVController {
                     ctx.scale(-1, 1);
                     ctx.drawImage(frame, -canvas.width, 0, canvas.width, canvas.height);
                     ctx.restore();
+                    this.drawLandmarks(ctx, canvas.width, canvas.height);
 
                     frame.close();
                 }
@@ -273,6 +328,7 @@ export class CVController {
                 ctx.scale(-1, 1);
                 ctx.drawImage(this.video, -canvas.width, 0, canvas.width, canvas.height);
                 ctx.restore();
+                this.drawLandmarks(ctx, canvas.width, canvas.height);
             }
             this.displayRafId = requestAnimationFrame(draw);
         };
@@ -304,72 +360,93 @@ export class CVController {
 
         try {
             const result = this.handLandmarker.detectForVideo(this.video, timestampMs);
-            const landmarks = result.landmarks && result.landmarks.length > 0
-                ? result.landmarks[0]
-                : null;
+            const hands = result.landmarks;
 
-            if (!landmarks) {
+            if (!hands || hands.length === 0) {
+                this.allHandLandmarks = [];
                 this.resetTracking();
                 this.callbacks.onStatusChange?.('No hand');
                 return;
             }
 
-            this.processLandmarks(landmarks);
+            this.allHandLandmarks = hands;
+            this.processHands(hands);
         } catch {
             // Detection failed for this frame, continue
         }
     }
 
-    private processLandmarks(landmarks: Array<{ x: number; y: number; z: number }>): void {
-        const wrist = landmarks[WRIST];
-
-        // Check if hand is open (palm) vs closed (fist)
-        let totalDist = 0;
-        for (const idx of FINGERTIPS) {
-            const tip = landmarks[idx];
-            const dx = tip.x - wrist.x;
-            const dy = tip.y - wrist.y;
-            totalDist += Math.sqrt(dx * dx + dy * dy);
+    /** Get pinch midpoint if thumb+index are touching, or null */
+    private getPinchPoint(landmarks: Array<{ x: number; y: number; z: number }>): { x: number; y: number } | null {
+        const thumb = landmarks[THUMB_TIP];
+        const index = landmarks[INDEX_TIP];
+        const dist = Math.hypot(thumb.x - index.x, thumb.y - index.y);
+        if (dist < PINCH_THRESHOLD) {
+            return { x: (thumb.x + index.x) / 2, y: (thumb.y + index.y) / 2 };
         }
-        const avgDist = totalDist / FINGERTIPS.length;
+        return null;
+    }
 
-        if (avgDist < OPEN_HAND_THRESHOLD) {
-            // Closed fist — pause
-            this.resetTracking();
-            this.callbacks.onStatusChange?.('Fist \u2014 paused');
+    private processHands(hands: Array<Array<{ x: number; y: number; z: number }>>): void {
+        // Check which hands are pinching
+        const pinchPoints: { x: number; y: number }[] = [];
+        for (const hand of hands) {
+            const p = this.getPinchPoint(hand);
+            if (p) pinchPoints.push(p);
+        }
+
+        if (pinchPoints.length >= 2) {
+            // Two-hand pinch = zoom
+            const dist = Math.hypot(
+                pinchPoints[0].x - pinchPoints[1].x,
+                pinchPoints[0].y - pinchPoints[1].y,
+            );
+
+            if (this.gesture !== 'zoom') {
+                // Zoom just started — record equilibrium distance
+                this.gesture = 'zoom';
+                this.zoomBaseDist = dist;
+                this.lastPanX = undefined;
+                this.lastPanY = undefined;
+                this.callbacks.onStatusChange?.('Zoom');
+            } else if (this.zoomBaseDist !== undefined && this.zoomBaseDist > 0) {
+                const ratio = dist / this.zoomBaseDist;
+                if (Math.abs(ratio - 1.0) > ZOOM_DEADZONE) {
+                    this.callbacks.onZoom?.(ratio);
+                    this.zoomBaseDist = dist; // update base for continuous zooming
+                }
+            }
             return;
         }
 
+        if (pinchPoints.length === 1) {
+            // Single-hand pinch = pan
+            const p = pinchPoints[0];
+
+            if (this.gesture !== 'pan') {
+                this.gesture = 'pan';
+                this.lastPanX = p.x;
+                this.lastPanY = p.y;
+                this.zoomBaseDist = undefined;
+                this.callbacks.onStatusChange?.('Pan');
+            } else if (this.lastPanX !== undefined && this.lastPanY !== undefined) {
+                const panDx = (p.x - this.lastPanX) * this.panSensitivity;
+                const panDy = (this.lastPanY - p.y) * this.panSensitivity;
+
+                if (Math.abs(panDx) > 0.5 || Math.abs(panDy) > 0.5) {
+                    this.callbacks.onPan?.(panDx, panDy);
+                }
+
+                this.lastPanX = p.x;
+                this.lastPanY = p.y;
+            }
+            return;
+        }
+
+        // No pinches — idle
+        if (this.gesture !== 'none') {
+            this.resetTracking();
+        }
         this.callbacks.onStatusChange?.('Tracking');
-
-        // --- Pan (wrist delta) ---
-        if (this.lastWristX !== undefined && this.lastWristY !== undefined) {
-            // Normalized coords: 0..1, video is mirrored so invert X
-            const dx = -(wrist.x - this.lastWristX) * this.panSensitivity;
-            const dy = (wrist.y - this.lastWristY) * this.panSensitivity;
-
-            if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
-                this.callbacks.onPan?.(dx, dy);
-            }
-        }
-        this.lastWristX = wrist.x;
-        this.lastWristY = wrist.y;
-
-        // --- Zoom (thumb-index pinch distance) ---
-        const thumb = landmarks[THUMB_TIP];
-        const index = landmarks[INDEX_TIP];
-        const pinchDx = thumb.x - index.x;
-        const pinchDy = thumb.y - index.y;
-        const pinchDist = Math.sqrt(pinchDx * pinchDx + pinchDy * pinchDy);
-
-        if (this.lastPinchDist !== undefined && this.lastPinchDist > 0) {
-            let ratio = pinchDist / this.lastPinchDist;
-
-            if (Math.abs(ratio - 1.0) > PINCH_DEADZONE) {
-                ratio = Math.max(PINCH_MIN, Math.min(PINCH_MAX, ratio));
-                this.callbacks.onZoom?.(ratio);
-            }
-        }
-        this.lastPinchDist = pinchDist;
     }
 }

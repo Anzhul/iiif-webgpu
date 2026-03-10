@@ -20,6 +20,10 @@ export interface OverlayElement {
   scaleWithZoom?: boolean;
   /** Whether this overlay is hidden (toggled off by user) */
   hidden?: boolean;
+  /** CSS class applied when overlay is active/visible */
+  activeClass?: string;
+  /** CSS class applied when overlay is inactive/hidden */
+  inactiveClass?: string;
 }
 
 /**
@@ -62,6 +66,15 @@ export class IIIFOverlayManager {
     overlay.element.style.transformOrigin = 'top left';
     overlay.element.style.pointerEvents = 'auto';
 
+    // Apply initial class state for class-based transitions
+    if (overlay.activeClass || overlay.inactiveClass) {
+      if (overlay.hidden && overlay.inactiveClass) {
+        overlay.element.classList.add(overlay.inactiveClass);
+      } else if (!overlay.hidden && overlay.activeClass) {
+        overlay.element.classList.add(overlay.activeClass);
+      }
+    }
+
     // Add to DOM if not already present
     if (!overlay.element.parentElement) {
       this.container.appendChild(overlay.element);
@@ -96,9 +109,15 @@ export class IIIFOverlayManager {
     const overlay = this.overlays.get(id);
     if (!overlay) return;
 
+    const hasTransitionClasses = !!(overlay.activeClass || overlay.inactiveClass);
+
     // Respect user-toggled hidden state
     if (overlay.hidden) {
-      overlay.element.style.display = 'none';
+      if (hasTransitionClasses) {
+        this.setOverlayInactive(overlay);
+      } else {
+        overlay.element.style.display = 'none';
+      }
       return;
     }
 
@@ -116,7 +135,11 @@ export class IIIFOverlayManager {
       overlay.worldY > bounds.bottom
     ) {
       // Overlay is off-screen
-      overlay.element.style.display = 'none';
+      if (hasTransitionClasses) {
+        this.setOverlayInactive(overlay);
+      } else {
+        overlay.element.style.display = 'none';
+      }
       return;
     }
 
@@ -127,10 +150,27 @@ export class IIIFOverlayManager {
     const scale = overlay.scaleWithZoom !== false ? this.viewport.scale : 1;
 
     // Apply transform with scale
-    overlay.element.style.display = 'block';
     overlay.element.style.transform = `translate(${position.x}px, ${position.y}px) scale(${scale})`;
     overlay.element.style.width = `${overlay.worldWidth}px`;
     overlay.element.style.height = `${overlay.worldHeight}px`;
+
+    if (hasTransitionClasses) {
+      this.setOverlayActive(overlay);
+    } else {
+      overlay.element.style.display = 'block';
+    }
+  }
+
+  private setOverlayActive(overlay: OverlayElement): void {
+    if (overlay.inactiveClass) overlay.element.classList.remove(overlay.inactiveClass);
+    if (overlay.activeClass) overlay.element.classList.add(overlay.activeClass);
+    overlay.element.style.pointerEvents = 'auto';
+  }
+
+  private setOverlayInactive(overlay: OverlayElement): void {
+    if (overlay.activeClass) overlay.element.classList.remove(overlay.activeClass);
+    if (overlay.inactiveClass) overlay.element.classList.add(overlay.inactiveClass);
+    overlay.element.style.pointerEvents = 'none';
   }
 
   /**
