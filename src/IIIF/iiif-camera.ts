@@ -530,6 +530,10 @@ export class Camera {
 
     private startProgrammaticAnimation(animation: ProgrammaticAnimation) {
         this.stopAnimation();
+        // Cancel any active springs so they don't overwrite viewport during easing
+        this.interactiveState.isIdle = true;
+        this.interactiveState.isDragging = false;
+        this.interactiveState.lastInputType = 'none';
         this.programmaticAnimation = animation;
     }
 

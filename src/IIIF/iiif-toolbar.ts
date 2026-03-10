@@ -100,8 +100,8 @@ export class ToolBar {
         this.zoomInButton.innerHTML = `
             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 13 13" transform="scale(0.8)">
                 <g id="zoom_in" transform="translate(-24 -14)">
-                    <rect id="Rectangle_33" data-name="Rectangle 33" width="13" height="3" rx="1" transform="translate(24 19)" fill="#fff"/>
-                    <rect id="Rectangle_43" data-name="Rectangle 43" width="13" height="3" rx="1" transform="translate(32 14) rotate(90)" fill="#fff"/>
+                    <rect id="Rectangle_33" data-name="Rectangle 33" width="13" height="3" rx="1" transform="translate(24 19)" fill="currentColor"/>
+                    <rect id="Rectangle_43" data-name="Rectangle 43" width="13" height="3" rx="1" transform="translate(32 14) rotate(90)" fill="currentColor"/>
                 </g>
             </svg>
         `;
@@ -115,7 +115,7 @@ export class ToolBar {
         // Add SVG as inline HTML
         this.zoomOutButton.innerHTML = `
             <svg xmlns="http://www.w3.org/2000/svg" width="15" height="3" viewBox="0 0 15 3" transform="scale(0.8)">
-                <rect id="zoom-out" width="15" height="3" rx="1" fill="#fff"/>
+                <rect id="zoom-out" width="15" height="3" rx="1" fill="currentColor"/>
             </svg>
         `;
 
@@ -130,7 +130,7 @@ export class ToolBar {
 
         // Reset/home icon SVG
         this.resetButton.innerHTML = `
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
                 <polyline points="9 22 9 12 15 12 15 22"/>
             </svg>

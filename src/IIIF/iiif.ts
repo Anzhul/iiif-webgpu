@@ -33,6 +33,62 @@ export type { ParsedRange, ParsedManifestMetadata, ParsedMetadataItem } from './
  * - Lazy loading and caching where possible
  */
 
+type PanelVisibility = 'show' | 'hide' | 'show-open' | 'show-closed';
+
+export interface IIIFViewerPanels {
+    settings?: PanelVisibility;
+    navigation?: PanelVisibility;
+    pages?: PanelVisibility;
+    manifest?: PanelVisibility;
+    annotations?: PanelVisibility;
+    gesture?: PanelVisibility;
+    compare?: PanelVisibility;
+}
+
+const PANEL_CLASS_MAP: Record<string, string> = {
+    'pages': 'iiif-canvas-nav',
+    'navigation': 'iiif-toc',
+    'manifest': 'iiif-manifest-panel',
+    'annotations': 'iiif-annotation-panel',
+    'gesture': 'iiif-cv-panel',
+    'compare': 'iiif-compare-panel',
+    'settings': 'iiif-settings-panel',
+};
+
+const PANEL_HIDE_CLASS: Record<string, string> = {
+    'navigation': 'hide-navigation',
+    'pages': 'hide-pages',
+    'manifest': 'hide-manifest',
+    'annotations': 'hide-annotations',
+    'gesture': 'hide-vision',
+    'compare': 'hide-compare',
+};
+
+export interface LayoutState {
+    version: 1;
+    manifestUrl: string;
+    canvasIndex: number;
+    viewport: {
+        centerX: number;
+        centerY: number;
+        cameraZ: number;
+    };
+    panels: {
+        [key: string]: {
+            visible: boolean;
+            collapsed: boolean;
+            dockPosition: string | null;
+            dockIndex: number;
+            floatPosition?: { left: number; top: number };
+        };
+    };
+    settings: {
+        backgroundColor: string;
+        theme: 'light' | 'dark';
+    };
+    annotations: { pageId: string; visible: boolean }[];
+}
+
 export interface IIIFViewerOptions {
     renderer?: 'webgpu' | 'webgl' | 'canvas2d' | 'auto';
     enableOverlays?: boolean;
@@ -41,6 +97,7 @@ export interface IIIFViewerOptions {
     enablePanels?: boolean;
     maxCacheSize?: number;
     toolbar?: any;
+    panels?: IIIFViewerPanels;
     suppressNavigation?: boolean;
     suppressSettings?: boolean;
 }
@@ -75,7 +132,6 @@ export class IIIFViewer {
     private metadataPanelBody?: HTMLElement;
     private annotationPanel?: HTMLDivElement;
     private annotationPanelBody?: HTMLDivElement;
-    private cvPanel?: HTMLDivElement;
     private cvPanelBody?: HTMLDivElement;
     private cvVideo?: HTMLVideoElement;
     private cvDisplayCanvas?: HTMLCanvasElement;
@@ -90,6 +146,8 @@ export class IIIFViewer {
     private settingsPanelBody?: HTMLDivElement;
     private docks: Map<string, HTMLDivElement> = new Map();
     private fullscreenBtn?: HTMLButtonElement;
+    private colorInput?: HTMLInputElement;
+    private settingsCheckboxes: Map<string, HTMLInputElement> = new Map();
 
     // State
     private manifest?: ParsedManifest;
@@ -126,6 +184,7 @@ export class IIIFViewer {
 
     // Configuration
     private readonly CONFIG: IIIFViewerOptions;
+    private readonly panels: IIIFViewerPanels;
 
     constructor(container: HTMLElement, options: IIIFViewerOptions = {}) {
         this.container = container;
@@ -137,9 +196,13 @@ export class IIIFViewer {
             enablePanels: options.enablePanels ?? true,
             maxCacheSize: options.maxCacheSize ?? 500,
             toolbar: options.toolbar,
+            panels: options.panels,
             suppressNavigation: options.suppressNavigation ?? false,
             suppressSettings: options.suppressSettings ?? false,
         };
+
+        // Panels: mentioned = available, omitted = not created
+        this.panels = options.panels ?? {};
 
         // Initialize core components
         this.world = new World();
@@ -154,21 +217,17 @@ export class IIIFViewer {
             this.setupOverlayContainer();
         }
         this.annotationManager = new AnnotationManager(this.overlayManager);
-        if (!this.CONFIG.suppressNavigation) {
-            this.setupCanvasNav();
-        }
-        if (!this.CONFIG.suppressNavigation && !this.CONFIG.suppressSettings) {
-            this.setupTOC();
-            this.setupSettingsPanel();
-        }
-        this.setupAnnotationPanel();
-        if (!this.CONFIG.suppressNavigation) {
-            this.setupManifestPanel();
-        }
-        this.setupCVPanel();
-        if (this.CONFIG.enableCompare) {
-            this.setupComparePanel();
-        }
+
+        // Create docks before any panels so dock assignments work
+        this.setupDocks();
+
+        if (this.panels.pages !== undefined) this.setupCanvasNav();
+        if (this.panels.navigation !== undefined) this.setupTOC();
+        if (this.panels.settings !== undefined) this.setupSettingsPanel();
+        if (this.panels.annotations !== undefined) this.setupAnnotationPanel();
+        if (this.panels.manifest !== undefined) this.setupManifestPanel();
+        if (this.panels.gesture !== undefined) this.setupCVPanel();
+        if (this.panels.compare !== undefined) this.setupComparePanel();
 
         if (this.CONFIG.enableToolbar) {
             const tb = this.CONFIG.toolbar;
@@ -181,6 +240,41 @@ export class IIIFViewer {
                     variant: 'navigation',
                     position: 'bottom-center',
                 });
+
+                // Wrap toolbar + drag handle in a container
+                if (this.canvasToolbar.toolbar) {
+                    const wrapper = document.createElement('div');
+                    wrapper.className = 'iiif-toolbar-wrapper';
+
+                    // Reparent toolbar into wrapper
+                    wrapper.appendChild(this.canvasToolbar.toolbar);
+
+                    // Separate drag handle block
+                    const dragHandle = document.createElement('div');
+                    dragHandle.className = 'iiif-toolbar-drag-handle';
+                    dragHandle.innerHTML = `
+                        <svg viewBox="0 0 6 10" width="6" height="10" fill="currentColor">
+                            <circle cx="1.5" cy="1.5" r="1"/>
+                            <circle cx="4.5" cy="1.5" r="1"/>
+                            <circle cx="1.5" cy="5" r="1"/>
+                            <circle cx="4.5" cy="5" r="1"/>
+                            <circle cx="1.5" cy="8.5" r="1"/>
+                            <circle cx="4.5" cy="8.5" r="1"/>
+                        </svg>
+                    `;
+                    wrapper.appendChild(dragHandle);
+
+                    // Place wrapper into bottom-center dock
+                    const bottomCenterDock = this.docks.get('bottom-center');
+                    if (bottomCenterDock) {
+                        bottomCenterDock.appendChild(wrapper);
+                    } else {
+                        this.container.appendChild(wrapper);
+                    }
+
+                    // Make wrapper draggable via the handle
+                    this.makePanelDraggable(wrapper, dragHandle);
+                }
             }
         }
 
@@ -231,50 +325,44 @@ export class IIIFViewer {
      * FLIP animation for dock children: records positions before a DOM change,
      * then after the change animates children from old to new positions.
      */
-    private animateDockReflow(dock: HTMLElement, exclude?: HTMLElement): void {
-        // First: record current positions of all children
-        const children = Array.from(dock.children) as HTMLElement[];
-        const firstRects = new Map<HTMLElement, DOMRect>();
-        for (const child of children) {
-            if (child !== exclude) {
-                firstRects.set(child, child.getBoundingClientRect());
-            }
+    /** Apply FLIP animation given pre-captured rects. Call AFTER the DOM change. */
+    private flipAnimate(firstRects: Map<HTMLElement, DOMRect>): void {
+        // Synchronously read new positions and apply invert (before browser paints)
+        const moved: HTMLElement[] = [];
+        for (const [child, firstRect] of firstRects) {
+            if (!child.isConnected) continue;
+            const lastRect = child.getBoundingClientRect();
+            const dy = firstRect.top - lastRect.top;
+            if (Math.abs(dy) < 1) continue;
+            child.style.transition = 'none';
+            child.style.transform = `translateY(${dy}px)`;
+            moved.push(child);
         }
-
-        // The DOM change happens outside this call (caller does it).
-        // We use requestAnimationFrame to capture the "Last" positions after layout.
+        // Play: animate to new position in next frame
         requestAnimationFrame(() => {
-            for (const [child, firstRect] of firstRects) {
-                if (!child.isConnected) continue;
-                const lastRect = child.getBoundingClientRect();
-                const dy = firstRect.top - lastRect.top;
-                if (Math.abs(dy) < 1) continue;
-
-                // Invert: offset to old position
-                child.style.transition = 'none';
-                child.style.transform = `translateY(${dy}px)`;
-
-                // Play: animate to new position
-                requestAnimationFrame(() => {
-                    child.style.transition = 'transform 0.25s ease';
-                    child.style.transform = '';
-                    const onEnd = () => {
-                        child.style.transition = '';
-                        child.removeEventListener('transitionend', onEnd);
-                    };
-                    child.addEventListener('transitionend', onEnd);
-                });
+            for (const child of moved) {
+                child.style.transition = 'transform 0.2s ease';
+                child.style.transform = '';
+                const onEnd = () => {
+                    child.style.transition = '';
+                    child.removeEventListener('transitionend', onEnd);
+                };
+                child.addEventListener('transitionend', onEnd);
             }
         });
     }
 
     /** Make a panel draggable by its header */
     private makePanelDraggable(panel: HTMLElement, header: HTMLElement): void {
-        let isDragging = false;
         let startX = 0;
         let startY = 0;
         let startLeft = 0;
         let startTop = 0;
+        let panelHeight = 0;
+
+        // Spacer element that opens a gap in the dock during drag
+        let spacer: HTMLDivElement | null = null;
+        let spacerDock: HTMLElement | null = null;
 
         const getDocks = (): HTMLElement[] => {
             return Array.from(this.docks.values());
@@ -283,7 +371,6 @@ export class IIIFViewer {
         const hitTestDock = (clientX: number, clientY: number): HTMLElement | null => {
             for (const dock of getDocks()) {
                 const rect = dock.getBoundingClientRect();
-                // Use a generous zone: the dock area + 40px margin for easy targeting
                 const margin = 40;
                 if (
                     clientX >= rect.left - margin &&
@@ -297,8 +384,27 @@ export class IIIFViewer {
             return null;
         };
 
+        const isReversedDock = (dock: HTMLElement): boolean => {
+            return dock.classList.contains('iiif-dock-bottom-right') ||
+                dock.classList.contains('iiif-dock-bottom-left') ||
+                dock.classList.contains('iiif-dock-bottom-center');
+        };
+
         const findInsertIndex = (dock: HTMLElement, clientY: number): number => {
-            const children = Array.from(dock.children) as HTMLElement[];
+            const children = Array.from(dock.children).filter(c => c !== spacer) as HTMLElement[];
+            if (children.length === 0) return 0;
+
+            if (isReversedDock(dock)) {
+                // column-reverse: iterate visually top to bottom (reverse DOM order)
+                for (let i = children.length - 1; i >= 0; i--) {
+                    const childRect = children[i].getBoundingClientRect();
+                    if (clientY < childRect.top + childRect.height / 2) {
+                        return i + 1;
+                    }
+                }
+                return 0;
+            }
+
             for (let i = 0; i < children.length; i++) {
                 const childRect = children[i].getBoundingClientRect();
                 if (clientY < childRect.top + childRect.height / 2) {
@@ -308,56 +414,123 @@ export class IIIFViewer {
             return children.length;
         };
 
-        const onMouseDown = (e: MouseEvent) => {
-            // Don't drag if clicking on a button
-            if ((e.target as HTMLElement).tagName === 'BUTTON') return;
+        const ensureSpacer = () => {
+            if (!spacer) {
+                spacer = document.createElement('div');
+                spacer.className = 'iiif-dock-spacer';
+                spacer.style.height = '0px';
+                spacer.style.transition = 'height 0.2s ease';
+                spacer.style.overflow = 'hidden';
+                spacer.style.pointerEvents = 'none';
+            }
+        };
 
-            // Prevent viewer from panning
-            e.stopPropagation();
+        const insertSpacerAt = (dock: HTMLElement, index: number) => {
+            ensureSpacer();
+            // Capture positions before DOM change
+            const children = Array.from(dock.children).filter(c => c !== spacer) as HTMLElement[];
+            const firstRects = new Map<HTMLElement, DOMRect>();
+            for (const child of children) {
+                firstRects.set(child, child.getBoundingClientRect());
+            }
 
-            isDragging = true;
+            if (index < children.length) {
+                dock.insertBefore(spacer!, children[index]);
+            } else {
+                dock.appendChild(spacer!);
+            }
+            spacerDock = dock;
+
+            // Synchronous invert + rAF play
+            this.flipAnimate(firstRects);
+            // Trigger spacer height transition
+            requestAnimationFrame(() => {
+                if (spacer) spacer.style.height = `${panelHeight}px`;
+            });
+        };
+
+        const removeSpacer = () => {
+            if (spacer && spacer.parentElement) {
+                spacer.style.height = '0px';
+                const s = spacer;
+                const onEnd = () => {
+                    s.removeEventListener('transitionend', onEnd);
+                    s.remove();
+                };
+                s.addEventListener('transitionend', onEnd);
+            }
+            spacerDock = null;
+        };
+
+        const removeSpacerImmediate = () => {
+            if (spacer && spacer.parentElement) {
+                spacer.remove();
+            }
+            spacerDock = null;
+        };
+
+        let isPointerDown = false;
+        let hasUndocked = false;
+        const DRAG_THRESHOLD = 5;
+
+        const undockPanel = () => {
+            hasUndocked = true;
             panel.classList.add('dragging');
 
-            // Get current position
             const rect = panel.getBoundingClientRect();
             const containerRect = this.container.getBoundingClientRect();
-
-            startX = e.clientX;
-            startY = e.clientY;
             startLeft = rect.left - containerRect.left;
             startTop = rect.top - containerRect.top;
+            panelHeight = rect.height;
 
             // Reparent to main container for free dragging
             const parentDock = panel.parentElement;
             if (parentDock && parentDock !== this.container) {
-                // Animate remaining dock children before removing
                 if (parentDock.classList.contains('iiif-dock')) {
-                    this.animateDockReflow(parentDock, panel);
+                    // Insert spacer at panel's position to hold the space
+                    ensureSpacer();
+                    parentDock.insertBefore(spacer!, panel);
+                    spacer!.style.height = `${panelHeight}px`;
+                    spacerDock = parentDock;
                 }
                 this.container.appendChild(panel);
             }
 
-            // Clear any CSS positioning that might interfere
             panel.style.position = 'absolute';
             panel.style.right = 'auto';
             panel.style.bottom = 'auto';
             panel.style.transform = 'none';
             panel.style.left = `${startLeft}px`;
             panel.style.top = `${startTop}px`;
+        };
+
+        const onMouseDown = (e: MouseEvent) => {
+            if ((e.target as HTMLElement).tagName === 'BUTTON') return;
+            e.stopPropagation();
+
+            isPointerDown = true;
+            hasUndocked = false;
+            startX = e.clientX;
+            startY = e.clientY;
 
             e.preventDefault();
         };
 
         const onMouseMove = (e: MouseEvent) => {
-            if (!isDragging) return;
+            if (!isPointerDown) return;
 
             const dx = e.clientX - startX;
             const dy = e.clientY - startY;
 
+            // Only undock after exceeding drag threshold
+            if (!hasUndocked) {
+                if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+                undockPanel();
+            }
+
             const newLeft = startLeft + dx;
             const newTop = startTop + dy;
 
-            // Constrain to container bounds
             const containerRect = this.container.getBoundingClientRect();
             const panelRect = panel.getBoundingClientRect();
 
@@ -367,30 +540,54 @@ export class IIIFViewer {
             panel.style.left = `${Math.max(0, Math.min(newLeft, maxLeft))}px`;
             panel.style.top = `${Math.max(0, Math.min(newTop, maxTop))}px`;
 
-            // Highlight dock if hovering over one
+            // Highlight dock and manage spacer
             const targetDock = hitTestDock(e.clientX, e.clientY);
             for (const dock of getDocks()) {
                 dock.classList.toggle('dock-highlight', dock === targetDock);
             }
+
+            if (targetDock) {
+                const insertIdx = findInsertIndex(targetDock, e.clientY);
+                const currentChildren = Array.from(targetDock.children).filter(c => c !== spacer);
+                // Determine where spacer currently is (among non-spacer children)
+                const spacerCurrentIdx = spacer?.parentElement === targetDock
+                    ? Array.from(targetDock.children).indexOf(spacer!)
+                    : -1;
+                const spacerLogicalIdx = spacerCurrentIdx >= 0
+                    ? currentChildren.filter((_, i) => {
+                        const domIdx = Array.from(targetDock.children).indexOf(currentChildren[i]);
+                        return domIdx < spacerCurrentIdx;
+                    }).length
+                    : -1;
+
+                if (spacerDock !== targetDock || spacerLogicalIdx !== insertIdx) {
+                    // Different dock or different position — reinsert
+                    if (spacerDock && spacerDock !== targetDock) {
+                        removeSpacerImmediate();
+                    }
+                    insertSpacerAt(targetDock, insertIdx);
+                }
+            } else if (spacerDock) {
+                removeSpacer();
+            }
         };
 
         const onMouseUp = (e: MouseEvent) => {
-            if (!isDragging) return;
-            isDragging = false;
+            if (!isPointerDown) return;
+            isPointerDown = false;
+
+            // Click without drag — do nothing
+            if (!hasUndocked) return;
+
             panel.classList.remove('dragging');
 
-            // Clear dock highlights
             for (const dock of getDocks()) {
                 dock.classList.remove('dock-highlight');
             }
 
-            // Check if dropped on a dock
             const targetDock = hitTestDock(e.clientX, e.clientY);
-            if (targetDock) {
-                // Animate existing dock children before inserting
-                this.animateDockReflow(targetDock);
-
-                // Dock the panel: clear inline styles and insert into dock
+            if (targetDock && spacer?.parentElement === targetDock) {
+                // Replace spacer with the actual panel
                 panel.style.position = '';
                 panel.style.left = '';
                 panel.style.top = '';
@@ -398,13 +595,12 @@ export class IIIFViewer {
                 panel.style.bottom = '';
                 panel.style.transform = '';
 
-                const insertIdx = findInsertIndex(targetDock, e.clientY);
-                const children = Array.from(targetDock.children);
-                if (insertIdx < children.length) {
-                    targetDock.insertBefore(panel, children[insertIdx]);
-                } else {
-                    targetDock.appendChild(panel);
-                }
+                targetDock.insertBefore(panel, spacer);
+                spacer.remove();
+                spacerDock = null;
+            } else {
+                // Dropped outside any dock — just remove spacer
+                removeSpacerImmediate();
             }
         };
 
@@ -424,7 +620,7 @@ export class IIIFViewer {
         hidden?: boolean;
         parent?: HTMLElement;
         draggable?: boolean;
-        dock?: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
+        dock?: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'top-center' | 'bottom-center';
     }): { panel: HTMLDivElement; header: HTMLDivElement; body: HTMLDivElement; collapseBtn: HTMLButtonElement } {
         const panel = document.createElement('div');
         panel.className = `iiif-panel ${options.className}`;
@@ -475,7 +671,8 @@ export class IIIFViewer {
         const { panel, body } = this.createPanel({
             className: 'iiif-canvas-nav',
             title: 'Pages',
-            hidden: true,
+            initiallyCollapsed: this.panels.pages === 'hide' || this.panels.pages === 'show-closed',
+            dock: 'bottom-left',
         });
         this.canvasNavContainer = panel;
         this.canvasNavList = body;
@@ -486,7 +683,8 @@ export class IIIFViewer {
         const { panel, body } = this.createPanel({
             className: 'iiif-toc',
             title: 'Contents',
-            hidden: true,
+            initiallyCollapsed: this.panels.navigation === 'hide' || this.panels.navigation === 'show-closed',
+            dock: 'top-right',
         });
         this.tocContainer = panel;
         this.tocList = body;
@@ -497,7 +695,7 @@ export class IIIFViewer {
         const { body } = this.createPanel({
             className: 'iiif-manifest-panel',
             title: 'Manifest',
-            initiallyCollapsed: true,
+            initiallyCollapsed: this.panels.manifest === 'hide' || this.panels.manifest === 'show-closed',
             dock: 'top-right',
         });
         this.metadataPanelBody = body;
@@ -507,8 +705,7 @@ export class IIIFViewer {
         const { panel, body } = this.createPanel({
             className: 'iiif-annotation-panel',
             title: 'Annotations',
-            initiallyCollapsed: true,
-            hidden: true,
+            initiallyCollapsed: this.panels.annotations === 'hide' || this.panels.annotations === 'show-closed',
             dock: 'top-right',
         });
         this.annotationPanel = panel;
@@ -516,13 +713,12 @@ export class IIIFViewer {
     }
 
     private setupCVPanel() {
-        const { panel, body } = this.createPanel({
+        const { body } = this.createPanel({
             className: 'iiif-cv-panel',
-            title: 'Vision',
-            initiallyCollapsed: true,
+            title: 'Gesture',
+            initiallyCollapsed: this.panels.gesture === 'hide' || this.panels.gesture === 'show-closed',
             dock: 'top-left',
         });
-        this.cvPanel = panel;
         this.cvPanelBody = body;
 
         // Hidden video element — data source only, not displayed.
@@ -605,15 +801,13 @@ export class IIIFViewer {
             }
         });
 
-        this.container.appendChild(this.cvPanel);
     }
 
     private setupComparePanel() {
         const { panel, collapseBtn } = this.createPanel({
             className: 'iiif-compare-panel',
             title: 'Compare',
-            initiallyCollapsed: true,
-            hidden: true,
+            initiallyCollapsed: this.panels.compare === 'hide' || this.panels.compare === 'show-closed',
         });
         this.comparePanel = panel;
 
@@ -633,6 +827,16 @@ export class IIIFViewer {
                 this.comparePanel!.classList.remove('collapsed');
             }
         });
+    }
+
+    private setupDocks() {
+        const dockPositions = ['top-right', 'top-left', 'bottom-right', 'bottom-left', 'top-center', 'bottom-center'] as const;
+        for (const pos of dockPositions) {
+            const dock = document.createElement('div');
+            dock.className = `iiif-dock iiif-dock-${pos}`;
+            this.docks.set(pos, dock);
+            this.container.appendChild(dock);
+        }
     }
 
     private setupSettingsPanel() {
@@ -655,7 +859,6 @@ export class IIIFViewer {
             }
         });
 
-        // Listen for fullscreen changes (e.g., user pressing Escape)
         this.addEventListener(document, 'fullscreenchange', () => {
             if (!document.fullscreenElement) {
                 this.fullscreenBtn!.classList.remove('active');
@@ -683,16 +886,14 @@ export class IIIFViewer {
         this.settingsPanelBody = document.createElement('div');
         this.settingsPanelBody.className = 'iiif-panel-body iiif-settings-panel-body collapsed';
 
-        // Define panels with their references and labels
-        // All panels use container classes to work globally (including in compare mode)
-        const panelConfigs = [
-            { label: 'Navigation', defaultVisible: true, containerClass: 'hide-navigation' },
-            { label: 'Pages', defaultVisible: false, containerClass: 'hide-pages' },
-            { label: 'Manifest', defaultVisible: true, containerClass: 'hide-manifest' },
-            { label: 'Annotations', defaultVisible: false, containerClass: 'hide-annotations' },
-            { label: 'Vision', defaultVisible: true, containerClass: 'hide-vision' },
-            { label: 'Compare', defaultVisible: false, containerClass: 'hide-compare' },
-        ];
+        // Only show toggles for panels that are included
+        const panelConfigs: { label: string; defaultVisible: boolean; containerClass: string }[] = [];
+        if (this.panels.navigation !== undefined) panelConfigs.push({ label: 'Navigation', defaultVisible: this.panels.navigation !== 'hide', containerClass: 'hide-navigation' });
+        if (this.panels.pages !== undefined) panelConfigs.push({ label: 'Pages', defaultVisible: this.panels.pages !== 'hide', containerClass: 'hide-pages' });
+        if (this.panels.manifest !== undefined) panelConfigs.push({ label: 'Manifest', defaultVisible: this.panels.manifest !== 'hide', containerClass: 'hide-manifest' });
+        if (this.panels.annotations !== undefined) panelConfigs.push({ label: 'Annotations', defaultVisible: this.panels.annotations !== 'hide', containerClass: 'hide-annotations' });
+        if (this.panels.gesture !== undefined) panelConfigs.push({ label: 'Gesture', defaultVisible: this.panels.gesture !== 'hide', containerClass: 'hide-vision' });
+        if (this.panels.compare !== undefined) panelConfigs.push({ label: 'Compare', defaultVisible: this.panels.compare !== 'hide', containerClass: 'hide-compare' });
 
         for (const config of panelConfigs) {
             const item = document.createElement('label');
@@ -708,6 +909,7 @@ export class IIIFViewer {
 
             item.appendChild(checkbox);
             item.appendChild(labelText);
+            this.settingsCheckboxes.set(config.containerClass, checkbox);
 
             // Apply initial state using container class
             if (!config.defaultVisible) {
@@ -738,10 +940,11 @@ export class IIIFViewer {
         const colorLabel = document.createElement('span');
         colorLabel.textContent = 'Background';
 
-        const colorInput = document.createElement('input');
-        colorInput.type = 'color';
-        colorInput.className = 'iiif-settings-color-input';
-        colorInput.value = '#1a1a1a';
+        this.colorInput = document.createElement('input');
+        this.colorInput.type = 'color';
+        this.colorInput.className = 'iiif-settings-color-input';
+        this.colorInput.value = '#1a1a1a';
+        const colorInput = this.colorInput;
 
         this.addEventListener(colorInput, 'input', () => {
             const hex = colorInput.value;
@@ -757,35 +960,102 @@ export class IIIFViewer {
         colorItem.appendChild(colorInput);
         this.settingsPanelBody.appendChild(colorItem);
 
-        // --- Theme toggle switch ---
-        const themeItem = document.createElement('label');
-        themeItem.className = 'iiif-settings-panel-item iiif-settings-color-item';
+        this.settingsPanel.appendChild(this.settingsPanelBody);
 
-        const themeLabel = document.createElement('span');
-        themeLabel.textContent = 'Light theme';
+        // --- Icon button row at bottom of panel ---
+        const btnRow = document.createElement('div');
+        btnRow.className = 'iiif-settings-btn-row';
 
-        const toggleWrapper = document.createElement('label');
-        toggleWrapper.className = 'iiif-toggle-switch';
-
-        const themeCheckbox = document.createElement('input');
-        themeCheckbox.type = 'checkbox';
-        themeCheckbox.checked = false;
-
-        const slider = document.createElement('span');
-        slider.className = 'iiif-toggle-slider';
-
-        toggleWrapper.appendChild(themeCheckbox);
-        toggleWrapper.appendChild(slider);
-
-        this.addEventListener(themeCheckbox, 'change', () => {
-            this.container.classList.toggle('theme-light', themeCheckbox.checked);
+        // Light/dark theme toggle (lightbulb icon)
+        const themeBtn = document.createElement('button');
+        themeBtn.className = 'iiif-settings-icon-btn';
+        themeBtn.title = 'Toggle Light Theme';
+        themeBtn.innerHTML = `
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 18h6"/>
+                <path d="M10 22h4"/>
+                <path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/>
+            </svg>
+        `;
+        this.addEventListener(themeBtn, 'click', () => {
+            const isLight = this.container.classList.toggle('theme-light');
+            themeBtn.classList.toggle('active', isLight);
         });
 
-        themeItem.appendChild(themeLabel);
-        themeItem.appendChild(toggleWrapper);
-        this.settingsPanelBody.appendChild(themeItem);
+        // Fullscreen button
+        this.fullscreenBtn.classList.add('iiif-settings-icon-btn');
 
-        this.settingsPanel.appendChild(this.settingsPanelBody);
+        // Save layout button (download icon)
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'iiif-settings-icon-btn';
+        saveBtn.title = 'Save Layout';
+        saveBtn.innerHTML = `
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+        `;
+        this.addEventListener(saveBtn, 'click', () => {
+            const state = this.saveLayout();
+            const json = JSON.stringify(state, null, 2);
+            const blob = new Blob([json], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'layout.json';
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+
+        // Load layout button (upload icon)
+        const loadBtn = document.createElement('button');
+        loadBtn.className = 'iiif-settings-icon-btn';
+        loadBtn.title = 'Load Layout';
+        loadBtn.innerHTML = `
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+        `;
+        const fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.accept = '.json';
+        fileInput.style.display = 'none';
+        fileInput.addEventListener('change', () => {
+            const file = fileInput.files?.[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+                try {
+                    const state = JSON.parse(reader.result as string) as LayoutState;
+                    if (state.version !== 1) {
+                        console.warn('Unknown layout version:', state.version);
+                        return;
+                    }
+                    this.loadLayout(state);
+                } catch (err) {
+                    console.error('Failed to parse layout file:', err);
+                }
+                fileInput.value = '';
+            };
+            reader.readAsText(file);
+        });
+        this.addEventListener(loadBtn, 'click', () => {
+            fileInput.click();
+        });
+
+        // Append: save + load on left, spacer, theme + fullscreen on right
+        btnRow.appendChild(saveBtn);
+        btnRow.appendChild(loadBtn);
+        const btnSpacer = document.createElement('div');
+        btnSpacer.style.flex = '1';
+        btnRow.appendChild(btnSpacer);
+        btnRow.appendChild(themeBtn);
+        btnRow.appendChild(this.fullscreenBtn);
+
+        this.settingsPanel.appendChild(btnRow);
 
         this.addEventListener(collapseBtn, 'click', () => {
             this.settingsPanelBody!.classList.toggle('collapsed');
@@ -795,19 +1065,8 @@ export class IIIFViewer {
         // Make settings panel draggable
         this.makePanelDraggable(this.settingsPanel, header);
 
-        // Create docks (four corners)
-        const dockPositions = ['top-right', 'top-left', 'bottom-right', 'bottom-left'] as const;
-        for (const pos of dockPositions) {
-            const dock = document.createElement('div');
-            dock.className = `iiif-dock iiif-dock-${pos}`;
-            this.docks.set(pos, dock);
-            this.container.appendChild(dock);
-        }
-
         // Settings panel in top-right dock
         this.docks.get('top-right')!.appendChild(this.settingsPanel);
-        // Fullscreen button in bottom-right dock
-        this.docks.get('bottom-right')!.appendChild(this.fullscreenBtn);
     }
 
     private updateComparePanel() {
@@ -1325,7 +1584,7 @@ export class IIIFViewer {
             iiifImage,
             this.CONFIG.maxCacheSize,
             this.renderer,
-            1.0,  // distanceDetail
+            0.65,  // distanceDetail
             () => this.markDirty()  // onTileLoaded callback
         );
 
@@ -1784,7 +2043,214 @@ export class IIIFViewer {
      * Fit the view to show the entire world
      */
     fitToWorld() {
-        this.viewport.fitToWorld(this.world.worldWidth, this.world.worldHeight);
+        const ww = this.world.worldWidth;
+        const wh = this.world.worldHeight;
+        const targetScale = Math.min(
+            this.viewport.containerWidth / ww,
+            this.viewport.containerHeight / wh,
+        );
+        const targetZ = this.viewport.containerHeight / (2 * targetScale * this.viewport.getTanHalfFov());
+        this.camera.to(ww / 2, wh / 2, targetZ);
+        this.markDirty();
+    }
+
+    // ============================================================
+    // LAYOUT SAVE / RESTORE
+    // ============================================================
+
+    saveLayout(): LayoutState {
+        const containerRect = this.container.getBoundingClientRect();
+
+        // Build reverse map: className → panelKey
+        const classToKey: Record<string, string> = {};
+        for (const [key, cls] of Object.entries(PANEL_CLASS_MAP)) {
+            classToKey[cls] = key;
+        }
+
+        const panels: LayoutState['panels'] = {};
+        const panelEls = this.container.querySelectorAll<HTMLElement>('.iiif-panel');
+
+        for (const el of panelEls) {
+            // Identify panel by its className
+            let panelKey: string | undefined;
+            for (const [cls, key] of Object.entries(classToKey)) {
+                if (el.classList.contains(cls)) {
+                    panelKey = key;
+                    break;
+                }
+            }
+            if (!panelKey) continue;
+
+            const body = el.querySelector('.iiif-panel-body');
+            const collapsed = body ? body.classList.contains('collapsed') : false;
+
+            // Check visibility via container hide classes
+            const hideClass = PANEL_HIDE_CLASS[panelKey];
+            const visible = hideClass ? !this.container.classList.contains(hideClass) : true;
+
+            // Determine dock position
+            const parent = el.parentElement;
+            let dockPosition: string | null = null;
+            let dockIndex = 0;
+
+            if (parent?.classList.contains('iiif-dock')) {
+                for (const [pos, dock] of this.docks) {
+                    if (dock === parent) {
+                        dockPosition = pos;
+                        break;
+                    }
+                }
+                // Index among sibling panels in this dock
+                const siblings = Array.from(parent.querySelectorAll<HTMLElement>('.iiif-panel'));
+                dockIndex = siblings.indexOf(el);
+            }
+
+            const entry: LayoutState['panels'][string] = {
+                visible,
+                collapsed,
+                dockPosition,
+                dockIndex,
+            };
+
+            // If floating (not docked), store position as % of container
+            if (!dockPosition && el.style.position === 'absolute') {
+                const left = parseFloat(el.style.left) || 0;
+                const top = parseFloat(el.style.top) || 0;
+                entry.floatPosition = {
+                    left: (left / containerRect.width) * 100,
+                    top: (top / containerRect.height) * 100,
+                };
+            }
+
+            panels[panelKey] = entry;
+        }
+
+        // Annotation page visibility
+        const annotations: LayoutState['annotations'] = [];
+        if (this.annotationManager) {
+            for (const page of this.annotationManager.getAnnotationPages()) {
+                annotations.push({ pageId: page.pageId, visible: page.visible });
+            }
+        }
+
+        return {
+            version: 1,
+            manifestUrl: this.currentLoadedUrl ?? '',
+            canvasIndex: this.currentCanvasIndex,
+            viewport: {
+                centerX: this.viewport.centerX,
+                centerY: this.viewport.centerY,
+                cameraZ: this.viewport.cameraZ,
+            },
+            panels,
+            settings: {
+                backgroundColor: this.colorInput?.value ?? '#1a1a1a',
+                theme: this.container.classList.contains('theme-light') ? 'light' : 'dark',
+            },
+            annotations,
+        };
+    }
+
+    async loadLayout(state: LayoutState): Promise<void> {
+        // Load manifest + canvas if needed
+        if (state.manifestUrl && state.manifestUrl !== this.currentLoadedUrl) {
+            await this.loadUrl(state.manifestUrl, false);
+            if (state.canvasIndex >= 0) {
+                await this.loadCanvas(state.canvasIndex, false);
+            }
+        } else if (state.canvasIndex >= 0 && state.canvasIndex !== this.currentCanvasIndex) {
+            await this.loadCanvas(state.canvasIndex, false);
+        }
+
+        // Restore viewport (instant, no animation)
+        this.camera.to(
+            state.viewport.centerX,
+            state.viewport.centerY,
+            state.viewport.cameraZ,
+            0,
+        );
+
+        // Restore panel states
+        const containerRect = this.container.getBoundingClientRect();
+
+        for (const [panelKey, panelState] of Object.entries(state.panels)) {
+            const cls = PANEL_CLASS_MAP[panelKey];
+            if (!cls) continue;
+            const el = this.container.querySelector<HTMLElement>(`.${cls}`);
+            if (!el) continue;
+
+            // Restore collapsed state
+            const body = el.querySelector('.iiif-panel-body');
+            const collapseBtn = el.querySelector('.iiif-panel-collapse');
+            if (body) {
+                body.classList.toggle('collapsed', panelState.collapsed);
+                if (collapseBtn) collapseBtn.textContent = panelState.collapsed ? '+' : '−';
+            }
+
+            // Restore dock/float position
+            if (panelState.dockPosition) {
+                const dock = this.docks.get(panelState.dockPosition);
+                if (dock) {
+                    // Clear floating styles
+                    el.style.position = '';
+                    el.style.left = '';
+                    el.style.top = '';
+                    el.style.right = '';
+                    el.style.bottom = '';
+                    el.style.transform = '';
+
+                    // Insert at correct index
+                    const siblings = Array.from(dock.querySelectorAll<HTMLElement>('.iiif-panel'));
+                    if (panelState.dockIndex < siblings.length) {
+                        dock.insertBefore(el, siblings[panelState.dockIndex]);
+                    } else {
+                        dock.appendChild(el);
+                    }
+                }
+            } else if (panelState.floatPosition) {
+                // Float at saved position
+                el.style.position = 'absolute';
+                el.style.left = `${(panelState.floatPosition.left / 100) * containerRect.width}px`;
+                el.style.top = `${(panelState.floatPosition.top / 100) * containerRect.height}px`;
+                el.style.right = 'auto';
+                el.style.bottom = 'auto';
+                el.style.transform = 'none';
+                if (el.parentElement !== this.container) {
+                    this.container.appendChild(el);
+                }
+            }
+
+            // Restore visibility via container class + checkbox
+            const hideClass = PANEL_HIDE_CLASS[panelKey];
+            if (hideClass) {
+                this.container.classList.toggle(hideClass, !panelState.visible);
+                const checkbox = this.settingsCheckboxes.get(hideClass);
+                if (checkbox) checkbox.checked = panelState.visible;
+            }
+        }
+
+        // Restore background color
+        if (state.settings.backgroundColor && this.colorInput) {
+            this.colorInput.value = state.settings.backgroundColor;
+            const hex = state.settings.backgroundColor;
+            const r = parseInt(hex.slice(1, 3), 16) / 255;
+            const g = parseInt(hex.slice(3, 5), 16) / 255;
+            const b = parseInt(hex.slice(5, 7), 16) / 255;
+            this.renderer?.setClearColor(r, g, b);
+        }
+
+        // Restore theme
+        const wantLight = state.settings.theme === 'light';
+        this.container.classList.toggle('theme-light', wantLight);
+
+        // Restore annotation visibility
+        if (this.annotationManager && state.annotations.length > 0) {
+            for (const ann of state.annotations) {
+                this.annotationManager.setPageVisible(ann.pageId, ann.visible);
+            }
+            this.updateAnnotationPanel();
+        }
+
         this.markDirty();
     }
 

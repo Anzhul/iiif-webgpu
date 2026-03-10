@@ -16,6 +16,15 @@ if (container) {
             compare: true,
             fullscreen: true
         },
+        panels: {
+            settings: 'show-closed',
+            navigation: 'show',
+            pages: 'show',
+            manifest: 'show-closed',
+            annotations: 'show',
+            compare: 'hide',
+            gesture: 'show'
+        },
         enableOverlays: true
     });
 

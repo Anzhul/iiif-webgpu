@@ -537,7 +537,7 @@ export class AnnotationManager {
             const overlay = this.overlayManager.getOverlay(id);
             if (overlay) {
                 overlay.hidden = !visible;
-                overlay.element.style.display = visible ? 'block' : 'none';
+                this.overlayManager.updateOverlay(id);
             }
         }
     }
@@ -565,7 +565,7 @@ export class AnnotationManager {
             const overlay = this.overlayManager.getOverlay(id);
             if (overlay) {
                 overlay.hidden = !visible;
-                overlay.element.style.display = visible ? 'block' : 'none';
+                this.overlayManager.updateOverlay(id);
             }
         }
     }
