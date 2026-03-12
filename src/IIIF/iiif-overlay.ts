@@ -24,6 +24,8 @@ export interface OverlayElement {
   activeClass?: string;
   /** CSS class applied when overlay is inactive/hidden */
   inactiveClass?: string;
+  /** Whether the overlay has been activated at least once (intro transition played) */
+  hasBeenActive?: boolean;
 }
 
 /**
@@ -113,51 +115,65 @@ export class IIIFOverlayManager {
 
     // Respect user-toggled hidden state
     if (overlay.hidden) {
-      if (hasTransitionClasses) {
+      if (hasTransitionClasses && !overlay.hasBeenActive) {
         this.setOverlayInactive(overlay);
       } else {
+        // After first activation, hide instantly
+        if (overlay.activeClass) overlay.element.classList.remove(overlay.activeClass);
+        if (overlay.inactiveClass) overlay.element.classList.remove(overlay.inactiveClass);
         overlay.element.style.display = 'none';
+        overlay.element.style.pointerEvents = 'none';
       }
       return;
     }
 
-    // Get viewport bounds in world space
-    const bounds = this.viewport.getWorldBounds();
-
-    // Check if overlay is visible
-    const overlayRight = overlay.worldX + overlay.worldWidth;
-    const overlayBottom = overlay.worldY + overlay.worldHeight;
-
-    if (
-      overlayRight < bounds.left ||
-      overlay.worldX > bounds.right ||
-      overlayBottom < bounds.top ||
-      overlay.worldY > bounds.bottom
-    ) {
-      // Overlay is off-screen
-      if (hasTransitionClasses) {
-        this.setOverlayInactive(overlay);
-      } else {
-        overlay.element.style.display = 'none';
-      }
-      return;
-    }
-
-    // Convert world coordinates to canvas pixel coordinates
+    // Convert world coordinates to screen coordinates
     const position = this.worldToCanvasCoords(overlay.worldX, overlay.worldY);
-
-    // Calculate scale: viewport.scale is CSS pixels per world unit
     const scale = overlay.scaleWithZoom !== false ? this.viewport.scale : 1;
+
+    // Off-screen check only for intro transition (before first activation).
+    // After first activation, the container's overflow:hidden handles clipping
+    // and we skip culling to avoid flickering from offsetWidth being 0 when hidden.
+    if (!overlay.hasBeenActive) {
+      const screenW = overlay.worldWidth * scale;
+      const screenH = overlay.worldHeight * scale;
+      const effectiveW = screenW || 32;
+      const effectiveH = screenH || 32;
+      const containerW = this.container.clientWidth;
+      const containerH = this.container.clientHeight;
+
+      const offScreen =
+        position.x + effectiveW < 0 ||
+        position.x > containerW ||
+        position.y + effectiveH < 0 ||
+        position.y > containerH;
+
+      if (offScreen) {
+        if (hasTransitionClasses) {
+          this.setOverlayInactive(overlay);
+        } else {
+          overlay.element.style.display = 'none';
+          overlay.element.style.pointerEvents = 'none';
+        }
+        return;
+      }
+    }
 
     // Apply transform with scale
     overlay.element.style.transform = `translate(${position.x}px, ${position.y}px) scale(${scale})`;
     overlay.element.style.width = `${overlay.worldWidth}px`;
     overlay.element.style.height = `${overlay.worldHeight}px`;
 
-    if (hasTransitionClasses) {
+    if (hasTransitionClasses && !overlay.hasBeenActive) {
+      // First time entering viewport — play intro transition
       this.setOverlayActive(overlay);
+      overlay.hasBeenActive = true;
     } else {
+      // Already activated — show instantly, container clips overflow
+      if (overlay.inactiveClass) overlay.element.classList.remove(overlay.inactiveClass);
+      if (overlay.activeClass) overlay.element.classList.remove(overlay.activeClass);
       overlay.element.style.display = 'block';
+      overlay.element.style.pointerEvents = 'auto';
     }
   }
 

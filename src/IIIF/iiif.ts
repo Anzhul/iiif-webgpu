@@ -5,7 +5,6 @@ import { WebGPURenderer } from './iiif-webgpu';
 import { WebGLRenderer } from './iiif-webgl';
 import { Canvas2DRenderer } from './iiif-canvas2d';
 import type { IIIFRenderer, TileRenderData } from './iiif-renderer';
-import { ToolBar } from './iiif-toolbar';
 import { AnnotationManager, MOTIVATION_COLORS, DEFAULT_MOTIVATION_COLOR } from './iiif-annotations';
 import { Camera } from './iiif-camera';
 import { IIIFOverlayManager } from './iiif-overlay';
@@ -13,6 +12,8 @@ import { World, WorldImage } from './iiif-world';
 import type { WorldPlacement } from './iiif-world';
 import { parseIIIFUrl, fetchAnnotationList } from './iiif-parser';
 import type { ParsedManifest, ParsedImageService, ParsedAnnotationPage, ParsedRange } from './iiif-parser';
+
+import './iiif-styles.css';
 
 // Re-export types for convenience
 export type { OverlayElement } from './iiif-overlay';
@@ -123,7 +124,6 @@ export class IIIFViewer {
     viewport: Viewport;
     camera: Camera;
     renderer?: IIIFRenderer;
-    canvasToolbar?: ToolBar;
     annotationManager?: AnnotationManager;
     overlayManager?: IIIFOverlayManager;
 
@@ -139,6 +139,7 @@ export class IIIFViewer {
     private metadataPanelBody?: HTMLElement;
     private annotationPanel?: HTMLDivElement;
     private annotationPanelBody?: HTMLDivElement;
+    private cvPanel?: HTMLDivElement;
     private cvPanelBody?: HTMLDivElement;
     private cvVideo?: HTMLVideoElement;
     private cvDisplayCanvas?: HTMLCanvasElement;
@@ -166,6 +167,20 @@ export class IIIFViewer {
     private needsRender: boolean = true;
     private comparisonController?: any;
     private compareAddedEntries: Array<{ url: string; label: string }> = [];
+    private customAnnotationSpecs: Array<{
+        x: number; y: number; width: number; height: number;
+        text?: string;
+        /** When set, only replay on entries matching this manifest URL */
+        targetUrl?: string;
+        /** When set, only replay on entries matching this canvas index */
+        targetPage?: number;
+        options?: {
+            id?: string; type?: string; color?: string;
+            style?: Record<string, string | undefined>;
+            scaleWithZoom?: boolean; activeClass?: string; inactiveClass?: string;
+        };
+    }> = [];
+    private hiddenAnnotationTypes: Set<string> = new Set();
 
     // Cached values for performance
     private cachedContainerRect: DOMRect;
@@ -230,79 +245,13 @@ export class IIIFViewer {
 
         if (this.panels.pages !== undefined) this.setupCanvasNav();
         if (this.panels.navigation !== undefined) this.setupTOC();
+        this.setupNavigationPanel();
         if (this.panels.settings !== undefined) this.setupSettingsPanel();
         if (this.panels.annotations !== undefined) this.setupAnnotationPanel();
         if (this.panels.manifest !== undefined) this.setupManifestPanel();
         if (this.panels.gesture !== undefined) this.setupCVPanel();
         if (this.panels.compare !== undefined) this.setupComparePanel();
 
-        if (this.CONFIG.enableToolbar) {
-            const tb = this.CONFIG.toolbar;
-
-            // Navigation toolbar: zoom in, zoom out, reset
-            if (tb?.zoom) {
-                this.canvasToolbar = new ToolBar(container, {
-                    zoom: true,
-                    reset: true,
-                    variant: 'navigation',
-                    position: 'bottom-center',
-                });
-
-                // Wrap toolbar + drag handle in a container
-                if (this.canvasToolbar.toolbar) {
-                    const wrapper = document.createElement('div');
-                    wrapper.className = 'iiif-toolbar-wrapper';
-
-                    // Reparent toolbar into wrapper
-                    wrapper.appendChild(this.canvasToolbar.toolbar);
-
-                    // Separate drag handle block
-                    const dragHandle = document.createElement('div');
-                    dragHandle.className = 'iiif-toolbar-drag-handle';
-                    dragHandle.innerHTML = `
-                        <svg viewBox="0 0 6 10" width="6" height="10" fill="currentColor">
-                            <circle cx="1.5" cy="1.5" r="1"/>
-                            <circle cx="4.5" cy="1.5" r="1"/>
-                            <circle cx="1.5" cy="5" r="1"/>
-                            <circle cx="4.5" cy="5" r="1"/>
-                            <circle cx="1.5" cy="8.5" r="1"/>
-                            <circle cx="4.5" cy="8.5" r="1"/>
-                        </svg>
-                    `;
-                    wrapper.appendChild(dragHandle);
-
-                    // Place wrapper into bottom-center dock
-                    const bottomCenterDock = this.docks.get('bottom-center');
-                    if (bottomCenterDock) {
-                        bottomCenterDock.appendChild(wrapper);
-                    } else {
-                        this.container.appendChild(wrapper);
-                    }
-
-                    // Make wrapper draggable via the handle
-                    this.makePanelDraggable(wrapper, dragHandle);
-                }
-            }
-        }
-
-        // Wire canvas toolbar buttons
-        if (this.canvasToolbar?.zoomInButton) {
-            this.canvasToolbar.zoomInButton.addEventListener('click', () => {
-                this.camera.springZoomByFactor(1.5);
-                this.markDirty();
-            });
-        }
-        if (this.canvasToolbar?.zoomOutButton) {
-            this.canvasToolbar.zoomOutButton.addEventListener('click', () => {
-                this.camera.springZoomByFactor(1 / 1.5);
-                this.markDirty();
-            });
-        }
-        if (this.canvasToolbar?.resetButton) {
-            this.canvasToolbar.resetButton.addEventListener('click', () => {
-                this.fitToWorld();
-            });
-        }
         // Set up handlers
         this.setupResizeHandler();
         this.initializeRenderer();
@@ -378,16 +327,21 @@ export class IIIFViewer {
         };
 
         const hitTestDock = (clientX: number, clientY: number): HTMLElement | null => {
+            const panelRect = panel.getBoundingClientRect();
             for (const dock of getDocks()) {
                 const rect = dock.getBoundingClientRect();
                 // Skip hidden/collapsed docks (display:none → zero-size rect)
                 if (rect.width === 0 && rect.height === 0) continue;
                 const margin = 40;
+                // Test both cursor position and panel edges against the dock zone.
+                // For bottom docks the panel bottom arrives first; for top docks the top does.
+                const testTop = Math.min(clientY, panelRect.top);
+                const testBottom = Math.max(clientY, panelRect.bottom);
                 if (
                     clientX >= rect.left - margin &&
                     clientX <= rect.right + margin &&
-                    clientY >= rect.top - margin &&
-                    clientY <= rect.bottom + margin
+                    testBottom >= rect.top - margin &&
+                    testTop <= rect.bottom + margin
                 ) {
                     return dock;
                 }
@@ -690,6 +644,51 @@ export class IIIFViewer {
         this.canvasNavList.classList.add('iiif-canvas-nav-list');
     }
 
+    private setupNavigationPanel() {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'iiif-navigation-wrapper';
+
+        const bar = document.createElement('div');
+        bar.className = 'iiif-navigation-bar';
+
+        const zoomIn = document.createElement('button');
+        zoomIn.className = 'iiif-nav-zoom-btn';
+        zoomIn.title = 'Zoom In';
+        zoomIn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 13 13"><rect width="13" height="2.5" rx="1" y="5.25" fill="currentColor"/><rect width="13" height="2.5" rx="1" transform="translate(7.75 0) rotate(90)" fill="currentColor"/></svg>`;
+        zoomIn.addEventListener('click', () => { this.camera.springZoomByFactor(1.5); this.markDirty(); });
+
+        const zoomOut = document.createElement('button');
+        zoomOut.className = 'iiif-nav-zoom-btn';
+        zoomOut.title = 'Zoom Out';
+        zoomOut.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="10" height="2" viewBox="0 0 13 3"><rect width="13" height="2.5" rx="1" fill="currentColor"/></svg>`;
+        zoomOut.addEventListener('click', () => { this.camera.springZoomByFactor(1 / 1.5); this.markDirty(); });
+
+        const resetBtn = document.createElement('button');
+        resetBtn.className = 'iiif-nav-zoom-btn';
+        resetBtn.title = 'Reset View';
+        resetBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>`;
+        resetBtn.addEventListener('click', () => { this.fitToWorld(); });
+
+        bar.appendChild(zoomIn);
+        bar.appendChild(zoomOut);
+        bar.appendChild(resetBtn);
+
+        const dragHandle = document.createElement('div');
+        dragHandle.className = 'iiif-navigation-drag-handle';
+
+        wrapper.appendChild(bar);
+        wrapper.appendChild(dragHandle);
+
+        this.makePanelDraggable(wrapper, dragHandle);
+
+        const dock = this.docks.get('bottom-center');
+        if (dock) {
+            dock.appendChild(wrapper);
+        } else {
+            this.container.appendChild(wrapper);
+        }
+    }
+
     private setupTOC() {
         const { panel, body } = this.createPanel({
             className: 'iiif-toc',
@@ -724,12 +723,13 @@ export class IIIFViewer {
     }
 
     private setupCVPanel() {
-        const { body } = this.createPanel({
+        const { panel, body } = this.createPanel({
             className: 'iiif-cv-panel',
             title: 'Gesture',
             initiallyCollapsed: this.panels.gesture === 'hide' || this.panels.gesture === 'show-closed',
             dock: 'top-left',
         });
+        this.cvPanel = panel;
         this.cvPanelBody = body;
 
         // Hidden video element — data source only, not displayed.
@@ -818,26 +818,28 @@ export class IIIFViewer {
         const { panel, collapseBtn } = this.createPanel({
             className: 'iiif-compare-panel',
             title: 'Compare',
-            initiallyCollapsed: this.panels.compare === 'hide' || this.panels.compare === 'show-closed',
+            initiallyCollapsed: true, // Always collapsed — expanding enters compare mode
         });
         this.comparePanel = panel;
 
-        // Override collapse button behavior for compare mode
-        collapseBtn.removeEventListener; // Can't remove, so we override with capture
-        this.addEventListener(collapseBtn, 'click', (e) => {
+        // Override collapse button: use capture phase so this fires BEFORE
+        // the default handler from createPanel (which is in bubble phase).
+        collapseBtn.addEventListener('click', (e) => {
             e.stopImmediatePropagation();
             if (this.comparisonController) {
                 // Toggle collapse state - don't exit compare mode
-                const isCollapsed = this.comparePanel!.classList.toggle('collapsed');
+                const body = this.comparePanel!.querySelector('.iiif-panel-body');
+                const isCollapsed = body?.classList.toggle('collapsed') ?? false;
                 collapseBtn.textContent = isCollapsed ? '+' : '−';
             } else {
                 // Enter compare mode
                 this.enterCompareMode();
                 collapseBtn.textContent = '−';
                 this.comparePanel!.classList.add('active');
-                this.comparePanel!.classList.remove('collapsed');
+                const body = this.comparePanel!.querySelector('.iiif-panel-body');
+                body?.classList.remove('collapsed');
             }
-        });
+        }, { capture: true, signal: this.abortController.signal });
     }
 
     private setupDocks() {
@@ -1081,13 +1083,18 @@ export class IIIFViewer {
     }
 
     private updateComparePanel() {
-        if (!this.comparePanel || !this.manifest) return;
+        if (!this.comparePanel) return;
 
-        // Show compare panel when manifest has multiple canvases
-        if (this.manifest.canvases.length > 1) {
-            this.comparePanel.style.display = 'flex';
-        } else {
-            this.comparePanel.style.display = 'none';
+        // Always show the compare panel — even single images can compare via URL input
+        this.comparePanel.style.display = 'flex';
+
+        // Auto-enter compare mode for 'show' option
+        if (this.panels.compare === 'show' && !this.comparisonController && this.currentLoadedUrl) {
+            this.enterCompareMode();
+            const body = this.comparePanel.querySelector('.iiif-panel-body');
+            body?.classList.remove('collapsed');
+            const collapseBtn = this.comparePanel.querySelector('.iiif-compare-panel-collapse');
+            if (collapseBtn) collapseBtn.textContent = '−';
         }
     }
 
@@ -1096,17 +1103,22 @@ export class IIIFViewer {
 
         this.annotationPanelBody.innerHTML = '';
         const pages = this.annotationManager.getAnnotationPages();
+        const customGroups = this.annotationManager.getCustomAnnotationGroups();
 
-        if (pages.length === 0) {
-            if (this.annotationPanel) this.annotationPanel.style.display = 'none';
+        // Always show the panel; display "None" when empty
+        if (this.annotationPanel) this.annotationPanel.style.display = 'flex';
+
+        if (pages.length === 0 && customGroups.length === 0) {
+            const none = document.createElement('div');
+            none.className = 'iiif-panel-empty';
+            none.textContent = 'None';
+            this.annotationPanelBody.appendChild(none);
             return;
         }
 
-        // Auto-show when annotations are available
-        if (this.annotationPanel) this.annotationPanel.style.display = 'flex';
-
         const eyeSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
 
+        // --- IIIF annotation pages ---
         for (const page of pages) {
             const item = document.createElement('div');
             item.className = 'iiif-annotation-panel-item';
@@ -1147,6 +1159,70 @@ export class IIIFViewer {
             item.appendChild(eyeBtn);
 
             this.annotationPanelBody.appendChild(item);
+        }
+
+        // --- Custom annotation type groups (filtered by current canvas) ---
+        // Build set of annotation IDs valid for the current canvas
+        // When there's no manifest (single image), skip targetPage filtering
+        const hasPages = this.manifest !== undefined;
+        const idsForCurrentCanvas = new Set<string>();
+        for (const spec of this.customAnnotationSpecs) {
+            const id = spec.options?.id;
+            if (!id) continue;
+            if (hasPages && spec.targetPage !== undefined && spec.targetPage !== this.currentCanvasIndex) continue;
+            idsForCurrentCanvas.add(id);
+        }
+
+        for (const group of customGroups) {
+            const filteredIds = group.ids.filter(id => idsForCurrentCanvas.has(id));
+            if (filteredIds.length === 0) continue;
+
+            const item = document.createElement('div');
+            item.className = 'iiif-annotation-panel-item';
+
+            const label = document.createElement('div');
+            label.className = 'iiif-annotation-panel-item-label';
+
+            const swatch = document.createElement('span');
+            swatch.className = 'iiif-annotation-panel-swatch';
+            swatch.style.display = 'inline-block';
+            swatch.style.width = '8px';
+            swatch.style.height = '8px';
+            swatch.style.borderRadius = '50%';
+            swatch.style.backgroundColor = group.color;
+            swatch.style.marginRight = '6px';
+            swatch.style.flexShrink = '0';
+            label.appendChild(swatch);
+
+            label.appendChild(document.createTextNode(`${group.type} (${filteredIds.length})`));
+            item.appendChild(label);
+
+            const eyeBtn = document.createElement('button');
+            eyeBtn.className = 'iiif-eye-btn iiif-annotation-panel-eye';
+            if (group.visible) eyeBtn.classList.add('active');
+            eyeBtn.innerHTML = eyeSvg;
+            eyeBtn.title = 'Toggle visibility';
+            eyeBtn.addEventListener('click', () => {
+                group.visible = !group.visible;
+                if (group.visible) {
+                    this.hiddenAnnotationTypes.delete(group.type);
+                } else {
+                    this.hiddenAnnotationTypes.add(group.type);
+                }
+                this.annotationManager!.setCustomTypeVisible(group.type, group.visible);
+                eyeBtn.classList.toggle('active', group.visible);
+            });
+            item.appendChild(eyeBtn);
+
+            this.annotationPanelBody.appendChild(item);
+        }
+
+        // Show "None" if no annotations are visible for this canvas
+        if (this.annotationPanelBody.children.length === 0) {
+            const none = document.createElement('div');
+            none.className = 'iiif-panel-empty';
+            none.textContent = 'None';
+            this.annotationPanelBody.appendChild(none);
         }
     }
 
@@ -1654,6 +1730,8 @@ export class IIIFViewer {
             this.updateCanvasNav();
             this.updateTOC();
             this.updateManifestPanel();
+            this.updateComparePanel();
+            this.updateAnnotationPanel();
         } else {
             this.clearWorld();
             this.manifest = result as ParsedManifest;
@@ -1717,6 +1795,26 @@ export class IIIFViewer {
         }
 
         await this.loadIIIFAnnotationsForCanvas(canvas);
+        this.updateCustomAnnotationVisibility();
+    }
+
+    /** Show/hide custom annotations based on targetPage matching current canvas */
+    private updateCustomAnnotationVisibility(): void {
+        if (!this.overlayManager) return;
+        const hasPages = this.manifest !== undefined;
+        for (const spec of this.customAnnotationSpecs) {
+            const id = spec.options?.id;
+            if (!id) continue;
+            const overlay = this.overlayManager.getOverlay(id);
+            if (!overlay) continue;
+
+            // Hidden if on wrong page OR user toggled the type off
+            // Skip page check when there's no manifest (single image)
+            const wrongPage = hasPages && spec.targetPage !== undefined && spec.targetPage !== this.currentCanvasIndex;
+            const typeHidden = this.hiddenAnnotationTypes.has(spec.options?.type || 'Custom');
+            overlay.hidden = wrongPage || typeHidden;
+            this.overlayManager.updateOverlay(id);
+        }
     }
 
     private async loadIIIFAnnotationsForCanvas(canvas: CanvasInfo): Promise<void> {
@@ -1938,7 +2036,13 @@ export class IIIFViewer {
         this.metadataPanelBody.innerHTML = '';
 
         const meta = this.manifest?.metadata;
-        if (!meta) return;
+        if (!meta) {
+            const none = document.createElement('div');
+            none.className = 'iiif-panel-empty';
+            none.textContent = 'None';
+            this.metadataPanelBody.appendChild(none);
+            return;
+        }
 
         if (this.manifest?.label) {
             this.appendManifestField('Title', this.manifest.label);
@@ -2311,10 +2415,16 @@ export class IIIFViewer {
         element?: HTMLElement | string,
         options?: {
             id?: string;
+            type?: string;
+            color?: string;
             style?: Record<string, string | undefined>;
             scaleWithZoom?: boolean;
             activeClass?: string;
             inactiveClass?: string;
+            /** When set, only replay on compare entries matching this manifest URL */
+            targetUrl?: string;
+            /** When set, only replay on compare entries matching this canvas index */
+            targetPage?: number;
         }
     ): string | undefined {
         if (!this.annotationManager) {
@@ -2331,8 +2441,20 @@ export class IIIFViewer {
             content.element = element;
         }
 
+        // Store spec for replay (e.g. in compare mode child viewers)
+        // Only store text-based content — DOM elements can't be cloned across viewers
+        this.customAnnotationSpecs.push({
+            x, y, width, height,
+            text: typeof element === 'string' ? element : undefined,
+            targetUrl: options?.targetUrl,
+            targetPage: options?.targetPage,
+            options: { ...options, id },
+        });
+
         this.annotationManager.addAnnotation({
             id,
+            type: options?.type,
+            color: options?.color,
             fixed: true,
             x,
             y,
@@ -2344,6 +2466,8 @@ export class IIIFViewer {
             activeClass: options?.activeClass,
             inactiveClass: options?.inactiveClass,
         });
+
+        this.updateAnnotationPanel();
 
         return id;
     }
@@ -2362,6 +2486,22 @@ export class IIIFViewer {
     clearAnnotations(): void {
         if (!this.annotationManager) return;
         this.annotationManager.clearCustomAnnotations();
+    }
+
+    /**
+     * Get stored custom annotation specs (for replaying on child viewers).
+     */
+    getCustomAnnotationSpecs() {
+        return this.customAnnotationSpecs;
+    }
+
+    /**
+     * Replay custom annotation specs (e.g. from a parent viewer).
+     */
+    replayAnnotationSpecs(specs: typeof this.customAnnotationSpecs): void {
+        for (const spec of specs) {
+            this.addAnnotation(spec.x, spec.y, spec.width, spec.height, spec.text, spec.options);
+        }
     }
 
     // ============================================================
@@ -2511,7 +2651,6 @@ export class IIIFViewer {
     async enterCompareMode(): Promise<void> {
         if (this.comparisonController) return;
         if (!this.currentLoadedUrl) return;
-        if (!this.manifest || this.manifest.canvases.length === 0) return;
 
         const { ComparisonController } = await import('./iiif-compare');
 
@@ -2523,12 +2662,27 @@ export class IIIFViewer {
             this.comparePanel.classList.add('compare-active');
         }
 
-        const currentCanvas = this.manifest.canvases[this.currentCanvasIndex];
-        const canvases = [{
-            label: currentCanvas?.label || `Canvas ${this.currentCanvasIndex + 1}`,
-            index: this.currentCanvasIndex,
-            thumbnailServiceUrl: currentCanvas?.images[0]?.imageServiceUrl,
-        }];
+        // Build canvas entries — works for both manifests and single images
+        let canvases: Array<{ label: string; index: number; thumbnailServiceUrl?: string }>;
+        if (this.manifest && this.manifest.canvases.length > 0) {
+            const currentCanvas = this.manifest.canvases[this.currentCanvasIndex];
+            canvases = [{
+                label: currentCanvas?.label || `Canvas ${this.currentCanvasIndex + 1}`,
+                index: this.currentCanvasIndex,
+                thumbnailServiceUrl: currentCanvas?.images[0]?.imageServiceUrl,
+            }];
+        } else {
+            // Single image — derive label from URL
+            let label: string;
+            try {
+                const u = new URL(this.currentLoadedUrl);
+                const parts = u.pathname.split('/').filter(Boolean);
+                label = parts[parts.length - 1] || u.hostname;
+            } catch {
+                label = 'Image';
+            }
+            canvases = [{ label, index: 0 }];
+        }
 
         // Build per-instance panels config for child viewers
         const childPanels: IIIFViewerPanels = {};
@@ -2556,6 +2710,9 @@ export class IIIFViewer {
         if (this.comparePanel) {
             universalPanels.push({ element: this.comparePanel, dockPosition: getDockPosition(this.comparePanel) });
         }
+        if (this.cvPanel) {
+            universalPanels.push({ element: this.cvPanel, dockPosition: getDockPosition(this.cvPanel) });
+        }
 
         this.comparisonController = new ComparisonController(this.container, {
             viewerOptions: {
@@ -2571,7 +2728,8 @@ export class IIIFViewer {
             canvases,
             currentCanvasIndex: this.currentCanvasIndex,
             savedEntries: this.compareAddedEntries,
-            listPanel: this.comparePanel,
+            customAnnotationSpecs: this.customAnnotationSpecs,
+            listPanel: this.comparePanel?.querySelector('.iiif-panel-body') as HTMLDivElement,
             universalPanels,
             onExit: () => {
                 this.exitCompareMode();
@@ -2616,7 +2774,6 @@ export class IIIFViewer {
         this.container.classList.remove('iiif-compare-active');
         if (this.renderer?.canvas) this.renderer.canvas.style.display = '';
         if (this.overlayContainer) this.overlayContainer.style.display = '';
-        if (this.canvasToolbar?.toolbar) this.canvasToolbar.toolbar.style.display = '';
         // Restore main docks
         for (const dock of this.docks.values()) {
             dock.style.display = '';
@@ -2628,8 +2785,10 @@ export class IIIFViewer {
 
         // Reset compare panel to original state
         if (this.comparePanel) {
-            this.comparePanel.classList.remove('compare-active', 'active', 'collapsed');
-            // Reset toggle button and hide close button
+            this.comparePanel.classList.remove('compare-active', 'active');
+            // Collapse the body and reset toggle button
+            const body = this.comparePanel.querySelector('.iiif-panel-body');
+            body?.classList.add('collapsed');
             const toggleBtn = this.comparePanel.querySelector('.iiif-compare-panel-collapse');
             if (toggleBtn) toggleBtn.textContent = '+';
             const closeBtn = this.comparePanel.querySelector('.iiif-compare-panel-close') as HTMLElement;
@@ -2660,6 +2819,5 @@ export class IIIFViewer {
         this.cvController = undefined;
         this.overlayManager = undefined;
         this.annotationManager = undefined;
-        this.canvasToolbar = undefined;
     }
 }

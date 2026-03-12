@@ -20,10 +20,23 @@ export interface CompareOptions {
     listPanel?: HTMLDivElement;
     /** Universal panels to reparent into the comparison wrapper when in environment mode */
     universalPanels?: { element: HTMLElement; dockPosition: string | null }[];
+    /** Custom annotation specs to replay on child viewers */
+    customAnnotationSpecs?: Array<{
+        x: number; y: number; width: number; height: number;
+        text?: string;
+        targetUrl?: string;
+        targetPage?: number;
+        options?: {
+            id?: string; type?: string; color?: string;
+            style?: Record<string, string | undefined>;
+            scaleWithZoom?: boolean; activeClass?: string; inactiveClass?: string;
+        };
+    }>;
 }
 
 const EYE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
 const PEN_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.85 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>`;
+const TRASH_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>`;
 
 // ============================================================
 // VIEWER ENVIRONMENT
@@ -83,6 +96,7 @@ export class ComparisonController {
     private listPanel!: HTMLDivElement;
     private listBody!: HTMLDivElement;
     private addInput!: HTMLInputElement;
+    private emptyState?: HTMLDivElement;
 
     private options: CompareOptions;
     private abortController = new AbortController();
@@ -133,6 +147,7 @@ export class ComparisonController {
 
     destroy(): void {
         this.abortController.abort();
+        this.hideEmptyState();
         if (this.inEnvironmentMode) {
             // Restore universal panels before removing wrapper
             this.restoreUniversalPanels();
@@ -257,6 +272,48 @@ export class ComparisonController {
         this.updateViewers();
     }
 
+    private removeEntry(index: number): void {
+        // If visible, remove from visible list
+        const visPos = this.visibleIndices.indexOf(index);
+        if (visPos !== -1) {
+            this.visibleIndices.splice(visPos, 1);
+        }
+
+        // Destroy environment if it exists
+        const env = this.environments.get(index);
+        if (env) {
+            // Rescue universal panels before destroying
+            for (const { element } of this.options.universalPanels ?? []) {
+                if (env.container.contains(element)) {
+                    this.wrapper!.appendChild(element);
+                }
+            }
+            env.destroy();
+            this.environments.delete(index);
+        }
+
+        // Remove from entries array
+        this.entries.splice(index, 1);
+
+        // Remap visible indices (shift down anything above removed index)
+        this.visibleIndices = this.visibleIndices.map(vi => vi > index ? vi - 1 : vi);
+
+        // Remap environment keys
+        const remapped = new Map<number, ViewerEnvironment>();
+        for (const [idx, e] of this.environments) {
+            remapped.set(idx > index ? idx - 1 : idx, e);
+        }
+        this.environments = remapped;
+
+        // Ensure at least one entry is visible
+        if (this.visibleIndices.length === 0 && this.entries.length > 0) {
+            this.visibleIndices.push(0);
+        }
+
+        this.rebuildList();
+        this.updateViewers();
+    }
+
     private addEntry(url: string): void {
         const label = this.shortenUrl(url);
         this.entries.push({ url, label });
@@ -337,11 +394,85 @@ export class ComparisonController {
     }
 
     // ============================================================
+    // EMPTY STATE
+    // ============================================================
+
+    private showEmptyState(): void {
+        if (this.emptyState) return;
+
+        this.emptyState = document.createElement('div');
+        this.emptyState.className = 'iiif-compare-empty-state';
+
+        const heading = document.createElement('div');
+        heading.className = 'iiif-compare-empty-heading';
+        heading.textContent = 'Explore IIIFs';
+        this.emptyState.appendChild(heading);
+
+        const inputWrapper = document.createElement('div');
+        inputWrapper.className = 'iiif-compare-empty-input-wrapper';
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.placeholder = 'Enter IIIF manifest or image URL...';
+        input.className = 'iiif-compare-empty-input';
+        input.addEventListener('mousedown', (e) => e.stopPropagation());
+
+        const addBtn = document.createElement('button');
+        addBtn.className = 'iiif-compare-empty-btn';
+        addBtn.textContent = 'Load';
+
+        const doAdd = () => {
+            const url = input.value.trim();
+            if (url) {
+                this.addEntry(url);
+                input.value = '';
+            }
+        };
+
+        addBtn.addEventListener('click', doAdd);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') doAdd();
+        });
+
+        inputWrapper.appendChild(input);
+        inputWrapper.appendChild(addBtn);
+        this.emptyState.appendChild(inputWrapper);
+
+        this.container.appendChild(this.emptyState);
+
+        // Focus the input after a frame so it's ready
+        requestAnimationFrame(() => input.focus());
+    }
+
+    private hideEmptyState(): void {
+        if (!this.emptyState) return;
+        this.emptyState.remove();
+        this.emptyState = undefined;
+    }
+
+    // ============================================================
     // VIEWER UPDATES
     // ============================================================
 
     private async updateViewers(): Promise<void> {
         const gen = ++this.updateGeneration;
+
+        // Empty state: no entries at all
+        if (this.entries.length === 0) {
+            if (this.inEnvironmentMode) {
+                this.exitEnvironmentMode();
+            }
+            // Keep parent suspended and show empty state
+            this.options.onSuspendParent?.();
+            this.showEmptyState();
+            return;
+        }
+
+        // We have entries — hide empty state if it was showing
+        if (this.emptyState) {
+            this.hideEmptyState();
+            this.options.onResumeParent?.();
+        }
 
         if (this.isSingleParentMode) {
             // Transition back to single-parent mode if needed
@@ -389,6 +520,22 @@ export class ComparisonController {
                 if (entry.canvasIndex !== undefined && entry.canvasIndex > 0) {
                     await env.viewer.loadCanvas(entry.canvasIndex, true);
                 }
+                // Replay custom annotations that match this entry or any
+                // sibling entry with the same label (shared annotations)
+                if (this.options.customAnnotationSpecs?.length) {
+                    // Collect URLs/pages from all entries sharing this label
+                    const siblingEntries = this.entries.filter(e => e.label === entry.label);
+                    const matching = this.options.customAnnotationSpecs.filter(spec => {
+                        return siblingEntries.some(sib => {
+                            if (spec.targetUrl !== undefined && spec.targetUrl !== sib.url) return false;
+                            if (spec.targetPage !== undefined && spec.targetPage !== sib.canvasIndex) return false;
+                            return true;
+                        });
+                    });
+                    if (matching.length) {
+                        env.viewer.replayAnnotationSpecs(matching);
+                    }
+                }
             } catch (err) {
                 if (gen !== this.updateGeneration) return;
                 console.warn('Failed to load entry:', err);
@@ -415,7 +562,7 @@ export class ComparisonController {
     private populateExternalPanel(): void {
         // Body (scrollable list of entries)
         this.listBody = document.createElement('div');
-        this.listBody.className = 'iiif-panel-body iiif-canvas-list-body';
+        this.listBody.className = 'iiif-canvas-list-body';
 
         for (let i = 0; i < this.entries.length; i++) {
             const item = this.createListItem(i);
@@ -509,6 +656,17 @@ export class ComparisonController {
         }, { signal: this.abortController.signal });
         item.appendChild(renameBtn);
 
+        // Delete button
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'iiif-eye-btn iiif-canvas-list-delete';
+        deleteBtn.innerHTML = TRASH_SVG;
+        deleteBtn.title = 'Remove';
+        deleteBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.removeEntry(index);
+        }, { signal: this.abortController.signal });
+        item.appendChild(deleteBtn);
+
         // Eye toggle button
         const eyeBtn = document.createElement('button');
         eyeBtn.className = 'iiif-eye-btn iiif-canvas-list-eye';
@@ -564,6 +722,11 @@ export class ComparisonController {
                 const header = env.container.querySelector('.iiif-compare-environment-header');
                 if (header) header.textContent = newLabel;
             }
+
+            // Re-sync annotations for entries sharing the new label
+            if (newLabel !== originalText) {
+                this.syncAnnotationsForLabel(newLabel);
+            }
         };
 
         input.addEventListener('blur', commit, { once: true });
@@ -571,6 +734,31 @@ export class ComparisonController {
             if (e.key === 'Enter') { input.blur(); }
             if (e.key === 'Escape') { input.value = originalText; input.blur(); }
         });
+    }
+
+    /** Re-replay annotations on all visible entries that share the given label */
+    private syncAnnotationsForLabel(label: string): void {
+        if (!this.options.customAnnotationSpecs?.length) return;
+
+        const siblingEntries = this.entries.filter(e => e.label === label);
+        const matching = this.options.customAnnotationSpecs.filter(spec => {
+            return siblingEntries.some(sib => {
+                if (spec.targetUrl !== undefined && spec.targetUrl !== sib.url) return false;
+                if (spec.targetPage !== undefined && spec.targetPage !== sib.canvasIndex) return false;
+                return true;
+            });
+        });
+        if (matching.length === 0) return;
+
+        for (const idx of this.visibleIndices) {
+            const entry = this.entries[idx];
+            if (entry.label !== label) continue;
+            const env = this.environments.get(idx);
+            if (!env) continue;
+            // Clear existing custom annotations and re-replay
+            env.viewer.clearAnnotations();
+            env.viewer.replayAnnotationSpecs(matching);
+        }
     }
 
     // ============================================================

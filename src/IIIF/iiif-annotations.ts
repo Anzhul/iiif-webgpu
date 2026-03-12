@@ -31,6 +31,10 @@ export const DEFAULT_MOTIVATION_COLOR = { border: '#f44336', bg: 'rgba(244, 67, 
 export interface CustomAnnotation {
     /** Unique identifier */
     id: string;
+    /** Annotation type/category (e.g., 'detail notes', 'markers') — groups annotations in the panel */
+    type?: string;
+    /** Color for the annotation type swatch in the panel (e.g., '#ff9800') */
+    color?: string;
     /** Whether annotation is fixed in place or can be moved */
     fixed: boolean;
     /** X position in world coordinates */
@@ -228,6 +232,44 @@ export class AnnotationManager {
         annotation.width = width;
         annotation.height = height;
         this.overlayManager.updateOverlaySize(id, width, height);
+    }
+
+    /**
+     * Get custom annotations grouped by type for the panel UI
+     */
+    getCustomAnnotationGroups(): { type: string; ids: string[]; visible: boolean; color: string }[] {
+        const groups = new Map<string, { ids: string[]; color: string }>();
+        for (const [id, ann] of this.customAnnotations) {
+            const type = ann.type || 'Custom';
+            if (!groups.has(type)) groups.set(type, { ids: [], color: ann.color || '#007bff' });
+            groups.get(type)!.ids.push(id);
+        }
+        return Array.from(groups.entries()).map(([type, { ids, color }]) => ({
+            type,
+            ids,
+            color,
+            visible: ids.some(id => {
+                const overlay = this.overlayManager?.getOverlay(id);
+                return overlay ? !overlay.hidden : true;
+            }),
+        }));
+    }
+
+    /**
+     * Toggle visibility of all custom annotations of a given type
+     */
+    setCustomTypeVisible(type: string, visible: boolean): void {
+        if (!this.overlayManager) return;
+
+        for (const [id, ann] of this.customAnnotations) {
+            if ((ann.type || 'Custom') === type) {
+                const overlay = this.overlayManager.getOverlay(id);
+                if (overlay) {
+                    overlay.hidden = !visible;
+                    this.overlayManager.updateOverlay(id);
+                }
+            }
+        }
     }
 
     /**

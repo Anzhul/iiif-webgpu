@@ -6,16 +6,11 @@ if (container) {
     const params = new URLSearchParams(window.location.search);
     const manifestUrl = params.get('manifest');
 
-    const defaultManifest = 'https://iiif.harvardartmuseums.org/manifests/object/299843';
+    //const defaultManifest = 'https://iiif.harvardartmuseums.org/manifests/object/299843';
+    const defaultManifest = 'https://free.iiifhosting.com/iiif/616bc3c8dc9a69d3e935139c8c77b76f32137cab7ce0e4fd2166507cdc948b';
     const url = manifestUrl ?? defaultManifest;
 
     const viewer = new IIIFViewer(container, {
-        toolbar: {
-            zoom: true,
-            info: true,
-            compare: true,
-            fullscreen: true
-        },
         panels: {
             settings: 'show-closed',
             navigation: 'show',
@@ -40,7 +35,11 @@ if (container) {
 
             // Fade transition
             viewer.addAnnotation(200, 100, 400, 60, 'Detail of interest', {
+                targetUrl: url, // Only show on this manifest
+                targetPage: 0, // Only show on the first canvas
                 id: 'label-1',
+                type: 'Detail Notes',
+                color: '#3e73c9',
                 style: {
                     backgroundColor: 'rgba(0, 0, 0, 0.7)',
                     color: '#fff',
@@ -72,14 +71,21 @@ if (container) {
                 cursor: pointer;
             `;
             viewer.addAnnotation(800, 600, 250, 80, card, {
+                targetUrl: url,
+                targetPage: 0, // Only show on the first canvas
                 id: 'card-1',
+                type: 'Detail Notes',
                 activeClass: 'iiif-ann-scale-in',
                 inactiveClass: 'iiif-ann-scale-out',
             });
 
             // Slide + fade transition (fixed-size pin)
             viewer.addAnnotation(1200, 400, 0, 0, '📍', {
+                targetUrl: url,
+                targetPage: 0, // Only show on the first canvas
                 id: 'pin-1',
+                type: 'Markers',
+                color: '#4caf50',
                 scaleWithZoom: false,
                 style: { fontSize: '24px', overflow: 'visible' },
                 activeClass: 'iiif-ann-slide-in',
