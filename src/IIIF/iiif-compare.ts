@@ -24,12 +24,14 @@ export interface CompareOptions {
     customAnnotationSpecs?: Array<{
         x: number; y: number; width: number; height: number;
         text?: string;
+        popupText?: string;
         targetUrl?: string;
         targetPage?: number;
         options?: {
             id?: string; type?: string; color?: string;
             style?: Record<string, string | undefined>;
             scaleWithZoom?: boolean; activeClass?: string; inactiveClass?: string;
+            popup?: string | HTMLElement;
         };
     }>;
 }
@@ -415,7 +417,8 @@ export class ComparisonController {
         input.type = 'text';
         input.placeholder = 'Enter IIIF manifest or image URL...';
         input.className = 'iiif-compare-empty-input';
-        input.addEventListener('mousedown', (e) => e.stopPropagation());
+        input.addEventListener('mousedown', (e) => e.stopPropagation(), { signal: this.abortController.signal });
+        input.addEventListener('touchstart', (e) => e.stopPropagation(), { signal: this.abortController.signal });
 
         const addBtn = document.createElement('button');
         addBtn.className = 'iiif-compare-empty-btn';
@@ -429,10 +432,10 @@ export class ComparisonController {
             }
         };
 
-        addBtn.addEventListener('click', doAdd);
+        addBtn.addEventListener('click', doAdd, { signal: this.abortController.signal });
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') doAdd();
-        });
+        }, { signal: this.abortController.signal });
 
         inputWrapper.appendChild(input);
         inputWrapper.appendChild(addBtn);
@@ -588,23 +591,19 @@ export class ComparisonController {
         addBtn.className = 'iiif-canvas-list-add-btn';
         addBtn.textContent = '+';
         addBtn.title = 'Add URL';
-        addBtn.addEventListener('click', () => {
+        const submitInput = () => {
             const url = this.addInput.value.trim();
             if (url) {
                 this.addEntry(url);
                 this.addInput.value = '';
             }
-        }, { signal: this.abortController.signal });
+        };
+
+        addBtn.addEventListener('click', submitInput, { signal: this.abortController.signal });
         addSection.appendChild(addBtn);
 
         this.addInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                const url = this.addInput.value.trim();
-                if (url) {
-                    this.addEntry(url);
-                    this.addInput.value = '';
-                }
-            }
+            if (e.key === 'Enter') submitInput();
         }, { signal: this.abortController.signal });
 
         // Ensure input can receive focus by handling click on the section
@@ -625,12 +624,18 @@ export class ComparisonController {
 
         // Make the item itself draggable (outside of buttons)
         item.addEventListener('mousedown', (e) => {
-            // Don't drag if clicking on buttons or inputs
             if ((e.target as HTMLElement).closest('button, input')) return;
             e.preventDefault();
             e.stopPropagation();
             this.startDrag(item, index, e.clientY);
         }, { signal: this.abortController.signal });
+        item.addEventListener('touchstart', (e) => {
+            if ((e.target as HTMLElement).closest('button, input')) return;
+            if (e.touches.length !== 1) return;
+            e.preventDefault();
+            e.stopPropagation();
+            this.startDrag(item, index, e.touches[0].clientY);
+        }, { signal: this.abortController.signal, passive: false } as any);
 
         const info = document.createElement('div');
         info.className = 'iiif-canvas-list-item-info';
@@ -707,7 +712,8 @@ export class ComparisonController {
         input.select();
 
         // Prevent panel drag while editing
-        input.addEventListener('mousedown', (e) => e.stopPropagation());
+        input.addEventListener('mousedown', (e) => e.stopPropagation(), { signal: this.abortController.signal });
+        input.addEventListener('touchstart', (e) => e.stopPropagation(), { signal: this.abortController.signal });
 
         const commit = () => {
             const newLabel = input.value.trim() || originalText;
@@ -729,11 +735,11 @@ export class ComparisonController {
             }
         };
 
-        input.addEventListener('blur', commit, { once: true });
+        input.addEventListener('blur', commit, { once: true, signal: this.abortController.signal });
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') { input.blur(); }
             if (e.key === 'Escape') { input.value = originalText; input.blur(); }
-        });
+        }, { signal: this.abortController.signal });
     }
 
     /** Re-replay annotations on all visible entries that share the given label */
@@ -788,8 +794,8 @@ export class ComparisonController {
         let currentIndex = index;
         const offsetY = startY - itemRect.top;
 
-        const onMouseMove = (e: MouseEvent) => {
-            item.style.top = `${e.clientY - offsetY}px`;
+        const onDragMove = (clientY: number) => {
+            item.style.top = `${clientY - offsetY}px`;
 
             // Find drop position
             const siblings = Array.from(this.listBody.children).filter(
@@ -799,14 +805,13 @@ export class ComparisonController {
             let newIndex = siblings.length;
             for (let i = 0; i < siblings.length; i++) {
                 const rect = siblings[i].getBoundingClientRect();
-                if (e.clientY < rect.top + rect.height / 2) {
+                if (clientY < rect.top + rect.height / 2) {
                     newIndex = i;
                     break;
                 }
             }
 
             if (newIndex !== currentIndex) {
-                // Move placeholder
                 if (newIndex >= siblings.length) {
                     this.listBody.appendChild(placeholder);
                 } else {
@@ -816,11 +821,12 @@ export class ComparisonController {
             }
         };
 
-        const onMouseUp = () => {
+        const onDragEnd = () => {
             document.removeEventListener('mousemove', onMouseMove);
             document.removeEventListener('mouseup', onMouseUp);
+            document.removeEventListener('touchmove', onTouchMove);
+            document.removeEventListener('touchend', onTouchEnd);
 
-            // Put item back in list at placeholder position
             item.classList.remove('dragging');
             item.style.position = '';
             item.style.width = '';
@@ -830,14 +836,20 @@ export class ComparisonController {
             this.listBody.insertBefore(item, placeholder);
             placeholder.remove();
 
-            // Apply reorder if changed
             if (currentIndex !== index) {
                 this.reorderEntry(index, currentIndex);
             }
         };
 
+        const onMouseMove = (e: MouseEvent) => onDragMove(e.clientY);
+        const onMouseUp = () => onDragEnd();
+        const onTouchMove = (e: TouchEvent) => { e.preventDefault(); onDragMove(e.touches[0].clientY); };
+        const onTouchEnd = () => onDragEnd();
+
         document.addEventListener('mousemove', onMouseMove);
         document.addEventListener('mouseup', onMouseUp);
+        document.addEventListener('touchmove', onTouchMove, { passive: false });
+        document.addEventListener('touchend', onTouchEnd);
     }
 
     private reorderEntry(fromIndex: number, toIndex: number): void {

@@ -67,6 +67,9 @@ export class IIIFOverlayManager {
     overlay.element.style.position = 'absolute';
     overlay.element.style.transformOrigin = 'top left';
     overlay.element.style.pointerEvents = 'auto';
+    // Promote to GPU-composited layer so the browser moves a pre-rasterized
+    // texture during pan/zoom instead of re-rasterizing content each frame.
+    overlay.element.style.willChange = 'transform';
 
     // Apply initial class state for class-based transitions
     if (overlay.activeClass || overlay.inactiveClass) {
@@ -115,12 +118,9 @@ export class IIIFOverlayManager {
 
     // Respect user-toggled hidden state
     if (overlay.hidden) {
-      if (hasTransitionClasses && !overlay.hasBeenActive) {
+      if (hasTransitionClasses) {
         this.setOverlayInactive(overlay);
       } else {
-        // After first activation, hide instantly
-        if (overlay.activeClass) overlay.element.classList.remove(overlay.activeClass);
-        if (overlay.inactiveClass) overlay.element.classList.remove(overlay.inactiveClass);
         overlay.element.style.display = 'none';
         overlay.element.style.pointerEvents = 'none';
       }
@@ -159,8 +159,9 @@ export class IIIFOverlayManager {
       }
     }
 
-    // Apply transform with scale
-    overlay.element.style.transform = `translate(${position.x}px, ${position.y}px) scale(${scale})`;
+    // Apply transform with scale — translate3d promotes to GPU layer
+    overlay.element.style.setProperty('--iiif-overlay-scale', String(scale));
+    overlay.element.style.transform = `translate3d(${position.x}px, ${position.y}px, 0) scale(${scale})`;
     overlay.element.style.width = `${overlay.worldWidth}px`;
     overlay.element.style.height = `${overlay.worldHeight}px`;
 
@@ -169,11 +170,20 @@ export class IIIFOverlayManager {
       this.setOverlayActive(overlay);
       overlay.hasBeenActive = true;
     } else {
-      // Already activated — show instantly, container clips overflow
-      if (overlay.inactiveClass) overlay.element.classList.remove(overlay.inactiveClass);
-      if (overlay.activeClass) overlay.element.classList.remove(overlay.activeClass);
-      overlay.element.style.display = 'block';
-      overlay.element.style.pointerEvents = 'auto';
+      // Check if transitioning from hidden → visible (toggle or display:none)
+      const wasHidden = overlay.element.style.display === 'none' ||
+        (overlay.inactiveClass && overlay.element.classList.contains(overlay.inactiveClass));
+      if (wasHidden) {
+        if (overlay.element.style.display === 'none') {
+          overlay.element.style.display = '';
+        }
+        if (hasTransitionClasses) {
+          this.setOverlayActive(overlay);
+        } else {
+          overlay.element.style.display = 'block';
+          overlay.element.style.pointerEvents = 'auto';
+        }
+      }
     }
   }
 

@@ -70,6 +70,10 @@ export interface CustomAnnotation {
     activeClass?: string;
     /** CSS class applied when annotation is inactive/hidden */
     inactiveClass?: string;
+    /** Popup content shown when the annotation is clicked */
+    popup?: string | HTMLElement;
+    /** Popup position offset in screen pixels from the annotation's top-left corner */
+    popupPosition?: { x: number; y: number };
 }
 
 /** @deprecated Use CustomAnnotation instead */
@@ -146,6 +150,31 @@ export class AnnotationManager {
      * Create the HTML element for a custom annotation
      */
     private createCustomAnnotationElement(annotation: CustomAnnotation): HTMLElement {
+        // If an HTMLElement is provided directly, use it as the annotation container
+        // (no wrapper, no default styles — the element controls its own appearance)
+        if (annotation.content?.element) {
+            const el = annotation.content.element;
+            el.style.boxSizing = 'border-box';
+
+            // Apply any additional inline styles
+            if (annotation.style) {
+                Object.entries(annotation.style).forEach(([key, value]) => {
+                    if (value !== undefined) {
+                        el.style[key as any] = value;
+                    }
+                });
+            }
+
+            // Add popup on click
+            if (annotation.popup) {
+                el.style.cursor = 'pointer';
+                this.attachPopup(el, annotation.popup, annotation.popupPosition);
+            }
+
+            return el;
+        }
+
+        // Text or empty content: use a default styled container
         const container = document.createElement('div');
         container.style.boxSizing = 'border-box';
         container.style.width = '100%';
@@ -164,26 +193,88 @@ export class AnnotationManager {
             });
         }
 
-        // Add content if provided
-        if (annotation.content) {
+        // Add text content if provided
+        if (annotation.content?.text) {
             const contentWrapper = document.createElement('div');
             contentWrapper.style.width = '100%';
             contentWrapper.style.height = '100%';
             contentWrapper.style.overflow = 'auto';
             contentWrapper.style.padding = '8px';
-
-            if (annotation.content.element) {
-                contentWrapper.appendChild(annotation.content.element);
-            } else if (annotation.content.text) {
-                contentWrapper.textContent = annotation.content.text;
-                contentWrapper.style.fontSize = '14px';
-                contentWrapper.style.fontFamily = 'Arial, sans-serif';
-            }
-
+            contentWrapper.textContent = annotation.content.text;
+            contentWrapper.style.fontSize = '14px';
+            contentWrapper.style.fontFamily = 'Arial, sans-serif';
             container.appendChild(contentWrapper);
         }
 
+        // Add popup on click
+        if (annotation.popup) {
+            container.style.cursor = 'pointer';
+            this.attachPopup(container, annotation.popup, annotation.popupPosition);
+        }
+
         return container;
+    }
+
+    /**
+     * Attach a click-toggled popup to an annotation element.
+     * The popup is a child of the annotation, positioned next to it,
+     * and uses inverse scale to stay at a fixed screen size.
+     */
+    private attachPopup(container: HTMLElement, content: string | HTMLElement, position?: { x: number; y: number }): void {
+        let popupEl: HTMLDivElement | null = null;
+
+        const show = () => {
+            if (popupEl) return;
+            popupEl = document.createElement('div');
+            popupEl.className = 'iiif-annotation-popup';
+
+            // Custom position from annotation top-left (overrides CSS defaults)
+            if (position) {
+                popupEl.style.left = `${position.x}px`;
+                popupEl.style.top = `${position.y}px`;
+                popupEl.style.marginLeft = '0';
+            }
+            // Stop clicks inside popup from reaching the annotation toggle
+            popupEl.addEventListener('click', (e) => e.stopPropagation());
+            popupEl.addEventListener('mousedown', (e) => e.stopPropagation());
+
+            // Close button
+            const closeBtn = document.createElement('button');
+            closeBtn.className = 'iiif-annotation-popup-close';
+            closeBtn.innerHTML = '&times;';
+            closeBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                hide();
+            });
+            popupEl.appendChild(closeBtn);
+
+            // Content
+            const body = document.createElement('div');
+            if (typeof content === 'string') {
+                body.textContent = content;
+            } else {
+                body.appendChild(content.cloneNode(true));
+            }
+            popupEl.appendChild(body);
+
+            container.appendChild(popupEl);
+        };
+
+        const hide = () => {
+            if (!popupEl) return;
+            popupEl.remove();
+            popupEl = null;
+        };
+
+        // Click annotation to toggle popup
+        container.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (popupEl) {
+                hide();
+            } else {
+                show();
+            }
+        });
     }
 
     /**
@@ -534,6 +625,11 @@ export class AnnotationManager {
         container.appendChild(label);
         container.addEventListener('mouseenter', () => { label.style.display = 'block'; });
         container.addEventListener('mouseleave', () => { label.style.display = 'none'; });
+        // Touch: tap to toggle label visibility
+        container.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            label.style.display = label.style.display === 'none' ? 'block' : 'none';
+        });
     }
 
     /**

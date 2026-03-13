@@ -116,7 +116,7 @@
 .iiif-navigation-wrapper {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
   z-index: 1500;
 }
 .iiif-navigation-wrapper.dragging {
@@ -127,7 +127,7 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 6px 8px;
+  padding: 6px 6px;
   background: var(--panel-bg);
   border: 1px solid var(--border-color);
   border-radius: var(--border-radius);
@@ -135,7 +135,7 @@
   box-shadow: var(--shadow);
 }
 .iiif-navigation-drag-handle {
-  width: 18px;
+  width: 24px;
   align-self: stretch;
   border-radius: var(--border-radius);
   background: var(--panel-bg);
@@ -547,10 +547,6 @@
   height: 16px;
 }
 
-/* Legacy class support */
-.iiif-annotation-panel-eye { /* inherits from .iiif-eye-btn */ }
-.iiif-canvas-list-eye { /* inherits from .iiif-eye-btn */ }
-
 /* =============================================
    7. CV Panel (Vision)
    ============================================= */
@@ -822,8 +818,9 @@
 
 .iiif-settings-divider {
   height: 1px;
-  background: var(--border-color-light);
-  margin: 6px 0;
+  background: transparent;
+  margin: 4px -8px;
+  border-bottom: 1px solid var(--border-color-light);
 }
 
 .iiif-settings-color-item {
@@ -901,7 +898,8 @@
 }
 
 /* Container-level hiding classes (affects all viewers including compare mode) */
-.hide-navigation .iiif-toolbar {
+.hide-navigation .iiif-toc,
+.hide-navigation .iiif-navigation-wrapper {
   display: none !important;
 }
 .hide-pages .iiif-canvas-nav {
@@ -1342,6 +1340,88 @@
   to   { opacity: 0; translate: 0 8px; }
 }
 
+/* Continuous pulse animation for custom annotations */
+@keyframes iiif-ann-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50%      { transform: scale(1.15); opacity: 0.8; }
+}
+
+/* Annotation Popup (click-to-open detail) */
+.iiif-annotation-popup {
+  position: absolute;
+  left: 100%;
+  top: 0;
+  margin-left: 8px;
+  transform: scale(calc(1 / var(--iiif-overlay-scale, 1)));
+  transform-origin: top left;
+  min-width: 150px;
+  max-width: 320px;
+  padding: 10px 14px;
+  background: var(--panel-bg);
+  backdrop-filter: var(--backdrop-filter);
+  border-radius: var(--border-radius);
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: normal;
+  pointer-events: auto;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  animation: iiif-popup-in 0.15s ease-out;
+}
+.iiif-annotation-popup img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  display: block;
+  margin: 6px 0;
+}
+.iiif-annotation-popup h3,
+.iiif-annotation-popup h4 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.iiif-annotation-popup p {
+  margin: 4px 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.iiif-annotation-popup a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.iiif-annotation-popup a:hover {
+  text-decoration: underline;
+}
+.iiif-annotation-popup-close {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.iiif-annotation-popup-close:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+@keyframes iiif-popup-in {
+  from { opacity: 0; translate: -4px 0; }
+  to   { opacity: 1; translate: 0 0; }
+}
+
 /* =============================================
    12. Light Theme
    ============================================= */
@@ -1377,4 +1457,84 @@
 }
 .theme-light .iiif-toolbar-divider-block {
   background-color: rgba(0, 0, 0, 0.3);
+}
+
+/* =============================================
+   Touch Support
+   ============================================= */
+
+/* Prevent browser default touch behaviors on interactive elements */
+.iiif-panel-header,
+.iiif-navigation-drag-handle,
+.iiif-canvas-list-item {
+  touch-action: none;
+}
+
+/* Remove iOS tap highlight flash */
+.iiif-panel-header,
+.iiif-nav-zoom-btn,
+.iiif-toolbar-button,
+.iiif-cv-panel-toggle,
+.iiif-panel-collapse,
+.iiif-eye-btn,
+.iiif-canvas-list-item,
+.iiif-compare-empty-btn {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Duplicate :hover feedback on :active for touch devices */
+.iiif-nav-zoom-btn:active {
+  color: var(--text-on-hover);
+  background: var(--hover-bg);
+}
+.iiif-cv-panel-toggle:active {
+  background: var(--button-bg-hover);
+}
+.iiif-cv-panel-toggle.active:active {
+  background: rgba(var(--color-danger), 0.4);
+}
+
+/* Show rename/delete buttons on touch (no hover available) */
+@media (pointer: coarse) {
+  .iiif-canvas-list-rename,
+  .iiif-canvas-list-delete {
+    opacity: 1;
+  }
+}
+
+/* Tighter edge spacing on mobile/tablet */
+@media (max-width: 1024px) {
+  .iiif-dock-top-right,
+  .iiif-dock-top-left,
+  .iiif-dock-top-center {
+    top: 0.5rem;
+  }
+  .iiif-dock-bottom-right,
+  .iiif-dock-bottom-left,
+  .iiif-dock-bottom-center {
+    bottom: 0.5rem;
+  }
+  .iiif-dock-top-right,
+  .iiif-dock-bottom-right {
+    right: 0.5rem;
+  }
+  .iiif-dock-top-left,
+  .iiif-dock-bottom-left {
+    left: 0.5rem;
+  }
+  .iiif-toolbar.position-top-left {
+    top: 0.5rem;
+    left: 0.5rem;
+  }
+  .iiif-toolbar.position-bottom-right {
+    bottom: 0.5rem;
+    right: 0.5rem;
+  }
+  .iiif-toolbar.position-bottom-left {
+    bottom: 0.5rem;
+    left: 0.5rem;
+  }
+  .iiif-toolbar.position-bottom-center {
+    bottom: 0.5rem;
+  }
 }

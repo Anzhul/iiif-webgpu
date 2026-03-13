@@ -175,7 +175,7 @@ export class TileManager {
             }
         }
 
-        return result.sort((a, b) => a.z - b.z);
+        return result;
     }
 
     /**
@@ -299,12 +299,12 @@ export class TileManager {
      * Search lower zoom levels for a loaded tile that covers the spatial region
      * of a missing tile at (tileX, tileY) at targetLevel.
      *
-     * Works down from targetLevel-1 to level 0. At each level, calculates which
-     * tile covers the same spatial region using image pixel coordinate mapping.
-     * Adds the first (highest-resolution) covering tile found.
+     * Searches both directions from the target level:
+     *   1. UP (less detail, larger tiles) — one tile covers the whole area, ideal fallback
+     *   2. DOWN (more detail, smaller tiles) — previously-loaded tiles still in cache
      *
-     * The addedFallbackIds set prevents adding the same lower-level tile multiple
-     * times when several target-level tiles map to the same covering tile.
+     * The addedFallbackIds set prevents adding the same tile multiple times when
+     * several target-level tiles map to the same covering tile.
      */
     private findCoveringTile(
         tileX: number,
@@ -320,30 +320,65 @@ export class TileManager {
         const pixelX = tileX * tileSize * targetScaleFactor;
         const pixelY = tileY * tileSize * targetScaleFactor;
 
-        // Search from highest available lower level down to level 0
-        for (let level = targetLevel - 1; level >= 0; level--) {
-            const lowerScaleFactor = this.image.scaleFactors[level];
-            const lowerTileSizeInPixels = tileSize * lowerScaleFactor;
+        // --- Pass 1: Search UP (less detail, larger covering tiles) ---
+        // A single higher-level tile covers the area of multiple target-level tiles.
+        const maxLevel = this.image.maxZoomLevel;
+        for (let level = targetLevel + 1; level <= maxLevel; level++) {
+            const fallbackScaleFactor = this.image.scaleFactors[level];
+            const fallbackTileSizeInPixels = tileSize * fallbackScaleFactor;
 
-            const lowerTileX = Math.floor(pixelX / lowerTileSizeInPixels);
-            const lowerTileY = Math.floor(pixelY / lowerTileSizeInPixels);
+            const fallbackTileX = Math.floor(pixelX / fallbackTileSizeInPixels);
+            const fallbackTileY = Math.floor(pixelY / fallbackTileSizeInPixels);
 
-            const lowerTileId = `${level}-${lowerTileX}-${lowerTileY}`;
+            const fallbackTileId = `${level}-${fallbackTileX}-${fallbackTileY}`;
 
-            // Skip if we already added this tile (another target tile also maps to it)
-            if (addedFallbackIds.has(lowerTileId)) {
-                return; // Area is covered by an already-added lower-res tile
+            if (addedFallbackIds.has(fallbackTileId)) {
+                return; // Area is covered by an already-added fallback tile
             }
 
-            const cached = this.tileCache.get(lowerTileId);
+            const cached = this.tileCache.get(fallbackTileId);
             if (cached?.image) {
                 result.push(cached as TileRenderData);
-                addedFallbackIds.add(lowerTileId);
-                this.markTileAccessed(lowerTileId);
-                return; // Found coverage — stop searching lower levels
+                addedFallbackIds.add(fallbackTileId);
+                this.markTileAccessed(fallbackTileId);
+                return;
             }
         }
-        // No covering tile found at any level — thumbnail acts as ultimate fallback
+
+        // --- Pass 2: Search DOWN (more detail, smaller cached tiles) ---
+        // When zooming out, previously-loaded detailed tiles are still in cache.
+        // Multiple smaller tiles may be needed to cover the target tile's area.
+        const pixelRight = pixelX + tileSize * targetScaleFactor;
+        const pixelBottom = pixelY + tileSize * targetScaleFactor;
+
+        for (let level = targetLevel - 1; level >= 0; level--) {
+            const fallbackScaleFactor = this.image.scaleFactors[level];
+            const fallbackTileSizeInPixels = tileSize * fallbackScaleFactor;
+
+            const startTileX = Math.floor(pixelX / fallbackTileSizeInPixels);
+            const startTileY = Math.floor(pixelY / fallbackTileSizeInPixels);
+            const endTileX = Math.floor((pixelRight - 1) / fallbackTileSizeInPixels);
+            const endTileY = Math.floor((pixelBottom - 1) / fallbackTileSizeInPixels);
+
+            let foundAny = false;
+            for (let fy = startTileY; fy <= endTileY; fy++) {
+                for (let fx = startTileX; fx <= endTileX; fx++) {
+                    const fallbackTileId = `${level}-${fx}-${fy}`;
+                    if (addedFallbackIds.has(fallbackTileId)) {
+                        foundAny = true;
+                        continue;
+                    }
+                    const cached = this.tileCache.get(fallbackTileId);
+                    if (cached?.image) {
+                        result.push(cached as TileRenderData);
+                        addedFallbackIds.add(fallbackTileId);
+                        this.markTileAccessed(fallbackTileId);
+                        foundAny = true;
+                    }
+                }
+            }
+            if (foundAny) return; // Found coverage at this level
+        }
     }
 
     /**
@@ -417,10 +452,11 @@ export class TileManager {
         const worldH = visibleHeight * wpp;
 
         // Z-depth for painter's algorithm sort order only.
-        // Lower zoom levels (larger scaleFactor, fewer tiles) get smaller z values,
-        // so they're drawn first (behind higher-resolution tiles).
+        // Higher zoom level indices (larger scaleFactor, less detail) get smaller z values,
+        // so they're drawn first (behind higher-resolution tiles at lower indices).
         // Gaps sized to avoid collision: supports up to 1000 tiles per axis per zoom level.
-        const z = (zoomLevel * 0.01) + (tileY * 0.0001) + (tileX * 0.000001);
+        const maxLevel = this.image.maxZoomLevel;
+        const z = ((maxLevel - zoomLevel) * 0.01) + (tileY * 0.0001) + (tileX * 0.000001);
 
         const url = this.image.getTileUrl(imgX, imgY, imgW, imgH, scaleFactor);
 

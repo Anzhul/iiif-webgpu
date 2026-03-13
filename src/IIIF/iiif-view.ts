@@ -59,12 +59,6 @@ export class Viewport {
     this.maxScale = this.containerHeight / visibleHeightAtMinZ;
   }
 
-  // @ts-ignore - Reserved for future use when FOV becomes mutable
-  private updateFovConstants(): void {
-    this.fovRadians = (this.fov * Math.PI) / 180;
-    this.tanHalfFov = Math.tan(this.fovRadians / 2);
-  }
-
   private calculateScale(): number {
     const visibleHeight = 2 * this.cameraZ * this.tanHalfFov;
     return this.containerHeight / visibleHeight;

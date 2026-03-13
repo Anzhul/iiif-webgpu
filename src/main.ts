@@ -6,8 +6,8 @@ if (container) {
     const params = new URLSearchParams(window.location.search);
     const manifestUrl = params.get('manifest');
 
-    //const defaultManifest = 'https://iiif.harvardartmuseums.org/manifests/object/299843';
-    const defaultManifest = 'https://free.iiifhosting.com/iiif/616bc3c8dc9a69d3e935139c8c77b76f32137cab7ce0e4fd2166507cdc948b';
+    const defaultManifest = 'https://iiif.harvardartmuseums.org/manifests/object/299843';
+    //const defaultManifest = 'https://free.iiifhosting.com/iiif/616bc3c8dc9a69d3e935139c8c77b76f32137cab7ce0e4fd2166507cdc948b';
     const url = manifestUrl ?? defaultManifest;
 
     const viewer = new IIIFViewer(container, {
@@ -52,34 +52,41 @@ if (container) {
                 inactiveClass: 'iiif-ann-fade-out',
             });
 
-            // Scale + fade transition
-            const card = document.createElement('div');
-            card.innerHTML = `
-                <strong>Annotation Title</strong>
-                <p style="margin:4px 0 0;font-size:12px;opacity:0.8;">
-                    Click or hover for more info
-                </p>
+            // Shared popup content for demos
+            const popupContent = document.createElement('div');
+            popupContent.innerHTML = `
+                <h4>Point of Interest</h4>
+                <img src="https://iiif.harvardartmuseums.org/manifests/object/299843/canvas/canvas-47174896/thumbnail" alt="Detail thumbnail" />
+                <p>This area shows a detail from the artwork. Click the marker again or elsewhere to dismiss.</p>
+                <a href="https://harvardartmuseums.org" target="_blank">Learn more</a>
             `;
-            card.style.cssText = `
-                background: rgba(30, 60, 120, 0.85);
-                color: #fff;
-                padding: 10px 14px;
-                border-radius: 8px;
-                font-family: sans-serif;
-                font-size: 13px;
-                border: 1px solid rgba(255,255,255,0.2);
-                cursor: pointer;
+
+            // Custom HTML element annotation with continuous animation
+            const hotspot = document.createElement('div');
+            hotspot.innerHTML = `
+                <div style="
+                    width: 40px; height: 40px;
+                    background: radial-gradient(circle, #ffffff, #ffffff7a);
+                    border-radius: 50%;
+                    border: 2px solid rgba(255, 255, 255, 0);
+                    animation: iiif-ann-pulse 2s ease-in-out infinite;
+                "></div>
             `;
-            viewer.addAnnotation(800, 600, 250, 80, card, {
+            viewer.addAnnotation(800, 600, 0, 0, hotspot, {
                 targetUrl: url,
-                targetPage: 0, // Only show on the first canvas
-                id: 'card-1',
-                type: 'Detail Notes',
-                activeClass: 'iiif-ann-scale-in',
-                inactiveClass: 'iiif-ann-scale-out',
+                targetPage: 0,
+                id: 'hotspot-1',
+                type: 'Hotspots',
+                color: '#965a5a',
+                scaleWithZoom: true,
+                style: { overflow: 'visible' },
+                activeClass: 'iiif-ann-fade-in',
+                inactiveClass: 'iiif-ann-fade-out',
+                popup: popupContent,
+                popupPosition: { x: 48, y: 0 },
             });
 
-            // Slide + fade transition (fixed-size pin)
+            // Slide + fade transition (fixed-size pin with rich popup)
             viewer.addAnnotation(1200, 400, 0, 0, '📍', {
                 targetUrl: url,
                 targetPage: 0, // Only show on the first canvas
@@ -90,6 +97,8 @@ if (container) {
                 style: { fontSize: '24px', overflow: 'visible' },
                 activeClass: 'iiif-ann-slide-in',
                 inactiveClass: 'iiif-ann-slide-out',
+                popup: popupContent,
+                popupPosition: { x: 28, y: 0 },
             });
         })
         .catch((error) => console.error('Error loading:', error));

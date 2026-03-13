@@ -14,6 +14,9 @@ export abstract class RendererBase implements IIIFRenderer {
     container: HTMLElement;
     devicePixelRatio: number;
 
+    // Background clear color (shared by all renderers)
+    protected clearColor = { r: 0.1, g: 0.1, b: 0.1 };
+
     // Matrix caching — used by GPU renderers, ignored by Canvas2D
     protected cachedMVPMatrix: Float32Array = new Float32Array(16);
     protected cachedPerspectiveMatrix: Float32Array = new Float32Array(16);
@@ -160,10 +163,12 @@ export abstract class RendererBase implements IIIFRenderer {
 
     // Abstract methods that subclasses must implement
     abstract initialize(): Promise<void>;
-    abstract render(viewport: Viewport, tiles: TileRenderData[], thumbnail?: TileRenderData): void;
+    abstract render(viewport: Viewport, tiles: TileRenderData[]): void;
     abstract setVideoSource(video: HTMLVideoElement | null): void;
     abstract uploadTextureFromBitmap(tileId: string, bitmap: ImageBitmap): any;
-    abstract setClearColor(r: number, g: number, b: number): void;
+    setClearColor(r: number, g: number, b: number): void {
+        this.clearColor = { r, g, b };
+    }
     abstract destroyTexture(tileId: string): void;
     abstract clearTextureCache(): void;
     abstract destroy(): void;

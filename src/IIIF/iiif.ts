@@ -170,6 +170,7 @@ export class IIIFViewer {
     private customAnnotationSpecs: Array<{
         x: number; y: number; width: number; height: number;
         text?: string;
+        popupText?: string;
         /** When set, only replay on entries matching this manifest URL */
         targetUrl?: string;
         /** When set, only replay on entries matching this canvas index */
@@ -178,6 +179,8 @@ export class IIIFViewer {
             id?: string; type?: string; color?: string;
             style?: Record<string, string | undefined>;
             scaleWithZoom?: boolean; activeClass?: string; inactiveClass?: string;
+            popup?: string | HTMLElement;
+            popupPosition?: { x: number; y: number };
         };
     }> = [];
     private hiddenAnnotationTypes: Set<string> = new Set();
@@ -249,12 +252,17 @@ export class IIIFViewer {
         if (this.panels.settings !== undefined) this.setupSettingsPanel();
         if (this.panels.annotations !== undefined) this.setupAnnotationPanel();
         if (this.panels.manifest !== undefined) this.setupManifestPanel();
-        if (this.panels.gesture !== undefined) this.setupCVPanel();
+        if (this.panels.gesture !== undefined && !this.isMobileOrTablet()) this.setupCVPanel();
         if (this.panels.compare !== undefined) this.setupComparePanel();
 
         // Set up handlers
         this.setupResizeHandler();
         this.initializeRenderer();
+    }
+
+    private isMobileOrTablet(): boolean {
+        return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+            (navigator.maxTouchPoints > 1 && !matchMedia('(pointer: fine)').matches);
     }
 
     // ============================================================
@@ -469,23 +477,18 @@ export class IIIFViewer {
             panel.style.top = `${startTop}px`;
         };
 
-        const onMouseDown = (e: MouseEvent) => {
-            if ((e.target as HTMLElement).tagName === 'BUTTON') return;
-            e.stopPropagation();
-
+        const onPointerDown = (clientX: number, clientY: number) => {
             isPointerDown = true;
             hasUndocked = false;
-            startX = e.clientX;
-            startY = e.clientY;
-
-            e.preventDefault();
+            startX = clientX;
+            startY = clientY;
         };
 
-        const onMouseMove = (e: MouseEvent) => {
+        const onPointerMove = (clientX: number, clientY: number) => {
             if (!isPointerDown) return;
 
-            const dx = e.clientX - startX;
-            const dy = e.clientY - startY;
+            const dx = clientX - startX;
+            const dy = clientY - startY;
 
             // Only undock after exceeding drag threshold
             if (!hasUndocked) {
@@ -506,13 +509,13 @@ export class IIIFViewer {
             panel.style.top = `${Math.max(0, Math.min(newTop, maxTop))}px`;
 
             // Highlight dock and manage spacer
-            const targetDock = hitTestDock(e.clientX, e.clientY);
+            const targetDock = hitTestDock(clientX, clientY);
             for (const dock of getDocks()) {
                 dock.classList.toggle('dock-highlight', dock === targetDock);
             }
 
             if (targetDock) {
-                const insertIdx = findInsertIndex(targetDock, e.clientY);
+                const insertIdx = findInsertIndex(targetDock, clientY);
                 const currentChildren = Array.from(targetDock.children).filter(c => c !== spacer);
                 // Determine where spacer currently is (among non-spacer children)
                 const spacerCurrentIdx = spacer?.parentElement === targetDock
@@ -537,7 +540,7 @@ export class IIIFViewer {
             }
         };
 
-        const onMouseUp = (e: MouseEvent) => {
+        const onPointerUp = (clientX: number, clientY: number) => {
             if (!isPointerDown) return;
             isPointerDown = false;
 
@@ -550,7 +553,7 @@ export class IIIFViewer {
                 dock.classList.remove('dock-highlight');
             }
 
-            const targetDock = hitTestDock(e.clientX, e.clientY);
+            const targetDock = hitTestDock(clientX, clientY);
             if (targetDock && spacer?.parentElement === targetDock) {
                 // Replace spacer with the actual panel
                 panel.style.position = '';
@@ -569,9 +572,40 @@ export class IIIFViewer {
             }
         };
 
-        this.addEventListener(header, 'mousedown', onMouseDown as EventListener);
-        this.addEventListener(document.body, 'mousemove', onMouseMove as EventListener);
-        this.addEventListener(document.body, 'mouseup', onMouseUp as EventListener);
+        // Mouse events
+        this.addEventListener(header, 'mousedown', ((e: MouseEvent) => {
+            if ((e.target as HTMLElement).closest('button')) return;
+            e.stopPropagation();
+            e.preventDefault();
+            onPointerDown(e.clientX, e.clientY);
+        }) as EventListener);
+        this.addEventListener(document.body, 'mousemove', ((e: MouseEvent) => {
+            onPointerMove(e.clientX, e.clientY);
+        }) as EventListener);
+        this.addEventListener(document.body, 'mouseup', ((e: MouseEvent) => {
+            onPointerUp(e.clientX, e.clientY);
+        }) as EventListener);
+
+        // Touch events
+        this.addEventListener(header, 'touchstart', ((e: TouchEvent) => {
+            if ((e.target as HTMLElement).closest('button')) return;
+            if (e.touches.length !== 1) return;
+            e.stopPropagation();
+            e.preventDefault();
+            const t = e.touches[0];
+            onPointerDown(t.clientX, t.clientY);
+        }) as EventListener, { passive: false });
+        this.addEventListener(document.body, 'touchmove', ((e: TouchEvent) => {
+            if (!isPointerDown || e.touches.length !== 1) return;
+            e.preventDefault();
+            const t = e.touches[0];
+            onPointerMove(t.clientX, t.clientY);
+        }) as EventListener, { passive: false });
+        this.addEventListener(document.body, 'touchend', ((e: TouchEvent) => {
+            if (!isPointerDown) return;
+            const t = e.changedTouches[0];
+            onPointerUp(t.clientX, t.clientY);
+        }) as EventListener);
     }
 
     /**
@@ -905,7 +939,7 @@ export class IIIFViewer {
         if (this.panels.pages !== undefined) panelConfigs.push({ label: 'Pages', defaultVisible: this.panels.pages !== 'hide', containerClass: 'hide-pages' });
         if (this.panels.manifest !== undefined) panelConfigs.push({ label: 'Manifest', defaultVisible: this.panels.manifest !== 'hide', containerClass: 'hide-manifest' });
         if (this.panels.annotations !== undefined) panelConfigs.push({ label: 'Annotations', defaultVisible: this.panels.annotations !== 'hide', containerClass: 'hide-annotations' });
-        if (this.panels.gesture !== undefined) panelConfigs.push({ label: 'Gesture', defaultVisible: this.panels.gesture !== 'hide', containerClass: 'hide-vision' });
+        if (this.panels.gesture !== undefined && !this.isMobileOrTablet()) panelConfigs.push({ label: 'Gesture', defaultVisible: this.panels.gesture !== 'hide', containerClass: 'hide-vision' });
         if (this.panels.compare !== undefined) panelConfigs.push({ label: 'Compare', defaultVisible: this.panels.compare !== 'hide', containerClass: 'hide-compare' });
 
         for (const config of panelConfigs) {
@@ -1373,7 +1407,7 @@ export class IIIFViewer {
     listen() {
         this.addEventListener(this.container, 'mousedown', (event: MouseEvent) => {
             // Don't start pan when clicking toolbar/UI elements
-            if ((event.target as HTMLElement).closest('.iiif-toolbar, .iiif-canvas-nav, .iiif-toc, .iiif-metadata-panel, .iiif-canvas-list, .iiif-compare-control-bar')) return;
+            if ((event.target as HTMLElement).closest('.iiif-toolbar, .iiif-canvas-nav, .iiif-navigation-wrapper, .iiif-toc, .iiif-metadata-panel, .iiif-canvas-list, .iiif-compare-control-bar, .iiif-panel')) return;
 
             event.preventDefault();
             event.stopPropagation();
@@ -1409,7 +1443,7 @@ export class IIIFViewer {
 
         // Touch events for mobile/tablet
         this.addEventListener(this.container, 'touchstart', (event: TouchEvent) => {
-            if ((event.target as HTMLElement).closest('.iiif-toolbar, .iiif-canvas-nav, .iiif-toc, .iiif-metadata-panel, .iiif-canvas-list, .iiif-compare-control-bar')) return;
+            if ((event.target as HTMLElement).closest('.iiif-toolbar, .iiif-canvas-nav, .iiif-navigation-wrapper, .iiif-toc, .iiif-metadata-panel, .iiif-canvas-list, .iiif-compare-control-bar, .iiif-panel')) return;
 
             event.preventDefault();
             event.stopPropagation();
@@ -1462,6 +1496,7 @@ export class IIIFViewer {
         }, { passive: false });
 
         this.addEventListener(this.container, 'touchmove', (event: TouchEvent) => {
+            if ((event.target as HTMLElement).closest('.iiif-toolbar, .iiif-canvas-nav, .iiif-navigation-wrapper, .iiif-toc, .iiif-metadata-panel, .iiif-canvas-list, .iiif-compare-control-bar, .iiif-panel')) return;
             event.preventDefault();
 
             const rect = this.cachedContainerRect;
@@ -1500,6 +1535,7 @@ export class IIIFViewer {
         }, { passive: false });
 
         const onTouchEnd = (event: TouchEvent) => {
+            if ((event.target as HTMLElement).closest('.iiif-toolbar, .iiif-canvas-nav, .iiif-navigation-wrapper, .iiif-toc, .iiif-metadata-panel, .iiif-canvas-list, .iiif-compare-control-bar, .iiif-panel')) return;
             event.preventDefault();
 
             for (let i = 0; i < event.changedTouches.length; i++) {
@@ -2425,6 +2461,10 @@ export class IIIFViewer {
             targetUrl?: string;
             /** When set, only replay on compare entries matching this canvas index */
             targetPage?: number;
+            /** Popup content shown when the annotation is clicked */
+            popup?: string | HTMLElement;
+            /** Popup position offset in screen pixels from the annotation's top-left corner */
+            popupPosition?: { x: number; y: number };
         }
     ): string | undefined {
         if (!this.annotationManager) {
@@ -2446,6 +2486,7 @@ export class IIIFViewer {
         this.customAnnotationSpecs.push({
             x, y, width, height,
             text: typeof element === 'string' ? element : undefined,
+            popupText: typeof options?.popup === 'string' ? options.popup : undefined,
             targetUrl: options?.targetUrl,
             targetPage: options?.targetPage,
             options: { ...options, id },
@@ -2465,6 +2506,8 @@ export class IIIFViewer {
             scaleWithZoom: options?.scaleWithZoom,
             activeClass: options?.activeClass,
             inactiveClass: options?.inactiveClass,
+            popup: options?.popup,
+            popupPosition: options?.popupPosition,
         });
 
         this.updateAnnotationPanel();
@@ -2500,7 +2543,10 @@ export class IIIFViewer {
      */
     replayAnnotationSpecs(specs: typeof this.customAnnotationSpecs): void {
         for (const spec of specs) {
-            this.addAnnotation(spec.x, spec.y, spec.width, spec.height, spec.text, spec.options);
+            const opts = spec.popupText
+                ? { ...spec.options, popup: spec.popupText }
+                : spec.options;
+            this.addAnnotation(spec.x, spec.y, spec.width, spec.height, spec.text, opts);
         }
     }
 
@@ -2576,24 +2622,28 @@ export class IIIFViewer {
             return;
         }
 
-        // Collect tiles from all visible images
+        // Collect tiles from all visible images (including thumbnails)
         const allTiles: TileRenderData[] = [];
-        let thumbnail: TileRenderData | undefined;
 
         for (const worldImage of visibleImages) {
             const tiles = worldImage.tileManager.getLoadedTilesForRender(this.viewport);
             allTiles.push(...tiles);
 
-            if (!thumbnail) {
-                thumbnail = worldImage.tileManager.getThumbnail();
+            // Only include thumbnail when no regular tiles cover this image —
+            // prevents blurry flash when transitioning between zoom levels
+            if (tiles.length === 0) {
+                const thumbnail = worldImage.tileManager.getThumbnail();
+                if (thumbnail) {
+                    allTiles.push(thumbnail);
+                }
             }
         }
 
-        // Sort by z-depth for proper layering
+        // Single sort by z-depth for proper layering
         allTiles.sort((a, b) => a.z - b.z);
 
-        // Render
-        this.renderer.render(this.viewport, allTiles, thumbnail);
+        // Render (tiles are pre-sorted, no thumbnail param needed)
+        this.renderer.render(this.viewport, allTiles);
 
         // Update overlays only if viewport changed
         if (viewportChanged) {

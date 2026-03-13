@@ -29,10 +29,10 @@ export interface IIIFRenderer {
 
     initialize(): Promise<void>;
     resize(): void;
-    render(viewport: Viewport, tiles: TileRenderData[], thumbnail?: TileRenderData): void;
+    render(viewport: Viewport, tiles: TileRenderData[]): void;
     setVideoSource(video: HTMLVideoElement | null): void;
     uploadTextureFromBitmap(tileId: string, bitmap: ImageBitmap): any;
-    setClearColor(r: number, g: number, b: number): void;
+    setClearColor(r: number, g: number, b: number): void; // Implemented in RendererBase
     destroyTexture(tileId: string): void;
     clearTextureCache(): void;
     destroy(): void;

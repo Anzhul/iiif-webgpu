@@ -33,9 +33,6 @@ export class WebGPURenderer extends RendererBase {
     // Reusable buffer for uniform data to avoid per-frame allocations
     private uniformDataBuffer: Float32Array = new Float32Array(WebGPURenderer.MAX_TILES * WebGPURenderer.FLOATS_PER_TILE);
 
-    // Background clear color
-    private clearColor = { r: 0.1, g: 0.1, b: 0.1 };
-
     // Texture cache: tileId -> GPUTexture
     private textureCache: Map<string, GPUTexture> = new Map();
     private bindGroupCache: Map<string, GPUBindGroup> = new Map();
@@ -365,14 +362,12 @@ export class WebGPURenderer extends RendererBase {
         let bindGroup = this.bindGroupCache.get(tile.id);
 
         if (!bindGroup) {
-            const texture = this.textureCache.get(tile.id);
+            let texture = this.textureCache.get(tile.id);
             if (!texture) {
-                this.uploadTextureFromBitmap(tile.id, tile.image);
-                const uploadedTexture = this.textureCache.get(tile.id);
-                if (!uploadedTexture) return;
+                texture = this.uploadTextureFromBitmap(tile.id, tile.image);
+                if (!texture) return;
             }
 
-            const cachedTexture = this.textureCache.get(tile.id)!;
             bindGroup = this.device.createBindGroup({
                 layout: this.pipeline.getBindGroupLayout(0),
                 entries: [
@@ -386,7 +381,7 @@ export class WebGPURenderer extends RendererBase {
                     },
                     {
                         binding: 2,
-                        resource: cachedTexture.createView()
+                        resource: texture.createView()
                     }
                 ]
             });
@@ -397,7 +392,7 @@ export class WebGPURenderer extends RendererBase {
         renderPass.draw(6, 1, 0, tileIndex);
     }
 
-    render(viewport: Viewport, tiles: TileRenderData[], thumbnail?: TileRenderData) {
+    render(viewport: Viewport, tiles: TileRenderData[]) {
         if (!this.device || !this.context || !this.pipeline || !this.storageBuffer || !this.msaaTexture) {
             return;
         }
@@ -413,16 +408,9 @@ export class WebGPURenderer extends RendererBase {
             viewport.far
         );
 
-        let allTiles: TileRenderData[];
-        if (thumbnail) {
-            allTiles = [...tiles, thumbnail].sort((a, b) => a.z - b.z);
-        } else {
-            allTiles = tiles;
-        }
-
-        if (allTiles.length > WebGPURenderer.MAX_TILES) {
-            console.error(`Storage buffer overflow: Trying to render ${allTiles.length} tiles but buffer only supports ${WebGPURenderer.MAX_TILES} tiles. Truncating.`);
-            allTiles = allTiles.slice(0, WebGPURenderer.MAX_TILES);
+        if (tiles.length > WebGPURenderer.MAX_TILES) {
+            console.error(`Storage buffer overflow: Trying to render ${tiles.length} tiles but buffer only supports ${WebGPURenderer.MAX_TILES} tiles. Truncating.`);
+            tiles = tiles.slice(0, WebGPURenderer.MAX_TILES);
         }
 
         const floatsPerTile = WebGPURenderer.FLOATS_PER_TILE;
@@ -430,8 +418,8 @@ export class WebGPURenderer extends RendererBase {
         // Expand each tile quad by 0.5 physical pixels to prevent border wavering
         const expand = 0.5 / (viewport.scale * this.devicePixelRatio);
 
-        for (let i = 0; i < allTiles.length; i++) {
-            const tile = allTiles[i];
+        for (let i = 0; i < tiles.length; i++) {
+            const tile = tiles[i];
             const offset = i * floatsPerTile;
 
             // Per-edge expand: skip expand at image edges to prevent sub-pixel
@@ -468,7 +456,7 @@ export class WebGPURenderer extends RendererBase {
             0,
             this.uniformDataBuffer.buffer,
             0,
-            allTiles.length * floatsPerTile * 4
+            tiles.length * floatsPerTile * 4
         );
 
         const commandEncoder = this.device.createCommandEncoder();
@@ -488,17 +476,13 @@ export class WebGPURenderer extends RendererBase {
 
         renderPass.setPipeline(this.pipeline);
 
-        for (let i = 0; i < allTiles.length; i++) {
-            this.renderTile(renderPass, allTiles[i], i);
+        for (let i = 0; i < tiles.length; i++) {
+            this.renderTile(renderPass, tiles[i], i);
         }
 
         renderPass.end();
         const commandBuffer = commandEncoder.finish();
         this.device.queue.submit([commandBuffer]);
-    }
-
-    setClearColor(r: number, g: number, b: number) {
-        this.clearColor = { r, g, b };
     }
 
     destroyTexture(tileId: string) {

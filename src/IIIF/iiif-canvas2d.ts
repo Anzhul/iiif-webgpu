@@ -4,7 +4,6 @@ import { RendererBase } from './iiif-renderer-base.js';
 
 export class Canvas2DRenderer extends RendererBase {
     private ctx?: CanvasRenderingContext2D;
-    private clearColor = '#1a1a1a';
     private textureCache: Map<string, ImageBitmap> = new Map();
 
     constructor(container: HTMLElement) {
@@ -20,7 +19,7 @@ export class Canvas2DRenderer extends RendererBase {
         console.log('Canvas 2D renderer initialized successfully');
     }
 
-    render(viewport: Viewport, tiles: TileRenderData[], thumbnail?: TileRenderData) {
+    render(viewport: Viewport, tiles: TileRenderData[]) {
         if (!this.ctx) return;
 
         const ctx = this.ctx;
@@ -30,18 +29,12 @@ export class Canvas2DRenderer extends RendererBase {
         const scale = viewport.scale;
 
         // Clear
-        ctx.fillStyle = this.clearColor;
+        const { r, g, b } = this.clearColor;
+        const toHex = (v: number) => Math.round(v * 255).toString(16).padStart(2, '0');
+        ctx.fillStyle = `#${toHex(r)}${toHex(g)}${toHex(b)}`;
         ctx.fillRect(0, 0, cw, ch);
 
-        // Merge tiles + thumbnail, sort by z (painter's algorithm)
-        let allTiles: TileRenderData[];
-        if (thumbnail) {
-            allTiles = [...tiles, thumbnail].sort((a, b) => a.z - b.z);
-        } else {
-            allTiles = tiles;
-        }
-
-        for (const tile of allTiles) {
+        for (const tile of tiles) {
             const bitmap = this.textureCache.get(tile.id);
             if (!bitmap) continue;
 
@@ -69,11 +62,6 @@ export class Canvas2DRenderer extends RendererBase {
     uploadTextureFromBitmap(tileId: string, bitmap: ImageBitmap): ImageBitmap {
         this.textureCache.set(tileId, bitmap);
         return bitmap;
-    }
-
-    setClearColor(r: number, g: number, b: number) {
-        const toHex = (v: number) => Math.round(v * 255).toString(16).padStart(2, '0');
-        this.clearColor = `#${toHex(r)}${toHex(g)}${toHex(b)}`;
     }
 
     destroyTexture(tileId: string) {

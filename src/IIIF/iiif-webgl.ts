@@ -49,9 +49,6 @@ export class WebGLRenderer extends RendererBase {
     private textureBoundsLocation?: WebGLUniformLocation | null;
     private textureLocation?: WebGLUniformLocation | null;
 
-    // Background clear color
-    private clearColor = { r: 0.1, g: 0.1, b: 0.1 };
-
     // Texture cache: tileId -> WebGLTexture
     private textureCache: Map<string, WebGLTexture> = new Map();
 
@@ -258,7 +255,7 @@ export class WebGLRenderer extends RendererBase {
         this.gl.drawArrays(this.gl.TRIANGLES, 0, 6);
     }
 
-    render(viewport: Viewport, tiles: TileRenderData[], thumbnail?: TileRenderData) {
+    render(viewport: Viewport, tiles: TileRenderData[]) {
         if (!this.gl || !this.program) return;
 
         const mvpMatrix = this.getMVPMatrix(
@@ -271,13 +268,6 @@ export class WebGLRenderer extends RendererBase {
             viewport.near,
             viewport.far
         );
-
-        let allTiles: TileRenderData[];
-        if (thumbnail) {
-            allTiles = [...tiles, thumbnail].sort((a, b) => a.z - b.z);
-        } else {
-            allTiles = tiles;
-        }
 
         this.gl.clearColor(this.clearColor.r, this.clearColor.g, this.clearColor.b, 1.0);
         this.gl.clear(this.gl.COLOR_BUFFER_BIT);
@@ -301,13 +291,9 @@ export class WebGLRenderer extends RendererBase {
         // Expand each tile quad by 0.5 physical pixels to prevent border wavering
         const expand = 0.5 / (viewport.scale * this.devicePixelRatio);
 
-        for (const tile of allTiles) {
+        for (const tile of tiles) {
             this.renderTile(tile, mvpMatrix, expand);
         }
-    }
-
-    setClearColor(r: number, g: number, b: number) {
-        this.clearColor = { r, g, b };
     }
 
     destroyTexture(tileId: string) {
