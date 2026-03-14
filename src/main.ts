@@ -18,7 +18,7 @@ if (container) {
             manifest: 'show-closed',
             annotations: 'show',
             compare: 'show',
-            gesture: 'show'
+            gesture: 'show-closed'
         },
         enableOverlays: true
     });

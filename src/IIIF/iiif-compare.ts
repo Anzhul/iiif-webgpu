@@ -1,44 +1,11 @@
 import { IIIFViewer } from './iiif';
 import type { IIIFViewerOptions } from './iiif';
+import type { CompareEntry, CompareOptions } from './types';
+import { EYE_SVG, PEN_SVG, TRASH_SVG } from './icons';
+import { COMPARE_CONFIG } from './config';
 
-export interface CompareEntry {
-    url: string;
-    canvasIndex?: number;
-    label: string;
-}
-
-export interface CompareOptions {
-    viewerOptions?: IIIFViewerOptions;
-    manifestUrl: string;
-    canvases: Array<{ label: string; index: number; thumbnailServiceUrl?: string }>;
-    currentCanvasIndex: number;
-    onExit?: () => void;
-    onSuspendParent?: () => void;
-    onResumeParent?: () => void;
-    savedEntries?: CompareEntry[];
-    /** External panel element to populate with canvas list (instead of creating a new one) */
-    listPanel?: HTMLDivElement;
-    /** Universal panels to reparent into the comparison wrapper when in environment mode */
-    universalPanels?: { element: HTMLElement; dockPosition: string | null }[];
-    /** Custom annotation specs to replay on child viewers */
-    customAnnotationSpecs?: Array<{
-        x: number; y: number; width: number; height: number;
-        text?: string;
-        popupText?: string;
-        targetUrl?: string;
-        targetPage?: number;
-        options?: {
-            id?: string; type?: string; color?: string;
-            style?: Record<string, string | undefined>;
-            scaleWithZoom?: boolean; activeClass?: string; inactiveClass?: string;
-            popup?: string | HTMLElement;
-        };
-    }>;
-}
-
-const EYE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
-const PEN_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.85 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>`;
-const TRASH_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>`;
+// Re-export types for backwards compatibility
+export type { CompareEntry, CompareOptions } from './types';
 
 // ============================================================
 // VIEWER ENVIRONMENT
@@ -83,8 +50,11 @@ export class ComparisonController {
 
     private entries: CompareEntry[] = [];
     private visibleIndices: number[] = [];
-    private readonly MAX_VISIBLE = 4;
+    private readonly MAX_VISIBLE = COMPARE_CONFIG.MAX_VISIBLE_VIEWERS;
     private initialEntryIndex: number = 0;
+
+    // Drag operation abort controller (separate from main to allow cleanup mid-drag)
+    private dragAbortController: AbortController | null = null;
 
     // Environment mode state
     private environments: Map<number, ViewerEnvironment> = new Map();
@@ -149,6 +119,9 @@ export class ComparisonController {
 
     destroy(): void {
         this.abortController.abort();
+        // Also abort any in-progress drag operation
+        this.dragAbortController?.abort();
+        this.dragAbortController = null;
         this.hideEmptyState();
         if (this.inEnvironmentMode) {
             // Restore universal panels before removing wrapper
@@ -193,6 +166,8 @@ export class ComparisonController {
      * Called immediately in enterEnvironmentMode so panels stay visible.
      */
     private reparentUniversalPanels(): void {
+        // Start z-index high to ensure universal panels are on top
+        let zIndex = 2000;
         for (const { element, dockPosition } of this.options.universalPanels ?? []) {
             if (!this.savedPanelPositions.has(element)) {
                 this.savedPanelPositions.set(element, {
@@ -203,11 +178,17 @@ export class ComparisonController {
 
             if (dockPosition) {
                 const dock = this.wrapperDocks.get(dockPosition);
-                if (dock) dock.appendChild(element);
+                if (dock) {
+                    dock.appendChild(element);
+                    // Bring dock to front
+                    dock.style.zIndex = String(zIndex++);
+                }
             } else {
                 // Floating panel — append directly to wrapper, keep position
                 this.wrapper!.appendChild(element);
             }
+            // Bring panel element to front
+            element.style.zIndex = String(zIndex++);
         }
     }
 
@@ -230,16 +211,25 @@ export class ComparisonController {
         const leftmost = orderedEnvs[0].container;
         const rightmost = orderedEnvs[orderedEnvs.length - 1].container;
 
+        let zIndex = 2000;
         for (const { element, dockPosition } of this.options.universalPanels ?? []) {
             if (!dockPosition || dockPosition.includes('center')) continue;
 
             if (dockPosition.includes('left')) {
                 const dock = leftmost.querySelector(`.iiif-dock-${dockPosition}`) as HTMLElement | null;
-                if (dock) dock.appendChild(element);
+                if (dock) {
+                    dock.appendChild(element);
+                    dock.style.zIndex = String(zIndex++);
+                }
             } else if (dockPosition.includes('right')) {
                 const dock = rightmost.querySelector(`.iiif-dock-${dockPosition}`) as HTMLElement | null;
-                if (dock) dock.appendChild(element);
+                if (dock) {
+                    dock.appendChild(element);
+                    dock.style.zIndex = String(zIndex++);
+                }
             }
+            // Keep panel on top
+            element.style.zIndex = String(zIndex++);
         }
     }
 
@@ -516,6 +506,12 @@ export class ComparisonController {
             );
             this.environments.set(idx, env);
 
+            // Apply initial background color if provided
+            if (this.options.initialBackgroundColor) {
+                const { r, g, b } = this.options.initialBackgroundColor;
+                env.viewer.renderer?.setClearColor(r, g, b);
+            }
+
             if (gen !== this.updateGeneration) return;
             try {
                 await env.viewer.loadUrl(entry.url, true);
@@ -772,6 +768,12 @@ export class ComparisonController {
     // ============================================================
 
     private startDrag(item: HTMLDivElement, index: number, startY: number): void {
+        // Create a new abort controller for this drag operation
+        // This ensures cleanup even if the component is destroyed mid-drag
+        this.dragAbortController?.abort();
+        this.dragAbortController = new AbortController();
+        const signal = this.dragAbortController.signal;
+
         const itemRect = item.getBoundingClientRect();
 
         // Create placeholder
@@ -822,10 +824,9 @@ export class ComparisonController {
         };
 
         const onDragEnd = () => {
-            document.removeEventListener('mousemove', onMouseMove);
-            document.removeEventListener('mouseup', onMouseUp);
-            document.removeEventListener('touchmove', onTouchMove);
-            document.removeEventListener('touchend', onTouchEnd);
+            // Abort the drag controller to remove all listeners
+            this.dragAbortController?.abort();
+            this.dragAbortController = null;
 
             item.classList.remove('dragging');
             item.style.position = '';
@@ -846,10 +847,11 @@ export class ComparisonController {
         const onTouchMove = (e: TouchEvent) => { e.preventDefault(); onDragMove(e.touches[0].clientY); };
         const onTouchEnd = () => onDragEnd();
 
-        document.addEventListener('mousemove', onMouseMove);
-        document.addEventListener('mouseup', onMouseUp);
-        document.addEventListener('touchmove', onTouchMove, { passive: false });
-        document.addEventListener('touchend', onTouchEnd);
+        // Use signal for automatic cleanup
+        document.addEventListener('mousemove', onMouseMove, { signal });
+        document.addEventListener('mouseup', onMouseUp, { signal });
+        document.addEventListener('touchmove', onTouchMove, { passive: false, signal } as AddEventListenerOptions);
+        document.addEventListener('touchend', onTouchEnd, { signal });
     }
 
     private reorderEntry(fromIndex: number, toIndex: number): void {
@@ -899,5 +901,12 @@ export class ComparisonController {
             eyeBtn.classList.toggle('active', isVisible);
             eyeBtn.classList.toggle('disabled', atCapacity && !isVisible);
         });
+    }
+
+    /** Set background color on all compare instance viewers */
+    setBackgroundColor(r: number, g: number, b: number): void {
+        for (const env of this.environments.values()) {
+            env.viewer.renderer?.setClearColor(r, g, b);
+        }
     }
 }

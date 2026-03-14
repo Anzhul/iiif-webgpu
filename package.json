@@ -1,25 +1,34 @@
 {
-  "name": "iiif-webgpu",
-  "private": true,
-  "version": "0.0.0",
+  "name": "juniper-iiif",
+  "version": "1.0.0",
+  "description": "High-performance IIIF viewer with WebGPU/WebGL rendering, annotations, and comparison mode",
+  "author": "Anzhu <anzhul@umich.edu>",
+  "license": "MIT",
+  "keywords": ["iiif", "webgpu", "webgl", "image-viewer", "annotations", "digital-humanities"],
   "type": "module",
   "main": "./dist/iiif-viewer.umd.cjs",
   "module": "./dist/iiif-viewer.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/iiif-viewer.js",
       "require": "./dist/iiif-viewer.umd.cjs"
     },
     "./style.css": "./dist/iiif-viewer.css"
   },
+  "sideEffects": [
+    "*.css"
+  ],
   "files": [
     "dist"
   ],
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "build:lib": "vite build",
-    "preview": "vite preview"
+    "build:lib": "vite build && tsc --emitDeclarationOnly --declaration --outDir dist",
+    "preview": "vite preview",
+    "prepublishOnly": "npm run build:lib"
   },
   "devDependencies": {
     "@vitejs/plugin-basic-ssl": "^2.1.4",

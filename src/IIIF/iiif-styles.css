@@ -66,6 +66,17 @@
   /* --- Typography --- */
   --font-family: 'Segoe UI', system-ui, sans-serif;
   --font-mono: 'Consolas', 'Monaco', monospace;
+
+  /* --- Breakpoints (for reference, CSS can't use these in media queries) --- */
+  /* Mobile: < 480px */
+  /* Tablet: 480px - 768px */
+  /* Desktop: 768px - 1440px */
+  /* Large: > 1440px */
+
+  /* --- Responsive Spacing --- */
+  --dock-spacing: clamp(0.5rem, 3vw, 2rem);
+  --panel-min-width: 120px;
+  --panel-max-width: 280px;
 }
 
 /* =============================================
@@ -228,6 +239,111 @@
 }
 .iiif-panel-close:hover {
   color: var(--text-on-hover);
+}
+
+/* Panel Resize Handles */
+.iiif-panel {
+  position: relative;
+}
+.iiif-panel.resizable {
+  overflow: visible;
+}
+
+/* Edge resize handles */
+.iiif-resize-handle {
+  position: absolute;
+  background: transparent;
+  z-index: 10;
+  pointer-events: auto;
+}
+/* Cursor override during resize - applied to body to prevent cursor flicker */
+body.iiif-resizing-ew,
+body.iiif-resizing-ew * {
+  cursor: ew-resize !important;
+}
+body.iiif-resizing-ns,
+body.iiif-resizing-ns * {
+  cursor: ns-resize !important;
+}
+body.iiif-resizing-nwse,
+body.iiif-resizing-nwse * {
+  cursor: nwse-resize !important;
+}
+body.iiif-resizing-nesw,
+body.iiif-resizing-nesw * {
+  cursor: nesw-resize !important;
+}
+
+/* Horizontal edges (left/right) */
+.iiif-resize-handle-e,
+.iiif-resize-handle-w {
+  width: 6px;
+  top: 0;
+  bottom: 0;
+  cursor: ew-resize;
+}
+.iiif-resize-handle-e {
+  right: -3px;
+}
+.iiif-resize-handle-w {
+  left: -3px;
+}
+
+/* Vertical edges (top/bottom) */
+.iiif-resize-handle-n,
+.iiif-resize-handle-s {
+  height: 6px;
+  left: 0;
+  right: 0;
+  cursor: ns-resize;
+}
+.iiif-resize-handle-n {
+  top: -3px;
+}
+.iiif-resize-handle-s {
+  bottom: -3px;
+}
+
+/* Corner resize handles */
+.iiif-resize-handle-nw,
+.iiif-resize-handle-ne,
+.iiif-resize-handle-sw,
+.iiif-resize-handle-se {
+  width: 10px;
+  height: 10px;
+}
+.iiif-resize-handle-nw {
+  top: -5px;
+  left: -5px;
+  cursor: nwse-resize;
+}
+.iiif-resize-handle-ne {
+  top: -5px;
+  right: -5px;
+  cursor: nesw-resize;
+}
+.iiif-resize-handle-sw {
+  bottom: -5px;
+  left: -5px;
+  cursor: nesw-resize;
+}
+.iiif-resize-handle-se {
+  bottom: -5px;
+  right: -5px;
+  cursor: nwse-resize;
+}
+
+/* Hide resize handles when panel is collapsed */
+.iiif-panel:has(.iiif-panel-body.collapsed) .iiif-resize-handle {
+  display: none;
+}
+
+/* Panel with explicit dimensions during/after resize */
+.iiif-panel.resized {
+  min-width: unset !important;
+  max-width: unset !important;
+  min-height: unset !important;
+  max-height: unset !important;
 }
 
 /* =============================================
@@ -1500,10 +1616,124 @@
   .iiif-canvas-list-delete {
     opacity: 1;
   }
+
+  /* Larger resize handles for touch */
+  .iiif-resize-handle-e,
+  .iiif-resize-handle-w {
+    width: 12px;
+  }
+  .iiif-resize-handle-e { right: -6px; }
+  .iiif-resize-handle-w { left: -6px; }
+
+  .iiif-resize-handle-n,
+  .iiif-resize-handle-s {
+    height: 12px;
+  }
+  .iiif-resize-handle-n { top: -6px; }
+  .iiif-resize-handle-s { bottom: -6px; }
+
+  .iiif-resize-handle-nw,
+  .iiif-resize-handle-ne,
+  .iiif-resize-handle-sw,
+  .iiif-resize-handle-se {
+    width: 16px;
+    height: 16px;
+  }
+  .iiif-resize-handle-nw { top: -8px; left: -8px; }
+  .iiif-resize-handle-ne { top: -8px; right: -8px; }
+  .iiif-resize-handle-sw { bottom: -8px; left: -8px; }
+  .iiif-resize-handle-se { bottom: -8px; right: -8px; }
 }
 
-/* Tighter edge spacing on mobile/tablet */
-@media (max-width: 1024px) {
+/* =============================================
+   RESPONSIVE BREAKPOINTS
+   ============================================= */
+
+/* --- Large screens (1440px+) --- */
+@media (min-width: 1440px) {
+  .iiif-dock-top-right,
+  .iiif-dock-top-left,
+  .iiif-dock-top-center {
+    top: 2.5rem;
+  }
+  .iiif-dock-bottom-right,
+  .iiif-dock-bottom-left,
+  .iiif-dock-bottom-center {
+    bottom: 2.5rem;
+  }
+  .iiif-dock-top-right,
+  .iiif-dock-bottom-right {
+    right: 3rem;
+  }
+  .iiif-dock-top-left,
+  .iiif-dock-bottom-left {
+    left: 3rem;
+  }
+
+  /* Larger panel max widths on big screens */
+  .iiif-toc,
+  .iiif-manifest-panel,
+  .iiif-annotation-panel {
+    max-width: 320px;
+  }
+}
+
+/* --- Desktop (768px - 1440px) - Default styles, no changes needed --- */
+
+/* --- Tablet (480px - 768px) --- */
+@media (max-width: 768px) {
+  .iiif-dock-top-right,
+  .iiif-dock-top-left,
+  .iiif-dock-top-center {
+    top: 0.75rem;
+  }
+  .iiif-dock-bottom-right,
+  .iiif-dock-bottom-left,
+  .iiif-dock-bottom-center {
+    bottom: 0.75rem;
+  }
+  .iiif-dock-top-right,
+  .iiif-dock-bottom-right {
+    right: 0.75rem;
+  }
+  .iiif-dock-top-left,
+  .iiif-dock-bottom-left {
+    left: 0.75rem;
+  }
+
+  /* Compact panels */
+  .iiif-panel {
+    max-width: 200px;
+  }
+  .iiif-panel-header {
+    padding: 5px 8px;
+    font-size: 9px;
+  }
+  .iiif-panel-body {
+    padding: 3px;
+  }
+
+  /* Smaller canvas nav thumbnails */
+  .iiif-canvas-nav {
+    width: 60px;
+  }
+  .iiif-canvas-nav-item-img {
+    width: 44px;
+    height: 44px;
+  }
+
+  /* Compact toolbar */
+  .iiif-toolbar {
+    height: 2rem;
+  }
+  .iiif-toolbar-button {
+    min-width: 1.8rem;
+  }
+}
+
+/* --- Mobile (<480px) - Collapsed minimal UI --- */
+@media (max-width: 480px) {
+  /* Minimal dock spacing */
   .iiif-dock-top-right,
   .iiif-dock-top-left,
   .iiif-dock-top-center {
@@ -1522,19 +1752,70 @@
   .iiif-dock-bottom-left {
     left: 0.5rem;
   }
-  .iiif-toolbar.position-top-left {
-    top: 0.5rem;
-    left: 0.5rem;
+  .iiif-dock {
+    gap: 4px;
   }
-  .iiif-toolbar.position-bottom-right {
-    bottom: 0.5rem;
-    right: 0.5rem;
+
+  /* Panels collapse to icons by default */
+  .iiif-panel {
+    max-width: 160px;
   }
-  .iiif-toolbar.position-bottom-left {
-    bottom: 0.5rem;
-    left: 0.5rem;
+  .iiif-panel-header {
+    padding: 4px 6px;
+    font-size: 8px;
   }
-  .iiif-toolbar.position-bottom-center {
-    bottom: 0.5rem;
+  .iiif-panel-body {
+    padding: 2px;
+  }
+
+  /* Minimal canvas nav - just icons */
+  .iiif-canvas-nav {
+    width: 48px;
+  }
+  .iiif-canvas-nav-item {
+    padding: 2px;
+  }
+  .iiif-canvas-nav-item-img {
+    width: 36px;
+    height: 36px;
+  }
+  .iiif-canvas-nav-item-label {
+    display: none;
+  }
+
+  /* Hide less essential panels/elements on mobile */
+  .iiif-cv-panel,
+  .iiif-toc,
+  .iiif-navigation-wrapper {
+    display: none !important;
+  }
+  /* Allow user to show them via settings */
+  .iiif-viewer.show-all-panels .iiif-cv-panel,
+  .iiif-viewer.show-all-panels .iiif-toc,
+  .iiif-viewer.show-all-panels .iiif-navigation-wrapper {
+    display: flex !important;
+  }
+
+  /* Compact toolbar */
+  .iiif-toolbar {
+    height: 1.8rem;
+  }
+  .iiif-toolbar-button {
+    min-width: 1.6rem;
+  }
+  .iiif-toolbar-btn-group {
+    gap: 0;
+  }
+
+  /* Hide resize handles on mobile - use pinch/zoom instead */
+  .iiif-resize-handle {
+    display: none;
+  }
+
+  /* Settings panel stays accessible */
+  .iiif-settings-panel {
+    display: flex;
+    max-width: 140px;
   }
 }
+

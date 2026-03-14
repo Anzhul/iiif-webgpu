@@ -2,6 +2,7 @@ import { IIIFImage } from './iiif-image';
 import type { WorldImage } from './iiif-world';
 import type { Viewport } from './iiif-view';
 import type { IIIFRenderer, TileRenderData } from './iiif-renderer';
+import { TILE_CONFIG } from './config';
 
 /**
  * TileManager - Manages IIIF tile loading and rendering
@@ -546,7 +547,7 @@ export class TileManager {
         }
     }
 
-    private static readonly MAX_UPLOADS_PER_FRAME = 8;
+    private static readonly MAX_UPLOADS_PER_FRAME = TILE_CONFIG.MAX_UPLOADS_PER_FRAME;
 
     private processGPUUploadQueue() {
         if (this.pendingGPUUploads.length === 0) {

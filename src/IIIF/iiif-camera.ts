@@ -3,6 +3,7 @@ import { World } from './iiif-world';
 import type { EasingFunction } from './easing';
 import { easeOutQuart } from './easing';
 import { Spring } from './spring';
+import { CAMERA_CONFIG } from './config';
 
 /**
  * Camera system with spring-based interactive animations and easing-based programmatic animations.
@@ -62,13 +63,8 @@ export class Camera {
     private lastImmediateRequestTime: number = 0;
     private tileUpdateTimer: number | null = null;
 
-    private readonly CONFIG = {
-        TILE_IMMEDIATE_THROTTLE: 200,  // 5 requests/sec max
-        TILE_DEBOUNCE_DELAY: 50,       // 50ms debounce
-        ZOOM_THROTTLE: 80,              // 80ms between wheel events
-        SPRING_STIFFNESS: 6.5,
-        ANIMATION_TIME: 1.25
-    } as const;
+    // Use centralized config
+    private readonly CONFIG = CAMERA_CONFIG;
 
     constructor(viewport: Viewport, world: World) {
         this.viewport = viewport;

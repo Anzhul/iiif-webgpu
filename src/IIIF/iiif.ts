@@ -11,7 +11,18 @@ import { IIIFOverlayManager } from './iiif-overlay';
 import { World, WorldImage } from './iiif-world';
 import type { WorldPlacement } from './iiif-world';
 import { parseIIIFUrl, fetchAnnotationList } from './iiif-parser';
-import type { ParsedManifest, ParsedImageService, ParsedAnnotationPage, ParsedRange } from './iiif-parser';
+import type { ParsedManifest, ParsedImageService, ParsedRange, ParsedCanvas } from './iiif-parser';
+import { EYE_SVG } from './icons';
+import { PANEL_CLASS_MAP, PANEL_HIDE_CLASS, PER_INSTANCE_PANELS } from './config';
+import type { IIIFViewerOptions, IIIFViewerPanels, LayoutState, CanvasInfo } from './types';
+
+// Dynamic import types (for lazy loading modules)
+import type { CVController } from './iiif-cv';
+import type { ComparisonController } from './iiif-compare';
+
+// Re-export newly extracted modules for library consumers
+export { PanelManager } from './iiif-panel-manager';
+export { setupInputHandlers } from './iiif-input-handlers';
 
 import './iiif-styles.css';
 
@@ -21,101 +32,22 @@ export type { CustomAnnotation, Annotation, IIIFAnnotation } from './iiif-annota
 export { IIIFOverlayManager } from './iiif-overlay';
 export type { WorldPlacement } from './iiif-world';
 export type { ParsedRange, ParsedManifestMetadata, ParsedMetadataItem } from './iiif-parser';
+export type { IIIFViewerOptions, IIIFViewerPanels, LayoutState } from './types';
 
-/**
- * IIIFViewer - Main viewer class orchestrating all components
- *
- * Design principles:
+/*
+IIIFViewer - Main viewer class orchestrating all components
+
+    Design principles:
  * - Render-on-demand with dirty flag pattern (only render when needed)
  * - Proper resource cleanup with destroy methods
  * - Centralized configuration
  * - Type-safe event handling
  * - Efficient viewport change detection
  * - Lazy loading and caching where possible
- */
 
-type PanelVisibility = 'show' | 'hide' | 'show-open' | 'show-closed';
+*/
 
-export interface IIIFViewerPanels {
-    settings?: PanelVisibility;
-    navigation?: PanelVisibility;
-    pages?: PanelVisibility;
-    manifest?: PanelVisibility;
-    annotations?: PanelVisibility;
-    gesture?: PanelVisibility;
-    compare?: PanelVisibility;
-}
-
-const PANEL_CLASS_MAP: Record<string, string> = {
-    'pages': 'iiif-canvas-nav',
-    'navigation': 'iiif-toc',
-    'manifest': 'iiif-manifest-panel',
-    'annotations': 'iiif-annotation-panel',
-    'gesture': 'iiif-cv-panel',
-    'compare': 'iiif-compare-panel',
-    'settings': 'iiif-settings-panel',
-};
-
-const PANEL_HIDE_CLASS: Record<string, string> = {
-    'navigation': 'hide-navigation',
-    'pages': 'hide-pages',
-    'manifest': 'hide-manifest',
-    'annotations': 'hide-annotations',
-    'gesture': 'hide-vision',
-    'compare': 'hide-compare',
-};
-
-/** Panels cloned per viewer instance (content-specific) */
-const PER_INSTANCE_PANELS: ReadonlySet<string> = new Set([
-    'navigation', 'pages', 'manifest', 'annotations',
-]);
-
-// Universal panels (settings, compare, gesture) exist only on the main viewer
-
-export interface LayoutState {
-    version: 1;
-    manifestUrl: string;
-    canvasIndex: number;
-    viewport: {
-        centerX: number;
-        centerY: number;
-        cameraZ: number;
-    };
-    panels: {
-        [key: string]: {
-            visible: boolean;
-            collapsed: boolean;
-            dockPosition: string | null;
-            dockIndex: number;
-            floatPosition?: { left: number; top: number };
-        };
-    };
-    settings: {
-        backgroundColor: string;
-        theme: 'light' | 'dark';
-    };
-    annotations: { pageId: string; visible: boolean }[];
-}
-
-export interface IIIFViewerOptions {
-    renderer?: 'webgpu' | 'webgl' | 'canvas2d' | 'auto';
-    enableOverlays?: boolean;
-    enableToolbar?: boolean;
-    enableCompare?: boolean;
-    enablePanels?: boolean;
-    maxCacheSize?: number;
-    toolbar?: any;
-    panels?: IIIFViewerPanels;
-    suppressNavigation?: boolean;
-    suppressSettings?: boolean;
-}
-
-interface CanvasInfo {
-    width: number;
-    height: number;
-    annotations: ParsedAnnotationPage[];
-    annotationListUrls: string[];
-}
+// Types are now imported from './types' and re-exported above
 
 export class IIIFViewer {
     // Core components
@@ -147,7 +79,7 @@ export class IIIFViewer {
     private cvStatusEl?: HTMLSpanElement;
     private cvToggleBtn?: HTMLButtonElement;
     private cvGestureBtn?: HTMLButtonElement;
-    private cvController?: any;
+    private cvController?: CVController;
 
     private comparePanel?: HTMLDivElement;
     private settingsPanel?: HTMLDivElement;
@@ -165,7 +97,7 @@ export class IIIFViewer {
     private renderLoopActive: boolean = false;
     private animationFrameId?: number;
     private needsRender: boolean = true;
-    private comparisonController?: any;
+    private comparisonController?: ComparisonController;
     private compareAddedEntries: Array<{ url: string; label: string }> = [];
     private customAnnotationSpecs: Array<{
         x: number; y: number; width: number; height: number;
@@ -206,6 +138,9 @@ export class IIIFViewer {
     // Event tracking
     private eventHandlers: Map<Element | Document, Map<string, EventListener>> = new Map();
     private abortController: AbortController = new AbortController();
+
+    // Panel z-index management
+    private panelZIndexCounter: number = 100;
 
     // Configuration
     private readonly CONFIG: IIIFViewerOptions;
@@ -314,6 +249,19 @@ export class IIIFViewer {
                 child.addEventListener('transitionend', onEnd);
             }
         });
+    }
+
+    /** Bring a panel to the front by updating its z-index */
+    private bringPanelToFront(panel: HTMLElement): void {
+        this.panelZIndexCounter++;
+        const zIndex = String(this.panelZIndexCounter);
+        panel.style.zIndex = zIndex;
+
+        // If panel is inside a dock, also bring the dock to front
+        const parentDock = panel.parentElement;
+        if (parentDock?.classList.contains('iiif-dock')) {
+            parentDock.style.zIndex = zIndex;
+        }
     }
 
     /** Make a panel draggable by its header */
@@ -482,6 +430,8 @@ export class IIIFViewer {
             hasUndocked = false;
             startX = clientX;
             startY = clientY;
+            // Bring panel to front when starting to drag
+            this.bringPanelToFront(panel);
         };
 
         const onPointerMove = (clientX: number, clientY: number) => {
@@ -608,6 +558,170 @@ export class IIIFViewer {
         }) as EventListener);
     }
 
+    /** Make a panel resizable via edge and corner handles */
+    private makePanelResizable(panel: HTMLElement): void {
+        panel.classList.add('resizable');
+
+        // Create resize handles for all edges and corners
+        const handles = ['n', 's', 'e', 'w', 'nw', 'ne', 'sw', 'se'];
+        const handleElements: HTMLElement[] = [];
+
+        for (const direction of handles) {
+            const handle = document.createElement('div');
+            handle.className = `iiif-resize-handle iiif-resize-handle-${direction}`;
+            handle.dataset.direction = direction;
+            panel.appendChild(handle);
+            handleElements.push(handle);
+        }
+
+        let isResizing = false;
+        let currentHandle: HTMLElement | null = null;
+        let startX = 0;
+        let startY = 0;
+        let startWidth = 0;
+        let startHeight = 0;
+        let startLeft = 0;
+        let startTop = 0;
+
+        const MIN_WIDTH = 100;
+        const MIN_HEIGHT = 60;
+
+        // Get cursor class based on resize direction
+        const getCursorClass = (direction: string): string => {
+            if (direction === 'e' || direction === 'w') return 'iiif-resizing-ew';
+            if (direction === 'n' || direction === 's') return 'iiif-resizing-ns';
+            if (direction === 'nw' || direction === 'se') return 'iiif-resizing-nwse';
+            if (direction === 'ne' || direction === 'sw') return 'iiif-resizing-nesw';
+            return '';
+        };
+
+        const onPointerDown = (e: MouseEvent | TouchEvent, handle: HTMLElement) => {
+            e.preventDefault();
+            e.stopPropagation();
+
+            isResizing = true;
+            currentHandle = handle;
+
+            // Add cursor class to body to maintain cursor during drag
+            const direction = handle.dataset.direction || '';
+            const cursorClass = getCursorClass(direction);
+            if (cursorClass) document.body.classList.add(cursorClass);
+
+            const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+            const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+
+            startX = clientX;
+            startY = clientY;
+
+            const rect = panel.getBoundingClientRect();
+            const containerRect = this.container.getBoundingClientRect();
+            startWidth = rect.width;
+            startHeight = rect.height;
+            startLeft = rect.left - containerRect.left;
+            startTop = rect.top - containerRect.top;
+
+            // Apply explicit dimensions BEFORE adding resized class to prevent flicker
+            panel.style.width = `${startWidth}px`;
+            panel.style.height = `${startHeight}px`;
+
+            // Mark panel as resized and bring to front
+            panel.classList.add('resized');
+            this.bringPanelToFront(panel);
+        };
+
+        const onPointerMove = (clientX: number, clientY: number) => {
+            if (!isResizing || !currentHandle) return;
+
+            const direction = currentHandle.dataset.direction || '';
+            const dx = clientX - startX;
+            const dy = clientY - startY;
+
+            let newWidth = startWidth;
+            let newHeight = startHeight;
+            let newLeft = startLeft;
+            let newTop = startTop;
+
+            // Handle horizontal resize
+            if (direction.includes('e')) {
+                newWidth = Math.max(MIN_WIDTH, startWidth + dx);
+            }
+            if (direction.includes('w')) {
+                const widthChange = Math.min(dx, startWidth - MIN_WIDTH);
+                newWidth = startWidth - widthChange;
+                newLeft = startLeft + widthChange;
+            }
+
+            // Handle vertical resize
+            if (direction.includes('s')) {
+                newHeight = Math.max(MIN_HEIGHT, startHeight + dy);
+            }
+            if (direction.includes('n')) {
+                const heightChange = Math.min(dy, startHeight - MIN_HEIGHT);
+                newHeight = startHeight - heightChange;
+                newTop = startTop + heightChange;
+            }
+
+            // Apply new dimensions
+            panel.style.width = `${newWidth}px`;
+            panel.style.height = `${newHeight}px`;
+
+            // If panel is floating (absolute positioned), also update position for n/w resizes
+            if (panel.style.position === 'absolute') {
+                if (direction.includes('w')) {
+                    panel.style.left = `${newLeft}px`;
+                }
+                if (direction.includes('n')) {
+                    panel.style.top = `${newTop}px`;
+                }
+            }
+        };
+
+        const onPointerUp = () => {
+            if (!isResizing) return;
+            isResizing = false;
+            // Remove all cursor classes from body
+            document.body.classList.remove(
+                'iiif-resizing-ew',
+                'iiif-resizing-ns',
+                'iiif-resizing-nwse',
+                'iiif-resizing-nesw'
+            );
+            currentHandle = null;
+        };
+
+        // Attach mouse events to each handle
+        for (const handle of handleElements) {
+            this.addEventListener(handle, 'mousedown', ((e: MouseEvent) => {
+                onPointerDown(e, handle);
+            }) as EventListener);
+
+            this.addEventListener(handle, 'touchstart', ((e: TouchEvent) => {
+                if (e.touches.length !== 1) return;
+                onPointerDown(e, handle);
+            }) as EventListener, { passive: false });
+        }
+
+        // Global move/up handlers
+        this.addEventListener(document.body, 'mousemove', ((e: MouseEvent) => {
+            if (isResizing) {
+                e.preventDefault();
+                onPointerMove(e.clientX, e.clientY);
+            }
+        }) as EventListener);
+        this.addEventListener(document.body, 'mouseup', (() => {
+            onPointerUp();
+        }) as EventListener);
+
+        this.addEventListener(document.body, 'touchmove', ((e: TouchEvent) => {
+            if (!isResizing || e.touches.length !== 1) return;
+            e.preventDefault();
+            onPointerMove(e.touches[0].clientX, e.touches[0].clientY);
+        }) as EventListener, { passive: false });
+        this.addEventListener(document.body, 'touchend', (() => {
+            onPointerUp();
+        }) as EventListener);
+    }
+
     /**
      * Create a standard panel with header, collapse button, and body.
      * Returns { panel, header, body, collapseBtn } for further customization.
@@ -619,6 +733,7 @@ export class IIIFViewer {
         hidden?: boolean;
         parent?: HTMLElement;
         draggable?: boolean;
+        resizable?: boolean;
         dock?: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'top-center' | 'bottom-center';
     }): { panel: HTMLDivElement; header: HTMLDivElement; body: HTMLDivElement; collapseBtn: HTMLButtonElement } {
         const panel = document.createElement('div');
@@ -645,13 +760,40 @@ export class IIIFViewer {
         panel.appendChild(body);
 
         this.addEventListener(collapseBtn, 'click', () => {
+            const isCollapsing = !body.classList.contains('collapsed');
+            if (isCollapsing) {
+                // Store current height before collapsing
+                if (panel.style.height) {
+                    panel.dataset.resizedHeight = panel.style.height;
+                }
+                panel.style.height = '';
+            } else {
+                // Restore height when expanding
+                if (panel.dataset.resizedHeight) {
+                    panel.style.height = panel.dataset.resizedHeight;
+                }
+            }
             body.classList.toggle('collapsed');
             collapseBtn.textContent = body.classList.contains('collapsed') ? '+' : '−';
         });
 
+        // Bring panel to front when clicked anywhere on it
+        this.addEventListener(panel, 'mousedown', () => {
+            this.bringPanelToFront(panel);
+        });
+        this.addEventListener(panel, 'touchstart', () => {
+            this.bringPanelToFront(panel);
+        }, { passive: true });
+
         if (options.draggable !== false) {
             this.makePanelDraggable(panel, header);
         }
+
+        // Add resize handles if resizable (default to true)
+        if (options.resizable !== false) {
+            this.makePanelResizable(panel);
+        }
+
         if (options.dock) {
             const dock = this.docks.get(options.dock);
             if (dock) {
@@ -853,6 +995,7 @@ export class IIIFViewer {
             className: 'iiif-compare-panel',
             title: 'Compare',
             initiallyCollapsed: true, // Always collapsed — expanding enters compare mode
+            dock: 'bottom-right',
         });
         this.comparePanel = panel;
 
@@ -1000,6 +1143,10 @@ export class IIIFViewer {
             const b = parseInt(hex.slice(5, 7), 16) / 255;
             if (this.renderer) {
                 this.renderer.setClearColor(r, g, b);
+            }
+            // Also update compare instance viewers
+            if (this.comparisonController) {
+                this.comparisonController.setBackgroundColor(r, g, b);
             }
         });
 
@@ -1150,8 +1297,6 @@ export class IIIFViewer {
             return;
         }
 
-        const eyeSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
-
         // --- IIIF annotation pages ---
         for (const page of pages) {
             const item = document.createElement('div');
@@ -1183,7 +1328,7 @@ export class IIIFViewer {
             const eyeBtn = document.createElement('button');
             eyeBtn.className = 'iiif-eye-btn iiif-annotation-panel-eye';
             if (page.visible) eyeBtn.classList.add('active');
-            eyeBtn.innerHTML = eyeSvg;
+            eyeBtn.innerHTML = EYE_SVG;
             eyeBtn.title = 'Toggle visibility';
             eyeBtn.addEventListener('click', () => {
                 const newVisible = !page.visible;
@@ -1234,7 +1379,7 @@ export class IIIFViewer {
             const eyeBtn = document.createElement('button');
             eyeBtn.className = 'iiif-eye-btn iiif-annotation-panel-eye';
             if (group.visible) eyeBtn.classList.add('active');
-            eyeBtn.innerHTML = eyeSvg;
+            eyeBtn.innerHTML = EYE_SVG;
             eyeBtn.title = 'Toggle visibility';
             eyeBtn.addEventListener('click', () => {
                 group.visible = !group.visible;
@@ -1930,7 +2075,7 @@ export class IIIFViewer {
         }
     }
 
-    private createCanvasNavItem(canvas: any, index: number): HTMLElement {
+    private createCanvasNavItem(canvas: ParsedCanvas, index: number): HTMLElement {
         const item = document.createElement('div');
         item.className = 'iiif-canvas-nav-item';
         if (index === this.currentCanvasIndex) {
@@ -2273,6 +2418,15 @@ export class IIIFViewer {
                 };
             }
 
+            // Save custom dimensions if panel has been resized
+            if (el.classList.contains('resized')) {
+                const rect = el.getBoundingClientRect();
+                entry.dimensions = {
+                    width: rect.width,
+                    height: rect.height,
+                };
+            }
+
             panels[panelKey] = entry;
         }
 
@@ -2377,6 +2531,18 @@ export class IIIFViewer {
                 this.container.classList.toggle(hideClass, !panelState.visible);
                 const checkbox = this.settingsCheckboxes.get(hideClass);
                 if (checkbox) checkbox.checked = panelState.visible;
+            }
+
+            // Restore custom dimensions if panel was resized
+            if (panelState.dimensions) {
+                el.classList.add('resized');
+                el.style.width = `${panelState.dimensions.width}px`;
+                el.style.height = `${panelState.dimensions.height}px`;
+            } else {
+                // Clear any explicit dimensions
+                el.classList.remove('resized');
+                el.style.width = '';
+                el.style.height = '';
             }
         }
 
@@ -2781,6 +2947,14 @@ export class IIIFViewer {
             customAnnotationSpecs: this.customAnnotationSpecs,
             listPanel: this.comparePanel?.querySelector('.iiif-panel-body') as HTMLDivElement,
             universalPanels,
+            initialBackgroundColor: this.colorInput ? (() => {
+                const hex = this.colorInput!.value;
+                return {
+                    r: parseInt(hex.slice(1, 3), 16) / 255,
+                    g: parseInt(hex.slice(3, 5), 16) / 255,
+                    b: parseInt(hex.slice(5, 7), 16) / 255,
+                };
+            })() : undefined,
             onExit: () => {
                 this.exitCompareMode();
             },
