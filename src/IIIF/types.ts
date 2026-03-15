@@ -58,6 +58,97 @@ export interface IIIFViewerOptions {
     suppressSettings?: boolean;
 }
 
+// ============================================================
+// VIEWER CONFIG (JSON-based configuration)
+// ============================================================
+
+/** Image entry in ViewerConfig */
+export interface ViewerConfigImage {
+    /** IIIF Image Service URL or info.json URL */
+    url: string;
+    /** Optional label for the image */
+    label?: string;
+    /** Position in world coordinates (defaults to 0,0 with natural dimensions) */
+    placement?: {
+        x: number;
+        y: number;
+        width?: number;
+        height?: number;
+    };
+}
+
+/** Annotation entry in ViewerConfig */
+export interface ViewerConfigAnnotation {
+    /** X position in image pixels */
+    x: number;
+    /** Y position in image pixels */
+    y: number;
+    /** Width (0 for point annotations) */
+    width?: number;
+    /** Height (0 for point annotations) */
+    height?: number;
+    /** Text content or HTML string */
+    content: string;
+    /** Annotation type/category */
+    type?: string;
+    /** Color for the annotation marker */
+    color?: string;
+    /** Whether to scale with zoom */
+    scaleWithZoom?: boolean;
+    /** CSS styles */
+    style?: Record<string, string>;
+    /** Popup content (text or HTML) */
+    popup?: string;
+}
+
+/**
+ * JSON configuration for initializing the viewer.
+ * Can be passed to viewer.loadConfig() as an object or JSON string.
+ *
+ * @example
+ * ```json
+ * {
+ *   "images": [
+ *     { "url": "https://example.org/iiif/image1/info.json", "label": "Image 1" },
+ *     { "url": "https://example.org/iiif/image2/info.json", "placement": { "x": 1000, "y": 0 } }
+ *   ],
+ *   "settings": {
+ *     "backgroundColor": "#1a1a1a",
+ *     "theme": "dark"
+ *   },
+ *   "viewport": {
+ *     "centerX": 500,
+ *     "centerY": 500,
+ *     "zoom": 1.5
+ *   },
+ *   "annotations": [
+ *     { "x": 100, "y": 200, "content": "Note here", "type": "Notes" }
+ *   ]
+ * }
+ * ```
+ */
+export interface ViewerConfig {
+    /** Array of images to load */
+    images?: ViewerConfigImage[];
+    /** Single manifest URL (alternative to images array) */
+    manifestUrl?: string;
+    /** Canvas index to load (when using manifestUrl) */
+    canvasIndex?: number;
+    /** Viewer settings */
+    settings?: {
+        backgroundColor?: string;
+        theme?: 'light' | 'dark';
+    };
+    /** Initial viewport state */
+    viewport?: {
+        centerX?: number;
+        centerY?: number;
+        zoom?: number;
+    };
+    /** Custom annotations to add */
+    annotations?: ViewerConfigAnnotation[];
+}
+
 /** Persisted layout state for save/load functionality */
 export interface LayoutState {
     version: 1;
@@ -132,6 +223,18 @@ export interface PanelElements {
     header: HTMLDivElement;
     body: HTMLDivElement;
     collapseBtn: HTMLButtonElement;
+}
+
+// ============================================================
+// NAVIGATION TYPES
+// ============================================================
+
+/** Options for the lookAt() navigation method */
+export interface LookAtOptions {
+    /** Target zoom level (scale). 1 = 1:1 pixels, 2 = 2x magnification, 0.5 = zoomed out */
+    zoom?: number;
+    /** Animation duration in milliseconds (default: 500) */
+    duration?: number;
 }
 
 // ============================================================

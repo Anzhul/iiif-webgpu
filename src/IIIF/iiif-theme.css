@@ -1,0 +1,203 @@
+/**
+ * IIIF Viewer Theme Configuration
+ * ================================
+ *
+ * This file contains all customizable color and theme variables.
+ * Override these CSS custom properties to customize the viewer appearance.
+ *
+ */
+
+:root {
+  /* =========================================
+     PRIMARY COLORS (RGB format for easy opacity control)
+     ========================================= */
+
+  /** Primary accent color - buttons, active states, focus rings */
+  --iiif-color-primary: 80, 130, 255;
+
+  /** Danger/destructive actions - stop buttons, delete */
+  --iiif-color-danger: 255, 80, 80;
+
+  /** Success states */
+  --iiif-color-success: 46, 204, 113;
+
+  /** Informational elements */
+  --iiif-color-info: 52, 152, 219;
+
+  /** Error states */
+  --iiif-color-error: 231, 76, 60;
+
+
+  /* =========================================
+     PANEL BACKGROUNDS
+     ========================================= */
+
+  /** Main panel background (semi-transparent) */
+  --iiif-panel-bg: rgba(0, 0, 0, 0.6);
+
+  /** Panel background blur amount */
+  --iiif-panel-blur: 8px;
+
+  /** Panel shadow */
+  --iiif-panel-shadow: 0 2px 8px rgba(0, 0, 0, 0);
+
+
+  /* =========================================
+     BORDERS
+     ========================================= */
+
+  /** Primary border color */
+  --iiif-border-color: rgba(255, 255, 255, 0);
+
+  /** Light/subtle border color */
+  --iiif-border-light: rgba(255, 255, 255, 0);
+
+
+  /* =========================================
+     TEXT COLORS
+     ========================================= */
+
+  /** Primary text - main content */
+  --iiif-text-primary: #e0e0e0;
+
+  /** Secondary text - labels, descriptions */
+  --iiif-text-secondary: #aaa;
+
+  /** Muted text - hints, disabled */
+  --iiif-text-muted: #888;
+
+  /** Dimmed text - very subtle elements */
+  --iiif-text-dimmed: #555;
+
+  /** Text on hover/active states */
+  --iiif-text-hover: #fff;
+
+
+  /* =========================================
+     INTERACTIVE STATES
+     ========================================= */
+
+  /** Hover background */
+  --iiif-hover-bg: rgba(255, 255, 255, 0.08);
+
+  /** Active/selected background */
+  --iiif-active-bg: rgba(var(--iiif-color-primary), 0.1);
+
+  /** Active/selected border */
+  --iiif-active-border: rgba(var(--iiif-color-primary), 0.6);
+
+  /** Focus ring color */
+  --iiif-focus-color: rgba(100, 150, 255, 0.5);
+
+
+  /* =========================================
+     BUTTONS
+     ========================================= */
+
+  /** Button background */
+  --iiif-button-bg: rgba(var(--iiif-color-primary), 0.2);
+
+  /** Button hover background */
+  --iiif-button-bg-hover: rgba(var(--iiif-color-primary), 0.4);
+
+  /** Button border */
+  --iiif-button-border: rgba(var(--iiif-color-primary), 0.4);
+
+
+  /* =========================================
+     INPUTS
+     ========================================= */
+
+  /** Input field background */
+  --iiif-input-bg: rgba(255, 255, 255, 0.08);
+
+  /** Input field border */
+  --iiif-input-border: rgba(255, 255, 255, 0.15);
+
+  /** Input placeholder text */
+  --iiif-input-placeholder: rgba(255, 255, 255, 0.3);
+
+
+  /* =========================================
+     LINKS
+     ========================================= */
+
+  /** Link color */
+  --iiif-link-color: rgba(100, 160, 255, 0.9);
+
+
+  /* =========================================
+     SCROLLBARS
+     ========================================= */
+
+  /** Scrollbar thumb */
+  --iiif-scrollbar-thumb: rgba(255, 255, 255, 0.12);
+
+  /** Scrollbar thumb on hover */
+  --iiif-scrollbar-thumb-hover: rgba(255, 255, 255, 0.2);
+
+
+  /* =========================================
+     LAYOUT & SIZING
+     ========================================= */
+
+  /** Border radius for panels and buttons */
+  --iiif-border-radius: 8px;
+
+  /** Transition duration */
+  --iiif-transition-duration: 0.3s;
+
+  /** Fast transition duration */
+  --iiif-transition-fast: 0.15s;
+
+
+  /* =========================================
+     TYPOGRAPHY
+     ========================================= */
+
+  /** Primary font family */
+  --iiif-font-family: 'Segoe UI', system-ui, sans-serif;
+
+  /** Monospace font family */
+  --iiif-font-mono: 'Consolas', 'Monaco', monospace;
+}
+
+
+/* =============================================
+   LIGHT THEME
+   =============================================
+   Apply class="theme-light" to the viewer container
+   to switch to light theme colors.
+   ============================================= */
+
+.theme-light {
+  /* Panel backgrounds */
+  --iiif-panel-bg: rgba(255, 255, 255, 0.9);
+  --iiif-panel-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+
+  /* Borders */
+  --iiif-border-color: rgba(0, 0, 0, 0.12);
+  --iiif-border-light: rgba(0, 0, 0, 0.08);
+
+  /* Text */
+  --iiif-text-primary: #222;
+  --iiif-text-secondary: #555;
+  --iiif-text-muted: #777;
+  --iiif-text-dimmed: #999;
+  --iiif-text-hover: #000;
+
+  /* Interactive */
+  --iiif-hover-bg: rgba(0, 0, 0, 0.06);
+
+  /* Inputs */
+  --iiif-input-bg: rgba(0, 0, 0, 0.05);
+  --iiif-input-border: rgba(0, 0, 0, 0.15);
+  --iiif-input-placeholder: rgba(0, 0, 0, 0.4);
+
+  /* Scrollbars */
+  --iiif-scrollbar-thumb: rgba(0, 0, 0, 0.15);
+  --iiif-scrollbar-thumb-hover: rgba(0, 0, 0, 0.25);
+
+  /* Links */
+  --iiif-link-color: rgba(50, 100, 200, 0.9);
+}

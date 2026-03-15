@@ -1,13 +1,14 @@
 import './style.scss'
 import { IIIFViewer } from './IIIF/iiif';
+import type { ViewerConfig } from './IIIF/types';
 
 const container = document.getElementById('iiif-container');
 if (container) {
     const params = new URLSearchParams(window.location.search);
     const manifestUrl = params.get('manifest');
+    const configParam = params.get('config'); // URL to a config JSON file
 
     const defaultManifest = 'https://iiif.harvardartmuseums.org/manifests/object/299843';
-    //const defaultManifest = 'https://free.iiifhosting.com/iiif/616bc3c8dc9a69d3e935139c8c77b76f32137cab7ce0e4fd2166507cdc948b';
     const url = manifestUrl ?? defaultManifest;
 
     const viewer = new IIIFViewer(container, {
@@ -29,7 +30,14 @@ if (container) {
     viewer.listen();
     viewer.startRenderLoop();
 
-    viewer.loadUrl(url)
+    // Load from config JSON URL if provided, otherwise use manifest URL
+    const loadPromise = configParam
+        ? fetch(configParam)
+            .then(res => res.json())
+            .then((config: ViewerConfig) => viewer.loadConfig(config))
+        : viewer.loadUrl(url);
+
+    loadPromise
         .then(() => {
             // Custom HTML annotations (coordinates are in image pixels)
 

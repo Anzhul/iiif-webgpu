@@ -2,7 +2,7 @@ import './IIIF/iiif-styles.css';
 
 // Main viewer and types
 export { IIIFViewer, PanelManager, setupInputHandlers } from './IIIF/iiif';
-export type { IIIFViewerOptions, IIIFViewerPanels, LayoutState } from './IIIF/types';
+export type { IIIFViewerOptions, IIIFViewerPanels, LayoutState, ViewerConfig, ViewerConfigImage, ViewerConfigAnnotation, LookAtOptions } from './IIIF/types';
 
 // Annotation types
 export type { OverlayElement } from './IIIF/iiif-overlay';

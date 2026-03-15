@@ -14,7 +14,7 @@ import { parseIIIFUrl, fetchAnnotationList } from './iiif-parser';
 import type { ParsedManifest, ParsedImageService, ParsedRange, ParsedCanvas } from './iiif-parser';
 import { EYE_SVG } from './icons';
 import { PANEL_CLASS_MAP, PANEL_HIDE_CLASS, PER_INSTANCE_PANELS } from './config';
-import type { IIIFViewerOptions, IIIFViewerPanels, LayoutState, CanvasInfo } from './types';
+import type { IIIFViewerOptions, IIIFViewerPanels, LayoutState, CanvasInfo, LookAtOptions } from './types';
 
 // Dynamic import types (for lazy loading modules)
 import type { CVController } from './iiif-cv';
@@ -1932,6 +1932,120 @@ export class IIIFViewer {
     }
 
     /**
+     * Load a JSON configuration object or string.
+     * Supports loading multiple images, settings, viewport, and annotations.
+     *
+     * @example
+     * ```typescript
+     * await viewer.loadConfig({
+     *   images: [
+     *     { url: 'https://example.org/iiif/image/info.json', label: 'My Image' }
+     *   ],
+     *   settings: { backgroundColor: '#000', theme: 'dark' },
+     *   viewport: { centerX: 500, centerY: 500, zoom: 2 },
+     *   annotations: [
+     *     { x: 100, y: 200, content: 'Note', type: 'Notes', color: '#ff0' }
+     *   ]
+     * });
+     * ```
+     */
+    async loadConfig(config: import('./types').ViewerConfig | string): Promise<void> {
+        // Parse string input
+        const cfg: import('./types').ViewerConfig = typeof config === 'string'
+            ? JSON.parse(config)
+            : config;
+
+        // Apply settings first
+        if (cfg.settings) {
+            if (cfg.settings.backgroundColor) {
+                const hex = cfg.settings.backgroundColor;
+                if (this.colorInput) {
+                    this.colorInput.value = hex;
+                }
+                // Parse hex color to RGB
+                const r = parseInt(hex.slice(1, 3), 16) / 255;
+                const g = parseInt(hex.slice(3, 5), 16) / 255;
+                const b = parseInt(hex.slice(5, 7), 16) / 255;
+                this.renderer?.setClearColor(r, g, b);
+            }
+            if (cfg.settings.theme) {
+                this.container.classList.toggle('theme-light', cfg.settings.theme === 'light');
+            }
+        }
+
+        // Load manifest URL if provided
+        if (cfg.manifestUrl) {
+            await this.loadUrl(cfg.manifestUrl, false);
+            if (cfg.canvasIndex !== undefined && cfg.canvasIndex >= 0) {
+                await this.loadCanvas(cfg.canvasIndex, false);
+            }
+        }
+        // Or load individual images
+        else if (cfg.images && cfg.images.length > 0) {
+            this.clearWorld();
+            this.manifest = undefined;
+            this.currentCanvasIndex = -1;
+
+            for (let i = 0; i < cfg.images.length; i++) {
+                const img = cfg.images[i];
+                const placement: WorldPlacement | undefined = img.placement
+                    ? {
+                        worldX: img.placement.x,
+                        worldY: img.placement.y,
+                        worldWidth: img.placement.width ?? 0,
+                        worldHeight: img.placement.height ?? 0
+                    }
+                    : undefined;
+
+                await this.addImage(`config-image-${i}`, img.url, false, placement);
+            }
+
+            this.updateCanvasNav();
+            this.updateTOC();
+            this.updateManifestPanel();
+            this.updateComparePanel();
+            this.updateAnnotationPanel();
+        }
+
+        // Apply viewport settings
+        if (cfg.viewport) {
+            if (cfg.viewport.centerX !== undefined) {
+                this.viewport.centerX = cfg.viewport.centerX;
+            }
+            if (cfg.viewport.centerY !== undefined) {
+                this.viewport.centerY = cfg.viewport.centerY;
+            }
+            if (cfg.viewport.zoom !== undefined) {
+                this.viewport.cameraZ = cfg.viewport.zoom;
+            }
+            this.markDirty();
+        } else {
+            // Default: fit to world
+            this.fitToWorld();
+        }
+
+        // Add annotations
+        if (cfg.annotations && cfg.annotations.length > 0) {
+            for (const ann of cfg.annotations) {
+                this.addAnnotation(
+                    ann.x,
+                    ann.y,
+                    ann.width ?? 0,
+                    ann.height ?? 0,
+                    ann.content,
+                    {
+                        type: ann.type,
+                        color: ann.color,
+                        scaleWithZoom: ann.scaleWithZoom,
+                        style: ann.style,
+                        popup: ann.popup
+                    }
+                );
+            }
+        }
+    }
+
+    /**
      * Load a specific canvas from the current manifest
      */
     async loadCanvas(index: number, focus: boolean = true): Promise<void> {
@@ -2347,6 +2461,51 @@ export class IIIFViewer {
         );
         const targetZ = this.viewport.containerHeight / (2 * targetScale * this.viewport.getTanHalfFov());
         this.camera.to(ww / 2, wh / 2, targetZ);
+        this.markDirty();
+    }
+
+    /**
+     * Smoothly pan and zoom to look at a specific point in image coordinates.
+     *
+     * @param x - X coordinate in image pixels
+     * @param y - Y coordinate in image pixels
+     * @param options - Optional configuration
+     * @param options.zoom - Target zoom level (scale). 1 = 1:1 pixels, 2 = 2x magnification, 0.5 = zoomed out
+     * @param options.duration - Animation duration in milliseconds (default: 500)
+     *
+     * @example
+     * // Pan to point (800, 600) keeping current zoom
+     * viewer.lookAt(800, 600);
+     *
+     * // Pan to point and zoom to 2x magnification
+     * viewer.lookAt(800, 600, { zoom: 2 });
+     *
+     * // Quick pan with custom duration
+     * viewer.lookAt(800, 600, { duration: 200 });
+     *
+     * // Use from annotation click or external button:
+     * document.getElementById('goto-detail').onclick = () => {
+     *     viewer.lookAt(1200, 400, { zoom: 3, duration: 600 });
+     * };
+     */
+    lookAt(x: number, y: number, options?: LookAtOptions) {
+        const zoom = options?.zoom;
+        const duration = options?.duration ?? 500;
+
+        // Calculate target cameraZ from zoom (scale)
+        let targetZ: number;
+        if (zoom !== undefined) {
+            // zoom is scale (CSS pixels per world unit)
+            // cameraZ = containerHeight / (2 * scale * tan(fov/2))
+            targetZ = this.viewport.containerHeight / (2 * zoom * this.viewport.getTanHalfFov());
+            // Clamp to valid range
+            targetZ = Math.max(this.viewport.minZ, Math.min(this.viewport.maxZ, targetZ));
+        } else {
+            // Keep current zoom
+            targetZ = this.viewport.cameraZ;
+        }
+
+        this.camera.to(x, y, targetZ, duration);
         this.markDirty();
     }
 

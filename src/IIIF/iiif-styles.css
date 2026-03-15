@@ -2,76 +2,68 @@
    IIIF Viewer Styles
    ============================================
    Single consolidated stylesheet for all viewer components.
-   Users can override CSS custom properties to customize appearance.
+
+   CUSTOMIZATION:
+   Override variables in iiif-theme.css or in your own CSS:
+
+   :root {
+     --iiif-color-primary: 100, 200, 150;
+     --iiif-panel-bg: rgba(30, 30, 40, 0.9);
+   }
    ============================================ */
 
+/* Import theme configuration */
+@import './iiif-theme.css';
+
 /* =============================================
-   1. CSS Custom Properties (Theme Tokens)
+   1. CSS Custom Properties (Internal aliases)
    ============================================= */
 
 :root {
-  /* --- Core Colors (RGB values for use with rgba()) --- */
-  --color-primary: 80, 130, 255;
-  --color-danger: 255, 80, 80;
-  --color-success: 46, 204, 113;
-  --color-info: 52, 152, 219;
-  --color-error: 231, 76, 60;
+  /* Map theme variables to internal shorthand (for backwards compatibility) */
+  --color-primary: var(--iiif-color-primary);
+  --color-danger: var(--iiif-color-danger);
+  --color-success: var(--iiif-color-success);
+  --color-info: var(--iiif-color-info);
+  --color-error: var(--iiif-color-error);
 
-  /* --- Backgrounds --- */
-  --panel-bg: rgba(0, 0, 0, 0.6);
+  --panel-bg: var(--iiif-panel-bg);
+  --border-color: var(--iiif-border-color);
+  --border-color-light: var(--iiif-border-light);
 
-  /* --- Borders --- */
-  --border-color: rgba(255, 255, 255, 0);
-  --border-color-light: rgba(255, 255, 255, 0);
+  --text-primary: var(--iiif-text-primary);
+  --text-secondary: var(--iiif-text-secondary);
+  --text-muted: var(--iiif-text-muted);
+  --text-dimmed: var(--iiif-text-dimmed);
+  --text-on-hover: var(--iiif-text-hover);
 
-  /* --- Text --- */
-  --text-primary: #e0e0e0;
-  --text-secondary: #aaa;
-  --text-muted: #888;
-  --text-dimmed: #555;
-  --text-on-hover: #fff;
+  --hover-bg: var(--iiif-hover-bg);
+  --active-bg: var(--iiif-active-bg);
+  --active-border: var(--iiif-active-border);
+  --focus-border: var(--iiif-focus-color);
 
-  /* --- Interactive States --- */
-  --hover-bg: rgba(255, 255, 255, 0.08);
-  --active-bg: rgba(var(--color-primary), 0.1);
-  --active-border: rgba(var(--color-primary), 0.6);
-  --focus-border: rgba(100, 150, 255, 0.5);
+  --button-bg: var(--iiif-button-bg);
+  --button-bg-hover: var(--iiif-button-bg-hover);
+  --button-border: var(--iiif-button-border);
 
-  /* --- Buttons --- */
-  --button-bg: rgba(var(--color-primary), 0.2);
-  --button-bg-hover: rgba(var(--color-primary), 0.4);
-  --button-border: rgba(var(--color-primary), 0.4);
+  --input-bg: var(--iiif-input-bg);
+  --input-border: var(--iiif-input-border);
+  --input-placeholder: var(--iiif-input-placeholder);
 
-  /* --- Inputs --- */
-  --input-bg: rgba(255, 255, 255, 0.08);
-  --input-border: rgba(255, 255, 255, 0.15);
-  --input-placeholder: rgba(255, 255, 255, 0.3);
+  --link-color: var(--iiif-link-color);
 
-  /* --- Links --- */
-  --link-color: rgba(100, 160, 255, 0.9);
+  --scrollbar-thumb: var(--iiif-scrollbar-thumb);
+  --scrollbar-thumb-hover: var(--iiif-scrollbar-thumb-hover);
 
-  /* --- Scrollbar --- */
-  --scrollbar-thumb: rgba(255, 255, 255, 0.12);
-  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.2);
+  --border-radius: var(--iiif-border-radius);
+  --backdrop-filter: blur(var(--iiif-panel-blur));
+  --shadow: var(--iiif-panel-shadow);
 
-  /* --- Layout --- */
-  --border-radius: 8px;
-  --backdrop-filter: blur(8px);
-  --shadow: 0 2px 8px rgba(0, 0, 0, 0);
+  --transition: ease-in-out var(--iiif-transition-duration);
+  --transition-fast: var(--iiif-transition-fast);
 
-  /* --- Transitions --- */
-  --transition: ease-in-out 0.3s;
-  --transition-fast: 0.15s;
-
-  /* --- Typography --- */
-  --font-family: 'Segoe UI', system-ui, sans-serif;
-  --font-mono: 'Consolas', 'Monaco', monospace;
-
-  /* --- Breakpoints (for reference, CSS can't use these in media queries) --- */
-  /* Mobile: < 480px */
-  /* Tablet: 480px - 768px */
-  /* Desktop: 768px - 1440px */
-  /* Large: > 1440px */
+  --font-family: var(--iiif-font-family);
+  --font-mono: var(--iiif-font-mono);
 
   /* --- Responsive Spacing --- */
   --dock-spacing: clamp(0.5rem, 3vw, 2rem);
@@ -1541,25 +1533,8 @@ body.iiif-resizing-nesw * {
    12. Light Theme
    ============================================= */
 
-.theme-light {
-  --panel-bg: rgba(255, 255, 255, 0.9);
-  --border-color: rgba(0, 0, 0, 0.12);
-  --border-color-light: rgba(0, 0, 0, 0.08);
-  --text-primary: #222;
-  --text-secondary: #555;
-  --text-muted: #777;
-  --text-dimmed: #999;
-  --text-on-hover: #000;
-  --hover-bg: rgba(0, 0, 0, 0.06);
-  --active-bg: rgba(var(--color-primary), 0.1);
-  --input-bg: rgba(0, 0, 0, 0.05);
-  --input-border: rgba(0, 0, 0, 0.15);
-  --input-placeholder: rgba(0, 0, 0, 0.4);
-  --scrollbar-thumb: rgba(0, 0, 0, 0.15);
-  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.25);
-  --shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  --link-color: rgba(50, 100, 200, 0.9);
-}
+/* Light theme variables are defined in iiif-theme.css */
+/* Apply class="theme-light" to the viewer container to use light theme */
 
 .theme-light .iiif-toolbar-button {
   color: #333;
