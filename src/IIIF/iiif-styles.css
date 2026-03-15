@@ -1468,7 +1468,6 @@ body.iiif-resizing-nesw * {
   left: 100%;
   top: 0;
   margin-left: 8px;
-  transform: scale(calc(1 / var(--iiif-overlay-scale, 1)));
   transform-origin: top left;
   min-width: 150px;
   max-width: 320px;
