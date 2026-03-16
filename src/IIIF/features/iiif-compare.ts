@@ -1,11 +1,11 @@
-import { IIIFViewer } from './iiif';
-import type { IIIFViewerOptions } from './iiif';
-import type { CompareEntry, CompareOptions } from './types';
-import { EYE_SVG, PEN_SVG, TRASH_SVG } from './icons';
-import { COMPARE_CONFIG } from './config';
+import { IIIFViewer } from '../iiif';
+import type { IIIFViewerOptions } from '../iiif';
+import type { CompareEntry, CompareOptions } from '../types';
+import { EYE_SVG, PEN_SVG, TRASH_SVG } from '../ui/icons';
+import { COMPARE_CONFIG } from '../config';
 
 // Re-export types for backwards compatibility
-export type { CompareEntry, CompareOptions } from './types';
+export type { CompareEntry, CompareOptions } from '../types';
 
 // ============================================================
 // VIEWER ENVIRONMENT

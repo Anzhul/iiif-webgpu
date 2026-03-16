@@ -1,7 +1,7 @@
-import { IIIFImage } from './iiif-image';
-import type { WorldImage } from './iiif-world';
-import type { Viewport } from './iiif-view';
-import type { IIIFRenderer, TileRenderData } from './iiif-renderer';
+import { IIIFImage } from './core/iiif-image';
+import type { WorldImage } from './core/iiif-world';
+import type { Viewport } from './core/iiif-view';
+import type { IIIFRenderer, TileRenderData } from './rendering/iiif-renderer';
 import { TILE_CONFIG } from './config';
 
 /**

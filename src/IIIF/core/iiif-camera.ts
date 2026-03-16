@@ -3,7 +3,7 @@ import { World } from './iiif-world';
 import type { EasingFunction } from './easing';
 import { easeOutQuart } from './easing';
 import { Spring } from './spring';
-import { CAMERA_CONFIG } from './config';
+import { CAMERA_CONFIG } from '../config';
 
 /**
  * Camera system with spring-based interactive animations and easing-based programmatic animations.

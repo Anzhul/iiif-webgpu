@@ -38,7 +38,14 @@
     "vite": "^7.1.2"
   },
   "dependencies": {
-    "@mediapipe/tasks-vision": "^0.10.32",
     "gl-matrix": "^3.4.4"
+  },
+  "peerDependencies": {
+    "@mediapipe/tasks-vision": "^0.10.32"
+  },
+  "peerDependenciesMeta": {
+    "@mediapipe/tasks-vision": {
+      "optional": true
+    }
   }
 }

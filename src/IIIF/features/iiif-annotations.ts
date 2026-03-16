@@ -1,6 +1,6 @@
 import { IIIFOverlayManager } from './iiif-overlay';
 import type { OverlayElement } from './iiif-overlay';
-import type { ParsedAnnotation, ParsedAnnotationPage, AnnotationBody } from './iiif-parser';
+import type { ParsedAnnotation, ParsedAnnotationPage, AnnotationBody } from '../iiif-parser';
 
 // --- Motivation Color Map ---
 

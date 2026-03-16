@@ -1,4 +1,4 @@
-import { Viewport } from './iiif-view.js';
+import { Viewport } from '../core/iiif-view.js';
 
 export interface TileRenderData {
     id: string;

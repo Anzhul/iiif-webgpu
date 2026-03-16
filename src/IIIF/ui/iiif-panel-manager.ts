@@ -5,8 +5,8 @@
  * Manages the dock system and panel interactions.
  */
 
-import { PANEL_CONFIG } from './config';
-import type { DockPosition, PanelOptions, PanelElements } from './types';
+import { PANEL_CONFIG } from '../config';
+import type { DockPosition, PanelOptions, PanelElements } from '../types';
 
 export class PanelManager {
     private container: HTMLElement;

@@ -1,0 +1,244 @@
+body{
+  background-color: black;
+  top: 0;
+}
+
+.iiif-container {
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 20;
+  cursor: grab;
+  overflow: hidden;
+  position: absolute;
+  background-color: blue;
+  z-index: 100;
+}
+
+.iiif-container:active {
+  cursor: grabbing;
+}
+
+
+.page{
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 200vh;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+}
+
+.controls-container {
+  position: fixed;
+  top: 2rem;
+  right: 2rem;
+  width: clamp(12rem, 18vw, 14rem);
+  height: clamp(2rem, 5dvh, 2.5rem);
+  background-color: rgba(0, 0, 0, 0.5);
+  border-radius: 0.5rem;
+  cursor: default;
+  z-index: 1000;
+}
+
+// --- Test Panel ---
+.test-panel {
+  position: fixed;
+  bottom: 1rem;
+  left: 1rem;
+  width: min(600px, calc(100vw - 2rem));
+  max-height: 60vh;
+  background-color: rgba(20, 20, 30, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  z-index: 2000;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 13px;
+  color: #e0e0e0;
+  display: flex;
+  flex-direction: column;
+  backdrop-filter: blur(8px);
+  cursor: default;
+
+  &-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #aaa;
+  }
+
+  &-collapse {
+    background: none;
+    border: none;
+    color: #aaa;
+    font-size: 16px;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+
+    &:hover { color: #fff; }
+  }
+
+  &-body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+
+    &.collapsed { display: none; }
+  }
+
+  &-input {
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px;
+
+    input {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 4px;
+      color: #fff;
+      padding: 6px 10px;
+      font-size: 13px;
+      font-family: 'Consolas', 'Monaco', monospace;
+      outline: none;
+
+      &::placeholder { color: rgba(255, 255, 255, 0.3); }
+      &:focus { border-color: rgba(100, 150, 255, 0.5); }
+    }
+
+    button {
+      background: rgba(80, 130, 255, 0.3);
+      border: 1px solid rgba(80, 130, 255, 0.4);
+      border-radius: 4px;
+      color: #fff;
+      padding: 6px 16px;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+
+      &:hover { background: rgba(80, 130, 255, 0.5); }
+      &:disabled {
+        opacity: 0.5;
+        cursor: wait;
+      }
+    }
+  }
+
+  &-result {
+    max-height: 45vh;
+    overflow-y: auto;
+    padding: 0 12px 10px;
+
+    &:empty { display: none; }
+
+    // Scrollbar
+    &::-webkit-scrollbar { width: 6px; }
+    &::-webkit-scrollbar-track { background: transparent; }
+    &::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 3px;
+    }
+  }
+}
+
+.result-type {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+
+  &.image-service { background: rgba(46, 204, 113, 0.25); color: #2ecc71; }
+  &.manifest { background: rgba(52, 152, 219, 0.25); color: #3498db; }
+  &.error { background: rgba(231, 76, 60, 0.25); color: #e74c3c; }
+}
+
+.result-section {
+  margin-top: 8px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 4px;
+
+  h4 {
+    margin: 0 0 6px 0;
+    font-size: 11px;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+}
+
+.result-field {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 12px;
+
+  .label {
+    color: #888;
+    min-width: 90px;
+    flex-shrink: 0;
+  }
+
+  .value {
+    color: #ddd;
+    font-family: 'Consolas', 'Monaco', monospace;
+    word-break: break-all;
+  }
+}
+
+.result-canvas {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border-left: 2px solid rgba(52, 152, 219, 0.4);
+  border-radius: 0 4px 4px 0;
+
+  & + & { margin-top: 4px; }
+}
+
+.result-raw-toggle {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  color: #888;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  margin-top: 8px;
+
+  &:hover { color: #bbb; border-color: rgba(255, 255, 255, 0.2); }
+}
+
+.result-raw {
+  margin-top: 6px;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 4px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #aaa;
+
+  &::-webkit-scrollbar { width: 4px; }
+  &::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); }
+}
+
+// Library component styles (canvas nav, TOC, annotations, CV, compare, etc.)
+// are defined in src/IIIF/ui/iiif-styles.css with theme-aware CSS variables.

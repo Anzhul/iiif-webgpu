@@ -1,4 +1,4 @@
-import { Viewport } from './iiif-view';
+import { Viewport } from '../core/iiif-view';
 
 /**
  * Represents an HTML overlay element positioned in world coordinates

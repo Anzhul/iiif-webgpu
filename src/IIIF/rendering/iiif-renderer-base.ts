@@ -1,5 +1,5 @@
 import { mat4 } from 'gl-matrix';
-import type { Viewport } from './iiif-view.js';
+import type { Viewport } from '../core/iiif-view.js';
 import type { IIIFRenderer, TileRenderData } from './iiif-renderer.js';
 
 /**

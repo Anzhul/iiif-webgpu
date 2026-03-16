@@ -1,5 +1,5 @@
 import { IIIFImage } from './iiif-image';
-import { TileManager } from './iiif-tile';
+import { TileManager } from '../iiif-tile';
 
 export interface WorldPlacement {
     worldX: number;

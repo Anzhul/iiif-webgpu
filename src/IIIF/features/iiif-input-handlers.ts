@@ -4,8 +4,8 @@
  * Extracted from IIIFViewer to reduce file size and improve maintainability.
  */
 
-import { CAMERA_CONFIG, TOUCH_CONFIG, NON_PAN_SELECTORS } from './config';
-import type { TouchState, CameraInterface, ViewportInterface } from './types';
+import { CAMERA_CONFIG, TOUCH_CONFIG, NON_PAN_SELECTORS } from '../config';
+import type { TouchState, CameraInterface, ViewportInterface } from '../types';
 
 export interface InputHandlerCallbacks {
     markDirty: () => void;

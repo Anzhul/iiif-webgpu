@@ -1,36 +1,36 @@
-import { IIIFImage } from './iiif-image';
-import { Viewport } from './iiif-view';
+import { IIIFImage } from './core/iiif-image';
+import { Viewport } from './core/iiif-view';
 import { TileManager } from './iiif-tile';
-import { WebGPURenderer } from './iiif-webgpu';
-import { WebGLRenderer } from './iiif-webgl';
-import { Canvas2DRenderer } from './iiif-canvas2d';
-import type { IIIFRenderer, TileRenderData } from './iiif-renderer';
-import { AnnotationManager, MOTIVATION_COLORS, DEFAULT_MOTIVATION_COLOR } from './iiif-annotations';
-import { Camera } from './iiif-camera';
-import { IIIFOverlayManager } from './iiif-overlay';
-import { World, WorldImage } from './iiif-world';
-import type { WorldPlacement } from './iiif-world';
+import { WebGPURenderer } from './rendering/iiif-webgpu';
+import { WebGLRenderer } from './rendering/iiif-webgl';
+import { Canvas2DRenderer } from './rendering/iiif-canvas2d';
+import type { IIIFRenderer, TileRenderData } from './rendering/iiif-renderer';
+import { AnnotationManager } from './features/iiif-annotations';
+import { Camera } from './core/iiif-camera';
+import { IIIFOverlayManager } from './features/iiif-overlay';
+import { World, WorldImage } from './core/iiif-world';
+import type { WorldPlacement } from './core/iiif-world';
 import { parseIIIFUrl, fetchAnnotationList } from './iiif-parser';
-import type { ParsedManifest, ParsedImageService, ParsedRange, ParsedCanvas } from './iiif-parser';
-import { EYE_SVG } from './icons';
+import type { ParsedManifest, ParsedImageService } from './iiif-parser';
 import { PANEL_CLASS_MAP, PANEL_HIDE_CLASS, PER_INSTANCE_PANELS } from './config';
 import type { IIIFViewerOptions, IIIFViewerPanels, LayoutState, CanvasInfo, LookAtOptions } from './types';
+import { ViewerUI } from './ui/iiif-viewer-ui';
+import type { ViewerUICallbacks } from './ui/iiif-viewer-ui';
 
 // Dynamic import types (for lazy loading modules)
-import type { CVController } from './iiif-cv';
-import type { ComparisonController } from './iiif-compare';
+import type { ComparisonController } from './features/iiif-compare';
 
 // Re-export newly extracted modules for library consumers
-export { PanelManager } from './iiif-panel-manager';
-export { setupInputHandlers } from './iiif-input-handlers';
+export { PanelManager } from './ui/iiif-panel-manager';
+export { setupInputHandlers } from './features/iiif-input-handlers';
 
-import './iiif-styles.css';
+import './ui/iiif-styles.css';
 
 // Re-export types for convenience
-export type { OverlayElement } from './iiif-overlay';
-export type { CustomAnnotation, Annotation, IIIFAnnotation } from './iiif-annotations';
-export { IIIFOverlayManager } from './iiif-overlay';
-export type { WorldPlacement } from './iiif-world';
+export type { OverlayElement } from './features/iiif-overlay';
+export type { CustomAnnotation, Annotation, IIIFAnnotation } from './features/iiif-annotations';
+export { IIIFOverlayManager } from './features/iiif-overlay';
+export type { WorldPlacement } from './core/iiif-world';
 export type { ParsedRange, ParsedManifestMetadata, ParsedMetadataItem } from './iiif-parser';
 export type { IIIFViewerOptions, IIIFViewerPanels, LayoutState } from './types';
 
@@ -64,30 +64,7 @@ export class IIIFViewer {
 
     // UI elements
     private overlayContainer?: HTMLElement;
-    private canvasNavContainer?: HTMLElement;
-    private canvasNavList?: HTMLElement;
-    private tocContainer?: HTMLElement;
-    private tocList?: HTMLElement;
-    private metadataPanelBody?: HTMLElement;
-    private annotationPanel?: HTMLDivElement;
-    private annotationPanelBody?: HTMLDivElement;
-    private cvPanel?: HTMLDivElement;
-    private cvPanelBody?: HTMLDivElement;
-    private cvVideo?: HTMLVideoElement;
-    private cvDisplayCanvas?: HTMLCanvasElement;
-
-    private cvStatusEl?: HTMLSpanElement;
-    private cvToggleBtn?: HTMLButtonElement;
-    private cvGestureBtn?: HTMLButtonElement;
-    private cvController?: CVController;
-
-    private comparePanel?: HTMLDivElement;
-    private settingsPanel?: HTMLDivElement;
-    private settingsPanelBody?: HTMLDivElement;
-    private docks: Map<string, HTMLDivElement> = new Map();
-    private fullscreenBtn?: HTMLButtonElement;
-    private colorInput?: HTMLInputElement;
-    private settingsCheckboxes: Map<string, HTMLInputElement> = new Map();
+    private ui: ViewerUI;
 
     // State
     private manifest?: ParsedManifest;
@@ -135,12 +112,8 @@ export class IIIFViewer {
         lastTapY: 0,
     };
 
-    // Event tracking
-    private eventHandlers: Map<Element | Document, Map<string, EventListener>> = new Map();
+    // Event cleanup
     private abortController: AbortController = new AbortController();
-
-    // Panel z-index management
-    private panelZIndexCounter: number = 100;
 
     // Configuration
     private readonly CONFIG: IIIFViewerOptions;
@@ -178,17 +151,39 @@ export class IIIFViewer {
         }
         this.annotationManager = new AnnotationManager(this.overlayManager);
 
-        // Create docks before any panels so dock assignments work
-        this.setupDocks();
+        // Create ViewerUI with callbacks
+        const uiCallbacks: ViewerUICallbacks = {
+            markDirty: () => this.markDirty(),
+            fitToWorld: () => this.fitToWorld(),
+            loadCanvas: (index) => this.loadCanvas(index),
+            previousCanvas: () => this.previousCanvas(),
+            nextCanvas: () => this.nextCanvas(),
+            springZoomByFactor: (factor) => this.camera.springZoomByFactor(factor),
+            springPan: (dx, dy) => this.camera.springPan(dx, dy),
+            enterCompareMode: () => this.enterCompareMode(),
+            exitCompareMode: () => this.exitCompareMode(),
+            saveLayout: () => this.saveLayout(),
+            loadLayout: (state) => this.loadLayout(state),
+            getViewportScale: () => this.viewport.scale,
+            getRenderer: () => this.renderer as any,
+            getAnnotationManager: () => this.annotationManager,
+            getOverlayManager: () => this.overlayManager,
+            getManifest: () => this.manifest,
+            getCurrentCanvasIndex: () => this.currentCanvasIndex,
+            getCurrentLoadedUrl: () => this.currentLoadedUrl,
+            getCustomAnnotationSpecs: () => this.customAnnotationSpecs,
+            getHiddenAnnotationTypes: () => this.hiddenAnnotationTypes,
+            setHiddenAnnotationType: (type, hidden) => {
+                if (hidden) this.hiddenAnnotationTypes.add(type);
+                else this.hiddenAnnotationTypes.delete(type);
+            },
+            getComparisonController: () => this.comparisonController as any,
+            isMobileOrTablet: () => this.isMobileOrTablet(),
+            getCanvasIdToIndex: () => this.canvasIdToIndex,
+        };
 
-        if (this.panels.pages !== undefined) this.setupCanvasNav();
-        if (this.panels.navigation !== undefined) this.setupTOC();
-        this.setupNavigationPanel();
-        if (this.panels.settings !== undefined) this.setupSettingsPanel();
-        if (this.panels.annotations !== undefined) this.setupAnnotationPanel();
-        if (this.panels.manifest !== undefined) this.setupManifestPanel();
-        if (this.panels.gesture !== undefined && !this.isMobileOrTablet()) this.setupCVPanel();
-        if (this.panels.compare !== undefined) this.setupComparePanel();
+        this.ui = new ViewerUI(container, this.panels, this.CONFIG, this.abortController, uiCallbacks);
+        this.ui.setupAll();
 
         // Set up handlers
         this.setupResizeHandler();
@@ -218,1191 +213,6 @@ export class IIIFViewer {
 
         this.container.appendChild(this.overlayContainer);
         this.overlayManager = new IIIFOverlayManager(this.overlayContainer, this.viewport);
-    }
-
-    /**
-     * FLIP animation for dock children: records positions before a DOM change,
-     * then after the change animates children from old to new positions.
-     */
-    /** Apply FLIP animation given pre-captured rects. Call AFTER the DOM change. */
-    private flipAnimate(firstRects: Map<HTMLElement, DOMRect>): void {
-        // Synchronously read new positions and apply invert (before browser paints)
-        const moved: HTMLElement[] = [];
-        for (const [child, firstRect] of firstRects) {
-            if (!child.isConnected) continue;
-            const lastRect = child.getBoundingClientRect();
-            const dy = firstRect.top - lastRect.top;
-            if (Math.abs(dy) < 1) continue;
-            child.style.transition = 'none';
-            child.style.transform = `translateY(${dy}px)`;
-            moved.push(child);
-        }
-        // Play: animate to new position in next frame
-        requestAnimationFrame(() => {
-            for (const child of moved) {
-                child.style.transition = 'transform 0.2s ease';
-                child.style.transform = '';
-                const onEnd = () => {
-                    child.style.transition = '';
-                    child.removeEventListener('transitionend', onEnd);
-                };
-                child.addEventListener('transitionend', onEnd);
-            }
-        });
-    }
-
-    /** Bring a panel to the front by updating its z-index */
-    private bringPanelToFront(panel: HTMLElement): void {
-        this.panelZIndexCounter++;
-        const zIndex = String(this.panelZIndexCounter);
-        panel.style.zIndex = zIndex;
-
-        // If panel is inside a dock, also bring the dock to front
-        const parentDock = panel.parentElement;
-        if (parentDock?.classList.contains('iiif-dock')) {
-            parentDock.style.zIndex = zIndex;
-        }
-    }
-
-    /** Make a panel draggable by its header */
-    private makePanelDraggable(panel: HTMLElement, header: HTMLElement): void {
-        let startX = 0;
-        let startY = 0;
-        let startLeft = 0;
-        let startTop = 0;
-        let panelHeight = 0;
-
-        // Spacer element that opens a gap in the dock during drag
-        let spacer: HTMLDivElement | null = null;
-        let spacerDock: HTMLElement | null = null;
-
-        const getDocks = (): HTMLElement[] => {
-            // Query all docks in the container tree — includes wrapper docks
-            // and child viewer instance docks during compare mode
-            return Array.from(this.container.querySelectorAll('.iiif-dock')) as HTMLElement[];
-        };
-
-        const hitTestDock = (clientX: number, clientY: number): HTMLElement | null => {
-            const panelRect = panel.getBoundingClientRect();
-            for (const dock of getDocks()) {
-                const rect = dock.getBoundingClientRect();
-                // Skip hidden/collapsed docks (display:none → zero-size rect)
-                if (rect.width === 0 && rect.height === 0) continue;
-                const margin = 40;
-                // Test both cursor position and panel edges against the dock zone.
-                // For bottom docks the panel bottom arrives first; for top docks the top does.
-                const testTop = Math.min(clientY, panelRect.top);
-                const testBottom = Math.max(clientY, panelRect.bottom);
-                if (
-                    clientX >= rect.left - margin &&
-                    clientX <= rect.right + margin &&
-                    testBottom >= rect.top - margin &&
-                    testTop <= rect.bottom + margin
-                ) {
-                    return dock;
-                }
-            }
-            return null;
-        };
-
-        const isReversedDock = (dock: HTMLElement): boolean => {
-            return dock.classList.contains('iiif-dock-bottom-right') ||
-                dock.classList.contains('iiif-dock-bottom-left') ||
-                dock.classList.contains('iiif-dock-bottom-center');
-        };
-
-        const findInsertIndex = (dock: HTMLElement, clientY: number): number => {
-            const children = Array.from(dock.children).filter(c => c !== spacer) as HTMLElement[];
-            if (children.length === 0) return 0;
-
-            if (isReversedDock(dock)) {
-                // column-reverse: iterate visually top to bottom (reverse DOM order)
-                for (let i = children.length - 1; i >= 0; i--) {
-                    const childRect = children[i].getBoundingClientRect();
-                    if (clientY < childRect.top + childRect.height / 2) {
-                        return i + 1;
-                    }
-                }
-                return 0;
-            }
-
-            for (let i = 0; i < children.length; i++) {
-                const childRect = children[i].getBoundingClientRect();
-                if (clientY < childRect.top + childRect.height / 2) {
-                    return i;
-                }
-            }
-            return children.length;
-        };
-
-        const ensureSpacer = () => {
-            if (!spacer) {
-                spacer = document.createElement('div');
-                spacer.className = 'iiif-dock-spacer';
-                spacer.style.height = '0px';
-                spacer.style.transition = 'height 0.2s ease';
-                spacer.style.overflow = 'hidden';
-                spacer.style.pointerEvents = 'none';
-            }
-        };
-
-        const insertSpacerAt = (dock: HTMLElement, index: number) => {
-            ensureSpacer();
-            // Capture positions before DOM change
-            const children = Array.from(dock.children).filter(c => c !== spacer) as HTMLElement[];
-            const firstRects = new Map<HTMLElement, DOMRect>();
-            for (const child of children) {
-                firstRects.set(child, child.getBoundingClientRect());
-            }
-
-            if (index < children.length) {
-                dock.insertBefore(spacer!, children[index]);
-            } else {
-                dock.appendChild(spacer!);
-            }
-            spacerDock = dock;
-
-            // Synchronous invert + rAF play
-            this.flipAnimate(firstRects);
-            // Trigger spacer height transition
-            requestAnimationFrame(() => {
-                if (spacer) spacer.style.height = `${panelHeight}px`;
-            });
-        };
-
-        const removeSpacer = () => {
-            if (spacer && spacer.parentElement) {
-                spacer.style.height = '0px';
-                const s = spacer;
-                const onEnd = () => {
-                    s.removeEventListener('transitionend', onEnd);
-                    s.remove();
-                };
-                s.addEventListener('transitionend', onEnd);
-            }
-            spacerDock = null;
-        };
-
-        const removeSpacerImmediate = () => {
-            if (spacer && spacer.parentElement) {
-                spacer.remove();
-            }
-            spacerDock = null;
-        };
-
-        let isPointerDown = false;
-        let hasUndocked = false;
-        const DRAG_THRESHOLD = 5;
-
-        const undockPanel = () => {
-            hasUndocked = true;
-            panel.classList.add('dragging');
-
-            const rect = panel.getBoundingClientRect();
-            const containerRect = this.container.getBoundingClientRect();
-            startLeft = rect.left - containerRect.left;
-            startTop = rect.top - containerRect.top;
-            panelHeight = rect.height;
-
-            // Reparent to main container for free dragging
-            const parentDock = panel.parentElement;
-            if (parentDock && parentDock !== this.container) {
-                if (parentDock.classList.contains('iiif-dock')) {
-                    // Insert spacer at panel's position to hold the space
-                    ensureSpacer();
-                    parentDock.insertBefore(spacer!, panel);
-                    spacer!.style.height = `${panelHeight}px`;
-                    spacerDock = parentDock;
-                }
-                this.container.appendChild(panel);
-            }
-
-            panel.style.position = 'absolute';
-            panel.style.right = 'auto';
-            panel.style.bottom = 'auto';
-            panel.style.transform = 'none';
-            panel.style.left = `${startLeft}px`;
-            panel.style.top = `${startTop}px`;
-        };
-
-        const onPointerDown = (clientX: number, clientY: number) => {
-            isPointerDown = true;
-            hasUndocked = false;
-            startX = clientX;
-            startY = clientY;
-            // Bring panel to front when starting to drag
-            this.bringPanelToFront(panel);
-        };
-
-        const onPointerMove = (clientX: number, clientY: number) => {
-            if (!isPointerDown) return;
-
-            const dx = clientX - startX;
-            const dy = clientY - startY;
-
-            // Only undock after exceeding drag threshold
-            if (!hasUndocked) {
-                if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
-                undockPanel();
-            }
-
-            const newLeft = startLeft + dx;
-            const newTop = startTop + dy;
-
-            const containerRect = this.container.getBoundingClientRect();
-            const panelRect = panel.getBoundingClientRect();
-
-            const maxLeft = containerRect.width - panelRect.width;
-            const maxTop = containerRect.height - panelRect.height;
-
-            panel.style.left = `${Math.max(0, Math.min(newLeft, maxLeft))}px`;
-            panel.style.top = `${Math.max(0, Math.min(newTop, maxTop))}px`;
-
-            // Highlight dock and manage spacer
-            const targetDock = hitTestDock(clientX, clientY);
-            for (const dock of getDocks()) {
-                dock.classList.toggle('dock-highlight', dock === targetDock);
-            }
-
-            if (targetDock) {
-                const insertIdx = findInsertIndex(targetDock, clientY);
-                const currentChildren = Array.from(targetDock.children).filter(c => c !== spacer);
-                // Determine where spacer currently is (among non-spacer children)
-                const spacerCurrentIdx = spacer?.parentElement === targetDock
-                    ? Array.from(targetDock.children).indexOf(spacer!)
-                    : -1;
-                const spacerLogicalIdx = spacerCurrentIdx >= 0
-                    ? currentChildren.filter((_, i) => {
-                        const domIdx = Array.from(targetDock.children).indexOf(currentChildren[i]);
-                        return domIdx < spacerCurrentIdx;
-                    }).length
-                    : -1;
-
-                if (spacerDock !== targetDock || spacerLogicalIdx !== insertIdx) {
-                    // Different dock or different position — reinsert
-                    if (spacerDock && spacerDock !== targetDock) {
-                        removeSpacerImmediate();
-                    }
-                    insertSpacerAt(targetDock, insertIdx);
-                }
-            } else if (spacerDock) {
-                removeSpacer();
-            }
-        };
-
-        const onPointerUp = (clientX: number, clientY: number) => {
-            if (!isPointerDown) return;
-            isPointerDown = false;
-
-            // Click without drag — do nothing
-            if (!hasUndocked) return;
-
-            panel.classList.remove('dragging');
-
-            for (const dock of getDocks()) {
-                dock.classList.remove('dock-highlight');
-            }
-
-            const targetDock = hitTestDock(clientX, clientY);
-            if (targetDock && spacer?.parentElement === targetDock) {
-                // Replace spacer with the actual panel
-                panel.style.position = '';
-                panel.style.left = '';
-                panel.style.top = '';
-                panel.style.right = '';
-                panel.style.bottom = '';
-                panel.style.transform = '';
-
-                targetDock.insertBefore(panel, spacer);
-                spacer.remove();
-                spacerDock = null;
-            } else {
-                // Dropped outside any dock — just remove spacer
-                removeSpacerImmediate();
-            }
-        };
-
-        // Mouse events
-        this.addEventListener(header, 'mousedown', ((e: MouseEvent) => {
-            if ((e.target as HTMLElement).closest('button')) return;
-            e.stopPropagation();
-            e.preventDefault();
-            onPointerDown(e.clientX, e.clientY);
-        }) as EventListener);
-        this.addEventListener(document.body, 'mousemove', ((e: MouseEvent) => {
-            onPointerMove(e.clientX, e.clientY);
-        }) as EventListener);
-        this.addEventListener(document.body, 'mouseup', ((e: MouseEvent) => {
-            onPointerUp(e.clientX, e.clientY);
-        }) as EventListener);
-
-        // Touch events
-        this.addEventListener(header, 'touchstart', ((e: TouchEvent) => {
-            if ((e.target as HTMLElement).closest('button')) return;
-            if (e.touches.length !== 1) return;
-            e.stopPropagation();
-            e.preventDefault();
-            const t = e.touches[0];
-            onPointerDown(t.clientX, t.clientY);
-        }) as EventListener, { passive: false });
-        this.addEventListener(document.body, 'touchmove', ((e: TouchEvent) => {
-            if (!isPointerDown || e.touches.length !== 1) return;
-            e.preventDefault();
-            const t = e.touches[0];
-            onPointerMove(t.clientX, t.clientY);
-        }) as EventListener, { passive: false });
-        this.addEventListener(document.body, 'touchend', ((e: TouchEvent) => {
-            if (!isPointerDown) return;
-            const t = e.changedTouches[0];
-            onPointerUp(t.clientX, t.clientY);
-        }) as EventListener);
-    }
-
-    /** Make a panel resizable via edge and corner handles */
-    private makePanelResizable(panel: HTMLElement): void {
-        panel.classList.add('resizable');
-
-        // Create resize handles for all edges and corners
-        const handles = ['n', 's', 'e', 'w', 'nw', 'ne', 'sw', 'se'];
-        const handleElements: HTMLElement[] = [];
-
-        for (const direction of handles) {
-            const handle = document.createElement('div');
-            handle.className = `iiif-resize-handle iiif-resize-handle-${direction}`;
-            handle.dataset.direction = direction;
-            panel.appendChild(handle);
-            handleElements.push(handle);
-        }
-
-        let isResizing = false;
-        let currentHandle: HTMLElement | null = null;
-        let startX = 0;
-        let startY = 0;
-        let startWidth = 0;
-        let startHeight = 0;
-        let startLeft = 0;
-        let startTop = 0;
-
-        const MIN_WIDTH = 100;
-        const MIN_HEIGHT = 60;
-
-        // Get cursor class based on resize direction
-        const getCursorClass = (direction: string): string => {
-            if (direction === 'e' || direction === 'w') return 'iiif-resizing-ew';
-            if (direction === 'n' || direction === 's') return 'iiif-resizing-ns';
-            if (direction === 'nw' || direction === 'se') return 'iiif-resizing-nwse';
-            if (direction === 'ne' || direction === 'sw') return 'iiif-resizing-nesw';
-            return '';
-        };
-
-        const onPointerDown = (e: MouseEvent | TouchEvent, handle: HTMLElement) => {
-            e.preventDefault();
-            e.stopPropagation();
-
-            isResizing = true;
-            currentHandle = handle;
-
-            // Add cursor class to body to maintain cursor during drag
-            const direction = handle.dataset.direction || '';
-            const cursorClass = getCursorClass(direction);
-            if (cursorClass) document.body.classList.add(cursorClass);
-
-            const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
-            const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
-
-            startX = clientX;
-            startY = clientY;
-
-            const rect = panel.getBoundingClientRect();
-            const containerRect = this.container.getBoundingClientRect();
-            startWidth = rect.width;
-            startHeight = rect.height;
-            startLeft = rect.left - containerRect.left;
-            startTop = rect.top - containerRect.top;
-
-            // Apply explicit dimensions BEFORE adding resized class to prevent flicker
-            panel.style.width = `${startWidth}px`;
-            panel.style.height = `${startHeight}px`;
-
-            // Mark panel as resized and bring to front
-            panel.classList.add('resized');
-            this.bringPanelToFront(panel);
-        };
-
-        const onPointerMove = (clientX: number, clientY: number) => {
-            if (!isResizing || !currentHandle) return;
-
-            const direction = currentHandle.dataset.direction || '';
-            const dx = clientX - startX;
-            const dy = clientY - startY;
-
-            let newWidth = startWidth;
-            let newHeight = startHeight;
-            let newLeft = startLeft;
-            let newTop = startTop;
-
-            // Handle horizontal resize
-            if (direction.includes('e')) {
-                newWidth = Math.max(MIN_WIDTH, startWidth + dx);
-            }
-            if (direction.includes('w')) {
-                const widthChange = Math.min(dx, startWidth - MIN_WIDTH);
-                newWidth = startWidth - widthChange;
-                newLeft = startLeft + widthChange;
-            }
-
-            // Handle vertical resize
-            if (direction.includes('s')) {
-                newHeight = Math.max(MIN_HEIGHT, startHeight + dy);
-            }
-            if (direction.includes('n')) {
-                const heightChange = Math.min(dy, startHeight - MIN_HEIGHT);
-                newHeight = startHeight - heightChange;
-                newTop = startTop + heightChange;
-            }
-
-            // Apply new dimensions
-            panel.style.width = `${newWidth}px`;
-            panel.style.height = `${newHeight}px`;
-
-            // If panel is floating (absolute positioned), also update position for n/w resizes
-            if (panel.style.position === 'absolute') {
-                if (direction.includes('w')) {
-                    panel.style.left = `${newLeft}px`;
-                }
-                if (direction.includes('n')) {
-                    panel.style.top = `${newTop}px`;
-                }
-            }
-        };
-
-        const onPointerUp = () => {
-            if (!isResizing) return;
-            isResizing = false;
-            // Remove all cursor classes from body
-            document.body.classList.remove(
-                'iiif-resizing-ew',
-                'iiif-resizing-ns',
-                'iiif-resizing-nwse',
-                'iiif-resizing-nesw'
-            );
-            currentHandle = null;
-        };
-
-        // Attach mouse events to each handle
-        for (const handle of handleElements) {
-            this.addEventListener(handle, 'mousedown', ((e: MouseEvent) => {
-                onPointerDown(e, handle);
-            }) as EventListener);
-
-            this.addEventListener(handle, 'touchstart', ((e: TouchEvent) => {
-                if (e.touches.length !== 1) return;
-                onPointerDown(e, handle);
-            }) as EventListener, { passive: false });
-        }
-
-        // Global move/up handlers
-        this.addEventListener(document.body, 'mousemove', ((e: MouseEvent) => {
-            if (isResizing) {
-                e.preventDefault();
-                onPointerMove(e.clientX, e.clientY);
-            }
-        }) as EventListener);
-        this.addEventListener(document.body, 'mouseup', (() => {
-            onPointerUp();
-        }) as EventListener);
-
-        this.addEventListener(document.body, 'touchmove', ((e: TouchEvent) => {
-            if (!isResizing || e.touches.length !== 1) return;
-            e.preventDefault();
-            onPointerMove(e.touches[0].clientX, e.touches[0].clientY);
-        }) as EventListener, { passive: false });
-        this.addEventListener(document.body, 'touchend', (() => {
-            onPointerUp();
-        }) as EventListener);
-    }
-
-    /**
-     * Create a standard panel with header, collapse button, and body.
-     * Returns { panel, header, body, collapseBtn } for further customization.
-     */
-    private createPanel(options: {
-        className: string;
-        title: string;
-        initiallyCollapsed?: boolean;
-        hidden?: boolean;
-        parent?: HTMLElement;
-        draggable?: boolean;
-        resizable?: boolean;
-        dock?: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'top-center' | 'bottom-center';
-    }): { panel: HTMLDivElement; header: HTMLDivElement; body: HTMLDivElement; collapseBtn: HTMLButtonElement } {
-        const panel = document.createElement('div');
-        panel.className = `iiif-panel ${options.className}`;
-        if (options.hidden) panel.style.display = 'none';
-
-        const header = document.createElement('div');
-        header.className = `iiif-panel-header ${options.className}-header`;
-
-        const title = document.createElement('span');
-        title.textContent = options.title;
-        header.appendChild(title);
-
-        const collapseBtn = document.createElement('button');
-        collapseBtn.className = `iiif-panel-collapse ${options.className}-collapse`;
-        collapseBtn.textContent = options.initiallyCollapsed ? '+' : '−';
-        header.appendChild(collapseBtn);
-
-        panel.appendChild(header);
-
-        const body = document.createElement('div');
-        body.className = `iiif-panel-body ${options.className}-body`;
-        if (options.initiallyCollapsed) body.classList.add('collapsed');
-        panel.appendChild(body);
-
-        this.addEventListener(collapseBtn, 'click', () => {
-            const isCollapsing = !body.classList.contains('collapsed');
-            if (isCollapsing) {
-                // Store current height before collapsing
-                if (panel.style.height) {
-                    panel.dataset.resizedHeight = panel.style.height;
-                }
-                panel.style.height = '';
-            } else {
-                // Restore height when expanding
-                if (panel.dataset.resizedHeight) {
-                    panel.style.height = panel.dataset.resizedHeight;
-                }
-            }
-            body.classList.toggle('collapsed');
-            collapseBtn.textContent = body.classList.contains('collapsed') ? '+' : '−';
-        });
-
-        // Bring panel to front when clicked anywhere on it
-        this.addEventListener(panel, 'mousedown', () => {
-            this.bringPanelToFront(panel);
-        });
-        this.addEventListener(panel, 'touchstart', () => {
-            this.bringPanelToFront(panel);
-        }, { passive: true });
-
-        if (options.draggable !== false) {
-            this.makePanelDraggable(panel, header);
-        }
-
-        // Add resize handles if resizable (default to true)
-        if (options.resizable !== false) {
-            this.makePanelResizable(panel);
-        }
-
-        if (options.dock) {
-            const dock = this.docks.get(options.dock);
-            if (dock) {
-                dock.appendChild(panel);
-            } else {
-                this.container.appendChild(panel);
-            }
-        } else {
-            (options.parent ?? this.container).appendChild(panel);
-        }
-
-        return { panel, header, body, collapseBtn };
-    }
-
-    private setupCanvasNav() {
-        const { panel, body } = this.createPanel({
-            className: 'iiif-canvas-nav',
-            title: 'Pages',
-            initiallyCollapsed: this.panels.pages === 'hide' || this.panels.pages === 'show-closed',
-            dock: 'bottom-left',
-        });
-        this.canvasNavContainer = panel;
-        this.canvasNavList = body;
-        this.canvasNavList.classList.add('iiif-canvas-nav-list');
-    }
-
-    private setupNavigationPanel() {
-        const wrapper = document.createElement('div');
-        wrapper.className = 'iiif-navigation-wrapper';
-
-        const bar = document.createElement('div');
-        bar.className = 'iiif-navigation-bar';
-
-        const zoomIn = document.createElement('button');
-        zoomIn.className = 'iiif-nav-zoom-btn';
-        zoomIn.title = 'Zoom In';
-        zoomIn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 13 13"><rect width="13" height="2.5" rx="1" y="5.25" fill="currentColor"/><rect width="13" height="2.5" rx="1" transform="translate(7.75 0) rotate(90)" fill="currentColor"/></svg>`;
-        zoomIn.addEventListener('click', () => { this.camera.springZoomByFactor(1.5); this.markDirty(); });
-
-        const zoomOut = document.createElement('button');
-        zoomOut.className = 'iiif-nav-zoom-btn';
-        zoomOut.title = 'Zoom Out';
-        zoomOut.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="10" height="2" viewBox="0 0 13 3"><rect width="13" height="2.5" rx="1" fill="currentColor"/></svg>`;
-        zoomOut.addEventListener('click', () => { this.camera.springZoomByFactor(1 / 1.5); this.markDirty(); });
-
-        const resetBtn = document.createElement('button');
-        resetBtn.className = 'iiif-nav-zoom-btn';
-        resetBtn.title = 'Reset View';
-        resetBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>`;
-        resetBtn.addEventListener('click', () => { this.fitToWorld(); });
-
-        bar.appendChild(zoomIn);
-        bar.appendChild(zoomOut);
-        bar.appendChild(resetBtn);
-
-        const dragHandle = document.createElement('div');
-        dragHandle.className = 'iiif-navigation-drag-handle';
-
-        wrapper.appendChild(bar);
-        wrapper.appendChild(dragHandle);
-
-        this.makePanelDraggable(wrapper, dragHandle);
-
-        const dock = this.docks.get('bottom-center');
-        if (dock) {
-            dock.appendChild(wrapper);
-        } else {
-            this.container.appendChild(wrapper);
-        }
-    }
-
-    private setupTOC() {
-        const { panel, body } = this.createPanel({
-            className: 'iiif-toc',
-            title: 'Contents',
-            initiallyCollapsed: this.panels.navigation === 'hide' || this.panels.navigation === 'show-closed',
-            dock: 'top-right',
-        });
-        this.tocContainer = panel;
-        this.tocList = body;
-        this.tocList.classList.add('iiif-toc-list');
-    }
-
-    private setupManifestPanel() {
-        const { body } = this.createPanel({
-            className: 'iiif-manifest-panel',
-            title: 'Manifest',
-            initiallyCollapsed: this.panels.manifest === 'hide' || this.panels.manifest === 'show-closed',
-            dock: 'top-right',
-        });
-        this.metadataPanelBody = body;
-    }
-
-    private setupAnnotationPanel() {
-        const { panel, body } = this.createPanel({
-            className: 'iiif-annotation-panel',
-            title: 'Annotations',
-            initiallyCollapsed: this.panels.annotations === 'hide' || this.panels.annotations === 'show-closed',
-            dock: 'top-right',
-        });
-        this.annotationPanel = panel;
-        this.annotationPanelBody = body;
-    }
-
-    private setupCVPanel() {
-        const { panel, body } = this.createPanel({
-            className: 'iiif-cv-panel',
-            title: 'Gesture',
-            initiallyCollapsed: this.panels.gesture === 'hide' || this.panels.gesture === 'show-closed',
-            dock: 'top-left',
-        });
-        this.cvPanel = panel;
-        this.cvPanelBody = body;
-
-        // Hidden video element — data source only, not displayed.
-        // We render to a canvas instead (see below) to bypass Chrome's video
-        // compositor, which can be throttled on certain hardware/driver combos.
-        this.cvVideo = document.createElement('video');
-        this.cvVideo.setAttribute('playsinline', '');
-        this.cvVideo.setAttribute('autoplay', '');
-        this.cvVideo.muted = true;
-        // Must stay in DOM and rendered (not display:none) or Chrome won't start the source.
-        // Make it 1x1px offscreen so it doesn't affect layout.
-        Object.assign(this.cvVideo.style, {
-            position: 'absolute', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none',
-        });
-        this.cvPanelBody.appendChild(this.cvVideo);
-
-        // Display canvas — webcam feed drawn here via drawImage()
-        this.cvDisplayCanvas = document.createElement('canvas');
-        this.cvDisplayCanvas.className = 'iiif-cv-panel-video';
-        this.cvPanelBody.appendChild(this.cvDisplayCanvas);
-
-        this.cvStatusEl = document.createElement('span');
-        this.cvStatusEl.className = 'iiif-cv-panel-status';
-        this.cvStatusEl.textContent = 'Ready';
-        this.cvPanelBody.appendChild(this.cvStatusEl);
-
-        this.cvToggleBtn = document.createElement('button');
-        this.cvToggleBtn.className = 'iiif-cv-panel-toggle';
-        this.cvToggleBtn.textContent = 'Start';
-        this.cvPanelBody.appendChild(this.cvToggleBtn);
-
-        this.cvGestureBtn = document.createElement('button');
-        this.cvGestureBtn.className = 'iiif-cv-panel-toggle';
-        this.cvGestureBtn.textContent = 'Gestures: ON';
-        this.cvGestureBtn.style.display = 'none';
-        this.cvPanelBody.appendChild(this.cvGestureBtn);
-
-        this.addEventListener(this.cvGestureBtn!, 'click', () => {
-            if (!this.cvController) return;
-            this.cvController.gesturesEnabled = !this.cvController.gesturesEnabled;
-            this.cvGestureBtn!.textContent = this.cvController.gesturesEnabled ? 'Gestures: ON' : 'Gestures: OFF';
-            this.cvGestureBtn!.classList.toggle('active', this.cvController.gesturesEnabled);
-        });
-
-        this.addEventListener(this.cvToggleBtn, 'click', async () => {
-            if (this.cvController?.running) {
-                this.cvController.stop();
-                this.cvToggleBtn!.textContent = 'Start';
-                this.cvToggleBtn!.classList.remove('active');
-                this.cvGestureBtn!.style.display = 'none';
-                return;
-            }
-
-            try {
-                if (!this.cvController) {
-                    const { CVController } = await import('./iiif-cv');
-                    this.cvController = new CVController(this.cvVideo!, {
-                        onStatusChange: (status: string) => {
-                            if (this.cvStatusEl) this.cvStatusEl.textContent = status;
-                        },
-                        onPan: (dx: number, dy: number) => {
-                            this.camera.springPan(dx / this.viewport.scale, dy / this.viewport.scale);
-                            this.markDirty();
-                        },
-                        onZoom: (factor: number) => {
-                            this.camera.springZoomByFactor(factor);
-                            this.markDirty();
-                        },
-                    }, 800, this.cvDisplayCanvas);
-                    await this.cvController.init();
-                }
-
-                await this.cvController.start();
-                this.cvToggleBtn!.textContent = 'Stop';
-                this.cvToggleBtn!.classList.add('active');
-                this.cvGestureBtn!.style.display = '';
-            } catch (err) {
-                console.error('CV start failed:', err);
-                if (this.cvStatusEl) this.cvStatusEl.textContent = 'Error';
-            }
-        });
-
-    }
-
-    private setupComparePanel() {
-        const { panel, collapseBtn } = this.createPanel({
-            className: 'iiif-compare-panel',
-            title: 'Compare',
-            initiallyCollapsed: true, // Always collapsed — expanding enters compare mode
-            dock: 'bottom-right',
-        });
-        this.comparePanel = panel;
-
-        // Override collapse button: use capture phase so this fires BEFORE
-        // the default handler from createPanel (which is in bubble phase).
-        collapseBtn.addEventListener('click', (e) => {
-            e.stopImmediatePropagation();
-            if (this.comparisonController) {
-                // Toggle collapse state - don't exit compare mode
-                const body = this.comparePanel!.querySelector('.iiif-panel-body');
-                const isCollapsed = body?.classList.toggle('collapsed') ?? false;
-                collapseBtn.textContent = isCollapsed ? '+' : '−';
-            } else {
-                // Enter compare mode
-                this.enterCompareMode();
-                collapseBtn.textContent = '−';
-                this.comparePanel!.classList.add('active');
-                const body = this.comparePanel!.querySelector('.iiif-panel-body');
-                body?.classList.remove('collapsed');
-            }
-        }, { capture: true, signal: this.abortController.signal });
-    }
-
-    private setupDocks() {
-        const dockPositions = ['top-right', 'top-left', 'bottom-right', 'bottom-left', 'top-center', 'bottom-center'] as const;
-        for (const pos of dockPositions) {
-            const dock = document.createElement('div');
-            dock.className = `iiif-dock iiif-dock-${pos}`;
-            this.docks.set(pos, dock);
-            this.container.appendChild(dock);
-        }
-    }
-
-    private setupSettingsPanel() {
-        // Create fullscreen button
-        this.fullscreenBtn = document.createElement('button');
-        this.fullscreenBtn.className = 'iiif-fullscreen-btn';
-        this.fullscreenBtn.title = 'Toggle Fullscreen';
-        this.fullscreenBtn.innerHTML = `
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
-            </svg>
-        `;
-        this.addEventListener(this.fullscreenBtn, 'click', () => {
-            if (!document.fullscreenElement) {
-                this.container.requestFullscreen().catch(() => {});
-                this.fullscreenBtn!.classList.add('active');
-            } else {
-                document.exitFullscreen();
-                this.fullscreenBtn!.classList.remove('active');
-            }
-        });
-
-        this.addEventListener(document, 'fullscreenchange', () => {
-            if (!document.fullscreenElement) {
-                this.fullscreenBtn!.classList.remove('active');
-            }
-        });
-
-        // Create tools panel
-        this.settingsPanel = document.createElement('div');
-        this.settingsPanel.className = 'iiif-panel iiif-settings-panel';
-
-        const header = document.createElement('div');
-        header.className = 'iiif-panel-header iiif-settings-panel-header';
-
-        const title = document.createElement('span');
-        title.textContent = 'Settings';
-        header.appendChild(title);
-
-        const collapseBtn = document.createElement('button');
-        collapseBtn.className = 'iiif-panel-collapse iiif-settings-panel-collapse';
-        collapseBtn.textContent = '+';
-        header.appendChild(collapseBtn);
-
-        this.settingsPanel.appendChild(header);
-
-        this.settingsPanelBody = document.createElement('div');
-        this.settingsPanelBody.className = 'iiif-panel-body iiif-settings-panel-body collapsed';
-
-        // Only show toggles for panels that are included
-        const panelConfigs: { label: string; defaultVisible: boolean; containerClass: string }[] = [];
-        if (this.panels.navigation !== undefined) panelConfigs.push({ label: 'Navigation', defaultVisible: this.panels.navigation !== 'hide', containerClass: 'hide-navigation' });
-        if (this.panels.pages !== undefined) panelConfigs.push({ label: 'Pages', defaultVisible: this.panels.pages !== 'hide', containerClass: 'hide-pages' });
-        if (this.panels.manifest !== undefined) panelConfigs.push({ label: 'Manifest', defaultVisible: this.panels.manifest !== 'hide', containerClass: 'hide-manifest' });
-        if (this.panels.annotations !== undefined) panelConfigs.push({ label: 'Annotations', defaultVisible: this.panels.annotations !== 'hide', containerClass: 'hide-annotations' });
-        if (this.panels.gesture !== undefined && !this.isMobileOrTablet()) panelConfigs.push({ label: 'Gesture', defaultVisible: this.panels.gesture !== 'hide', containerClass: 'hide-vision' });
-        if (this.panels.compare !== undefined) panelConfigs.push({ label: 'Compare', defaultVisible: this.panels.compare !== 'hide', containerClass: 'hide-compare' });
-
-        for (const config of panelConfigs) {
-            const item = document.createElement('label');
-            item.className = 'iiif-settings-panel-item';
-
-            const checkbox = document.createElement('input');
-            checkbox.type = 'checkbox';
-            checkbox.className = 'iiif-settings-panel-checkbox';
-            checkbox.checked = config.defaultVisible;
-
-            const labelText = document.createElement('span');
-            labelText.textContent = config.label;
-
-            item.appendChild(checkbox);
-            item.appendChild(labelText);
-            this.settingsCheckboxes.set(config.containerClass, checkbox);
-
-            // Apply initial state using container class
-            if (!config.defaultVisible) {
-                this.container.classList.add(config.containerClass);
-            }
-
-            this.addEventListener(checkbox, 'change', () => {
-                // Toggle container class for global effect
-                if (checkbox.checked) {
-                    this.container.classList.remove(config.containerClass);
-                } else {
-                    this.container.classList.add(config.containerClass);
-                }
-            });
-
-            this.settingsPanelBody.appendChild(item);
-        }
-
-        // --- Divider ---
-        const divider = document.createElement('div');
-        divider.className = 'iiif-settings-divider';
-        this.settingsPanelBody.appendChild(divider);
-
-        // --- Background color picker ---
-        const colorItem = document.createElement('label');
-        colorItem.className = 'iiif-settings-panel-item iiif-settings-color-item';
-
-        const colorLabel = document.createElement('span');
-        colorLabel.textContent = 'Background';
-
-        this.colorInput = document.createElement('input');
-        this.colorInput.type = 'color';
-        this.colorInput.className = 'iiif-settings-color-input';
-        this.colorInput.value = '#1a1a1a';
-        const colorInput = this.colorInput;
-
-        this.addEventListener(colorInput, 'input', () => {
-            const hex = colorInput.value;
-            const r = parseInt(hex.slice(1, 3), 16) / 255;
-            const g = parseInt(hex.slice(3, 5), 16) / 255;
-            const b = parseInt(hex.slice(5, 7), 16) / 255;
-            if (this.renderer) {
-                this.renderer.setClearColor(r, g, b);
-            }
-            // Also update compare instance viewers
-            if (this.comparisonController) {
-                this.comparisonController.setBackgroundColor(r, g, b);
-            }
-        });
-
-        colorItem.appendChild(colorLabel);
-        colorItem.appendChild(colorInput);
-        this.settingsPanelBody.appendChild(colorItem);
-
-        this.settingsPanel.appendChild(this.settingsPanelBody);
-
-        // --- Icon button row at bottom of panel ---
-        const btnRow = document.createElement('div');
-        btnRow.className = 'iiif-settings-btn-row';
-
-        // Light/dark theme toggle (lightbulb icon)
-        const themeBtn = document.createElement('button');
-        themeBtn.className = 'iiif-settings-icon-btn';
-        themeBtn.title = 'Toggle Light Theme';
-        themeBtn.innerHTML = `
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M9 18h6"/>
-                <path d="M10 22h4"/>
-                <path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/>
-            </svg>
-        `;
-        this.addEventListener(themeBtn, 'click', () => {
-            const isLight = this.container.classList.toggle('theme-light');
-            themeBtn.classList.toggle('active', isLight);
-        });
-
-        // Fullscreen button
-        this.fullscreenBtn.classList.add('iiif-settings-icon-btn');
-
-        // Save layout button (download icon)
-        const saveBtn = document.createElement('button');
-        saveBtn.className = 'iiif-settings-icon-btn';
-        saveBtn.title = 'Save Layout';
-        saveBtn.innerHTML = `
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="7 10 12 15 17 10"/>
-                <line x1="12" y1="15" x2="12" y2="3"/>
-            </svg>
-        `;
-        this.addEventListener(saveBtn, 'click', () => {
-            const state = this.saveLayout();
-            const json = JSON.stringify(state, null, 2);
-            const blob = new Blob([json], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'layout.json';
-            a.click();
-            URL.revokeObjectURL(url);
-        });
-
-        // Load layout button (upload icon)
-        const loadBtn = document.createElement('button');
-        loadBtn.className = 'iiif-settings-icon-btn';
-        loadBtn.title = 'Load Layout';
-        loadBtn.innerHTML = `
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="17 8 12 3 7 8"/>
-                <line x1="12" y1="3" x2="12" y2="15"/>
-            </svg>
-        `;
-        const fileInput = document.createElement('input');
-        fileInput.type = 'file';
-        fileInput.accept = '.json';
-        fileInput.style.display = 'none';
-        fileInput.addEventListener('change', () => {
-            const file = fileInput.files?.[0];
-            if (!file) return;
-            const reader = new FileReader();
-            reader.onload = () => {
-                try {
-                    const state = JSON.parse(reader.result as string) as LayoutState;
-                    if (state.version !== 1) {
-                        console.warn('Unknown layout version:', state.version);
-                        return;
-                    }
-                    this.loadLayout(state);
-                } catch (err) {
-                    console.error('Failed to parse layout file:', err);
-                }
-                fileInput.value = '';
-            };
-            reader.readAsText(file);
-        });
-        this.addEventListener(loadBtn, 'click', () => {
-            fileInput.click();
-        });
-
-        // Append: save + load on left, spacer, theme + fullscreen on right
-        btnRow.appendChild(saveBtn);
-        btnRow.appendChild(loadBtn);
-        const btnSpacer = document.createElement('div');
-        btnSpacer.style.flex = '1';
-        btnRow.appendChild(btnSpacer);
-        btnRow.appendChild(themeBtn);
-        btnRow.appendChild(this.fullscreenBtn);
-
-        this.settingsPanel.appendChild(btnRow);
-
-        this.addEventListener(collapseBtn, 'click', () => {
-            this.settingsPanelBody!.classList.toggle('collapsed');
-            collapseBtn.textContent = this.settingsPanelBody!.classList.contains('collapsed') ? '+' : '−';
-        });
-
-        // Make settings panel draggable
-        this.makePanelDraggable(this.settingsPanel, header);
-
-        // Settings panel in top-right dock
-        this.docks.get('top-right')!.appendChild(this.settingsPanel);
-    }
-
-    private updateComparePanel() {
-        if (!this.comparePanel) return;
-
-        // Always show the compare panel — even single images can compare via URL input
-        this.comparePanel.style.display = 'flex';
-
-        // Auto-enter compare mode for 'show' option
-        if (this.panels.compare === 'show' && !this.comparisonController && this.currentLoadedUrl) {
-            this.enterCompareMode();
-            const body = this.comparePanel.querySelector('.iiif-panel-body');
-            body?.classList.remove('collapsed');
-            const collapseBtn = this.comparePanel.querySelector('.iiif-compare-panel-collapse');
-            if (collapseBtn) collapseBtn.textContent = '−';
-        }
-    }
-
-    private updateAnnotationPanel() {
-        if (!this.annotationPanelBody || !this.annotationManager) return;
-
-        this.annotationPanelBody.innerHTML = '';
-        const pages = this.annotationManager.getAnnotationPages();
-        const customGroups = this.annotationManager.getCustomAnnotationGroups();
-
-        // Always show the panel; display "None" when empty
-        if (this.annotationPanel) this.annotationPanel.style.display = 'flex';
-
-        if (pages.length === 0 && customGroups.length === 0) {
-            const none = document.createElement('div');
-            none.className = 'iiif-panel-empty';
-            none.textContent = 'None';
-            this.annotationPanelBody.appendChild(none);
-            return;
-        }
-
-        // --- IIIF annotation pages ---
-        for (const page of pages) {
-            const item = document.createElement('div');
-            item.className = 'iiif-annotation-panel-item';
-
-            const label = document.createElement('div');
-            label.className = 'iiif-annotation-panel-item-label';
-
-            // Color swatch from the page's dominant motivation
-            const firstAnn = this.annotationManager!.getAllIIIFAnnotations()
-                .find(a => page.overlayIds.some(id => id.includes(a.parsed.id || '')));
-            const motivation = firstAnn?.parsed.motivation || '';
-            const swatchColor = (MOTIVATION_COLORS[motivation] || DEFAULT_MOTIVATION_COLOR).border;
-
-            const swatch = document.createElement('span');
-            swatch.className = 'iiif-annotation-panel-swatch';
-            swatch.style.display = 'inline-block';
-            swatch.style.width = '8px';
-            swatch.style.height = '8px';
-            swatch.style.borderRadius = '50%';
-            swatch.style.backgroundColor = swatchColor;
-            swatch.style.marginRight = '6px';
-            swatch.style.flexShrink = '0';
-            label.appendChild(swatch);
-
-            label.appendChild(document.createTextNode(page.label));
-            item.appendChild(label);
-
-            const eyeBtn = document.createElement('button');
-            eyeBtn.className = 'iiif-eye-btn iiif-annotation-panel-eye';
-            if (page.visible) eyeBtn.classList.add('active');
-            eyeBtn.innerHTML = EYE_SVG;
-            eyeBtn.title = 'Toggle visibility';
-            eyeBtn.addEventListener('click', () => {
-                const newVisible = !page.visible;
-                this.annotationManager!.setPageVisible(page.pageId, newVisible);
-                eyeBtn.classList.toggle('active', newVisible);
-            });
-            item.appendChild(eyeBtn);
-
-            this.annotationPanelBody.appendChild(item);
-        }
-
-        // --- Custom annotation type groups (filtered by current canvas) ---
-        // Build set of annotation IDs valid for the current canvas
-        // When there's no manifest (single image), skip targetPage filtering
-        const hasPages = this.manifest !== undefined;
-        const idsForCurrentCanvas = new Set<string>();
-        for (const spec of this.customAnnotationSpecs) {
-            const id = spec.options?.id;
-            if (!id) continue;
-            if (hasPages && spec.targetPage !== undefined && spec.targetPage !== this.currentCanvasIndex) continue;
-            idsForCurrentCanvas.add(id);
-        }
-
-        for (const group of customGroups) {
-            const filteredIds = group.ids.filter(id => idsForCurrentCanvas.has(id));
-            if (filteredIds.length === 0) continue;
-
-            const item = document.createElement('div');
-            item.className = 'iiif-annotation-panel-item';
-
-            const label = document.createElement('div');
-            label.className = 'iiif-annotation-panel-item-label';
-
-            const swatch = document.createElement('span');
-            swatch.className = 'iiif-annotation-panel-swatch';
-            swatch.style.display = 'inline-block';
-            swatch.style.width = '8px';
-            swatch.style.height = '8px';
-            swatch.style.borderRadius = '50%';
-            swatch.style.backgroundColor = group.color;
-            swatch.style.marginRight = '6px';
-            swatch.style.flexShrink = '0';
-            label.appendChild(swatch);
-
-            label.appendChild(document.createTextNode(`${group.type} (${filteredIds.length})`));
-            item.appendChild(label);
-
-            const eyeBtn = document.createElement('button');
-            eyeBtn.className = 'iiif-eye-btn iiif-annotation-panel-eye';
-            if (group.visible) eyeBtn.classList.add('active');
-            eyeBtn.innerHTML = EYE_SVG;
-            eyeBtn.title = 'Toggle visibility';
-            eyeBtn.addEventListener('click', () => {
-                group.visible = !group.visible;
-                if (group.visible) {
-                    this.hiddenAnnotationTypes.delete(group.type);
-                } else {
-                    this.hiddenAnnotationTypes.add(group.type);
-                }
-                this.annotationManager!.setCustomTypeVisible(group.type, group.visible);
-                eyeBtn.classList.toggle('active', group.visible);
-            });
-            item.appendChild(eyeBtn);
-
-            this.annotationPanelBody.appendChild(item);
-        }
-
-        // Show "None" if no annotations are visible for this canvas
-        if (this.annotationPanelBody.children.length === 0) {
-            const none = document.createElement('div');
-            none.className = 'iiif-panel-empty';
-            none.textContent = 'None';
-            this.annotationPanelBody.appendChild(none);
-        }
     }
 
     private async initializeRenderer() {
@@ -1538,11 +348,7 @@ export class IIIFViewer {
         handler: (event: HTMLElementEventMap[K]) => void,
         options?: { passive?: boolean }
     ) {
-        if (!this.eventHandlers.has(element)) {
-            this.eventHandlers.set(element, new Map());
-        }
         const listener = handler as EventListener;
-        this.eventHandlers.get(element)!.set(type, listener);
         element.addEventListener(type, listener, { signal: this.abortController.signal, ...options });
     }
 
@@ -1813,10 +619,10 @@ export class IIIFViewer {
                         event.preventDefault();
                         if (!document.fullscreenElement) {
                             this.container.requestFullscreen().catch(() => {});
-                            this.fullscreenBtn?.classList.add('active');
+                            this.ui.fullscreenBtn?.classList.add('active');
                         } else {
                             document.exitFullscreen();
-                            this.fullscreenBtn?.classList.remove('active');
+                            this.ui.fullscreenBtn?.classList.remove('active');
                         }
                     }
                     break;
@@ -1908,11 +714,11 @@ export class IIIFViewer {
             const infoUrl = svc.id.replace(/\/$/, '') + '/info.json';
             await this.addImage('image-0', infoUrl, focus);
             this.canvasIdToIndex.clear();
-            this.updateCanvasNav();
-            this.updateTOC();
-            this.updateManifestPanel();
-            this.updateComparePanel();
-            this.updateAnnotationPanel();
+            this.ui.updateCanvasNav();
+            this.ui.updateTOC();
+            this.ui.updateManifestPanel();
+            this.ui.updateComparePanel();
+            this.ui.updateAnnotationPanel();
         } else {
             this.clearWorld();
             this.manifest = result as ParsedManifest;
@@ -1923,10 +729,10 @@ export class IIIFViewer {
                 this.canvasIdToIndex.set(this.manifest.canvases[i].id, i);
             }
 
-            this.updateCanvasNav();
-            this.updateTOC();
-            this.updateManifestPanel();
-            this.updateComparePanel();
+            this.ui.updateCanvasNav();
+            this.ui.updateTOC();
+            this.ui.updateManifestPanel();
+            this.ui.updateComparePanel();
             await this.loadCanvas(0, focus);
         }
     }
@@ -1959,8 +765,8 @@ export class IIIFViewer {
         if (cfg.settings) {
             if (cfg.settings.backgroundColor) {
                 const hex = cfg.settings.backgroundColor;
-                if (this.colorInput) {
-                    this.colorInput.value = hex;
+                if (this.ui.colorInput) {
+                    this.ui.colorInput.value = hex;
                 }
                 // Parse hex color to RGB
                 const r = parseInt(hex.slice(1, 3), 16) / 255;
@@ -2000,11 +806,11 @@ export class IIIFViewer {
                 await this.addImage(`config-image-${i}`, img.url, false, placement);
             }
 
-            this.updateCanvasNav();
-            this.updateTOC();
-            this.updateManifestPanel();
-            this.updateComparePanel();
-            this.updateAnnotationPanel();
+            this.ui.updateCanvasNav();
+            this.ui.updateTOC();
+            this.ui.updateManifestPanel();
+            this.ui.updateComparePanel();
+            this.ui.updateAnnotationPanel();
         }
 
         // Apply viewport settings
@@ -2058,7 +864,7 @@ export class IIIFViewer {
 
         this.clearWorld();
         this.currentCanvasIndex = index;
-        this.updateCanvasNavActiveState();
+        this.ui.updateCanvasNavActiveState();
 
         const canvas = this.manifest.canvases[index];
         let loadedCount = 0;
@@ -2090,26 +896,7 @@ export class IIIFViewer {
         }
 
         await this.loadIIIFAnnotationsForCanvas(canvas);
-        this.updateCustomAnnotationVisibility();
-    }
-
-    /** Show/hide custom annotations based on targetPage matching current canvas */
-    private updateCustomAnnotationVisibility(): void {
-        if (!this.overlayManager) return;
-        const hasPages = this.manifest !== undefined;
-        for (const spec of this.customAnnotationSpecs) {
-            const id = spec.options?.id;
-            if (!id) continue;
-            const overlay = this.overlayManager.getOverlay(id);
-            if (!overlay) continue;
-
-            // Hidden if on wrong page OR user toggled the type off
-            // Skip page check when there's no manifest (single image)
-            const wrongPage = hasPages && spec.targetPage !== undefined && spec.targetPage !== this.currentCanvasIndex;
-            const typeHidden = this.hiddenAnnotationTypes.has(spec.options?.type || 'Custom');
-            overlay.hidden = wrongPage || typeHidden;
-            this.overlayManager.updateOverlay(id);
-        }
+        this.ui.updateCustomAnnotationVisibility();
     }
 
     private async loadIIIFAnnotationsForCanvas(canvas: CanvasInfo): Promise<void> {
@@ -2134,7 +921,7 @@ export class IIIFViewer {
             this.annotationManager.loadIIIFAnnotations(allPages, canvas.width, canvas.height);
         }
 
-        this.updateAnnotationPanel();
+        this.ui.updateAnnotationPanel();
     }
 
     /**
@@ -2165,252 +952,6 @@ export class IIIFViewer {
     /** Current canvas index */
     get currentCanvas(): number {
         return this.currentCanvasIndex;
-    }
-
-    // ============================================================
-    // CANVAS NAVIGATION UI
-    // ============================================================
-
-    private updateCanvasNav() {
-        if (!this.canvasNavContainer || !this.canvasNavList) return;
-
-        if (!this.manifest || this.manifest.canvases.length <= 1) {
-            this.canvasNavContainer.style.display = 'none';
-            return;
-        }
-
-        this.canvasNavContainer.style.display = 'flex';
-        this.canvasNavList.innerHTML = '';
-
-        for (let i = 0; i < this.manifest.canvases.length; i++) {
-            const canvas = this.manifest.canvases[i];
-            const item = this.createCanvasNavItem(canvas, i);
-            this.canvasNavList.appendChild(item);
-        }
-    }
-
-    private createCanvasNavItem(canvas: ParsedCanvas, index: number): HTMLElement {
-        const item = document.createElement('div');
-        item.className = 'iiif-canvas-nav-item';
-        if (index === this.currentCanvasIndex) {
-            item.classList.add('active');
-        }
-
-        if (canvas.images.length > 0) {
-            const serviceUrl = canvas.images[0].imageServiceUrl.replace(/\/$/, '');
-            const thumbUrl = `${serviceUrl}/full/!120,120/0/default.jpg`;
-
-            const img = document.createElement('img');
-            img.className = 'iiif-canvas-nav-item-img';
-            img.src = thumbUrl;
-            img.alt = canvas.label || `Canvas ${index + 1}`;
-            img.loading = 'lazy';
-            img.onerror = () => {
-                img.style.display = 'none';
-            };
-            item.appendChild(img);
-        }
-
-        const labelEl = document.createElement('div');
-        labelEl.className = 'iiif-canvas-nav-item-label';
-        labelEl.textContent = canvas.label || `${index + 1}`;
-        item.appendChild(labelEl);
-
-        item.addEventListener('click', () => {
-            this.loadCanvas(index);
-        });
-
-        return item;
-    }
-
-    private updateCanvasNavActiveState() {
-        if (!this.canvasNavList) return;
-        const items = this.canvasNavList.querySelectorAll('.iiif-canvas-nav-item');
-        items.forEach((item, i) => {
-            item.classList.toggle('active', i === this.currentCanvasIndex);
-        });
-    }
-
-    // ============================================================
-    // TABLE OF CONTENTS
-    // ============================================================
-
-    private updateTOC() {
-        if (!this.tocContainer || !this.tocList) return;
-
-        const ranges = this.manifest?.ranges;
-        if (!ranges || ranges.length === 0) {
-            this.tocContainer.style.display = 'none';
-            return;
-        }
-
-        this.tocContainer.style.display = 'flex';
-        this.tocList.innerHTML = '';
-
-        for (const range of ranges) {
-            this.tocList.appendChild(this.createTOCNode(range, 0));
-        }
-    }
-
-    private createTOCNode(range: ParsedRange, depth: number): HTMLElement {
-        const node = document.createElement('div');
-        node.className = 'iiif-toc-node';
-
-        const row = document.createElement('div');
-        row.className = 'iiif-toc-row';
-        row.style.paddingLeft = `${8 + depth * 14}px`;
-
-        if (range.children.length > 0) {
-            const toggle = document.createElement('span');
-            toggle.className = 'iiif-toc-toggle';
-            toggle.textContent = '\u25BC';
-            toggle.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const childContainer = node.querySelector(':scope > .iiif-toc-children') as HTMLElement;
-                if (childContainer) {
-                    const isCollapsed = childContainer.style.display === 'none';
-                    childContainer.style.display = isCollapsed ? 'block' : 'none';
-                    toggle.textContent = isCollapsed ? '\u25BC' : '\u25B6';
-                }
-            });
-            row.appendChild(toggle);
-        } else {
-            const spacer = document.createElement('span');
-            spacer.className = 'iiif-toc-toggle-spacer';
-            row.appendChild(spacer);
-        }
-
-        const labelEl = document.createElement('span');
-        labelEl.className = 'iiif-toc-label';
-        labelEl.textContent = range.label || 'Untitled';
-        row.appendChild(labelEl);
-
-        // Click navigates to the first canvas in this range (or first child's canvas)
-        const firstCanvasIndex = this.findFirstCanvasIndex(range);
-        if (firstCanvasIndex !== undefined) {
-            row.classList.add('iiif-toc-clickable');
-            row.addEventListener('click', () => {
-                this.loadCanvas(firstCanvasIndex);
-            });
-        }
-
-        node.appendChild(row);
-
-        if (range.children.length > 0) {
-            const childContainer = document.createElement('div');
-            childContainer.className = 'iiif-toc-children';
-            for (const child of range.children) {
-                childContainer.appendChild(this.createTOCNode(child, depth + 1));
-            }
-            node.appendChild(childContainer);
-        }
-
-        return node;
-    }
-
-    private findFirstCanvasIndex(range: ParsedRange): number | undefined {
-        // Check direct canvas refs first
-        for (const canvasId of range.canvasIds) {
-            const index = this.canvasIdToIndex.get(canvasId);
-            if (index !== undefined) return index;
-        }
-        // Recurse into children
-        for (const child of range.children) {
-            const index = this.findFirstCanvasIndex(child);
-            if (index !== undefined) return index;
-        }
-        return undefined;
-    }
-
-    // ============================================================
-    // MANIFEST PANEL
-    // ============================================================
-
-    private updateManifestPanel() {
-        if (!this.metadataPanelBody) return;
-        this.metadataPanelBody.innerHTML = '';
-
-        const meta = this.manifest?.metadata;
-        if (!meta) {
-            const none = document.createElement('div');
-            none.className = 'iiif-panel-empty';
-            none.textContent = 'None';
-            this.metadataPanelBody.appendChild(none);
-            return;
-        }
-
-        if (this.manifest?.label) {
-            this.appendManifestField('Title', this.manifest.label);
-        }
-
-        if (meta.description) {
-            this.appendManifestField('Description', meta.description);
-        }
-
-        if (meta.attribution) {
-            this.appendManifestField(meta.attributionLabel || 'Attribution', meta.attribution);
-        }
-
-        if (meta.rights) {
-            const link = document.createElement('a');
-            link.href = meta.rights;
-            link.target = '_blank';
-            link.rel = 'noopener';
-            link.textContent = meta.rights;
-            this.appendManifestFieldElement('Rights', link);
-        }
-
-        if (meta.logo) {
-            const img = document.createElement('img');
-            img.src = meta.logo;
-            img.className = 'iiif-manifest-panel-logo';
-            img.alt = 'Logo';
-            this.appendManifestFieldElement('Logo', img);
-        }
-
-        if (meta.metadata.length > 0) {
-            const separator = document.createElement('div');
-            separator.className = 'iiif-manifest-panel-separator';
-            this.metadataPanelBody.appendChild(separator);
-
-            for (const item of meta.metadata) {
-                this.appendManifestField(item.label, item.value);
-            }
-        }
-    }
-
-    private appendManifestField(label: string, value: string) {
-        const row = document.createElement('div');
-        row.className = 'iiif-manifest-panel-row';
-
-        const labelEl = document.createElement('div');
-        labelEl.className = 'iiif-manifest-panel-label';
-        labelEl.textContent = label;
-
-        const valueEl = document.createElement('div');
-        valueEl.className = 'iiif-manifest-panel-value';
-        valueEl.textContent = value;
-
-        row.appendChild(labelEl);
-        row.appendChild(valueEl);
-        this.metadataPanelBody!.appendChild(row);
-    }
-
-    private appendManifestFieldElement(label: string, element: HTMLElement) {
-        const row = document.createElement('div');
-        row.className = 'iiif-manifest-panel-row';
-
-        const labelEl = document.createElement('div');
-        labelEl.className = 'iiif-manifest-panel-label';
-        labelEl.textContent = label;
-
-        const valueEl = document.createElement('div');
-        valueEl.className = 'iiif-manifest-panel-value';
-        valueEl.appendChild(element);
-
-        row.appendChild(labelEl);
-        row.appendChild(valueEl);
-        this.metadataPanelBody!.appendChild(row);
     }
 
     // ============================================================
@@ -2549,7 +1090,7 @@ export class IIIFViewer {
             let dockIndex = 0;
 
             if (parent?.classList.contains('iiif-dock')) {
-                for (const [pos, dock] of this.docks) {
+                for (const [pos, dock] of this.ui.docks) {
                     if (dock === parent) {
                         dockPosition = pos;
                         break;
@@ -2608,7 +1149,7 @@ export class IIIFViewer {
             },
             panels,
             settings: {
-                backgroundColor: this.colorInput?.value ?? '#1a1a1a',
+                backgroundColor: this.ui.colorInput?.value ?? '#1a1a1a',
                 theme: this.container.classList.contains('theme-light') ? 'light' : 'dark',
             },
             annotations,
@@ -2648,12 +1189,12 @@ export class IIIFViewer {
             const collapseBtn = el.querySelector('.iiif-panel-collapse');
             if (body) {
                 body.classList.toggle('collapsed', panelState.collapsed);
-                if (collapseBtn) collapseBtn.textContent = panelState.collapsed ? '+' : '−';
+                if (collapseBtn) collapseBtn.textContent = panelState.collapsed ? '+' : '\u2212';
             }
 
             // Restore dock/float position
             if (panelState.dockPosition) {
-                const dock = this.docks.get(panelState.dockPosition);
+                const dock = this.ui.docks.get(panelState.dockPosition);
                 if (dock) {
                     // Clear floating styles
                     el.style.position = '';
@@ -2688,7 +1229,7 @@ export class IIIFViewer {
             const hideClass = PANEL_HIDE_CLASS[panelKey];
             if (hideClass) {
                 this.container.classList.toggle(hideClass, !panelState.visible);
-                const checkbox = this.settingsCheckboxes.get(hideClass);
+                const checkbox = this.ui.settingsCheckboxes.get(hideClass);
                 if (checkbox) checkbox.checked = panelState.visible;
             }
 
@@ -2706,8 +1247,8 @@ export class IIIFViewer {
         }
 
         // Restore background color
-        if (state.settings.backgroundColor && this.colorInput) {
-            this.colorInput.value = state.settings.backgroundColor;
+        if (state.settings.backgroundColor && this.ui.colorInput) {
+            this.ui.colorInput.value = state.settings.backgroundColor;
             const hex = state.settings.backgroundColor;
             const r = parseInt(hex.slice(1, 3), 16) / 255;
             const g = parseInt(hex.slice(3, 5), 16) / 255;
@@ -2724,7 +1265,7 @@ export class IIIFViewer {
             for (const ann of state.annotations) {
                 this.annotationManager.setPageVisible(ann.pageId, ann.visible);
             }
-            this.updateAnnotationPanel();
+            this.ui.updateAnnotationPanel();
         }
 
         this.markDirty();
@@ -2835,7 +1376,7 @@ export class IIIFViewer {
             popupPosition: options?.popupPosition,
         });
 
-        this.updateAnnotationPanel();
+        this.ui.updateAnnotationPanel();
 
         return id;
     }
@@ -3027,14 +1568,14 @@ export class IIIFViewer {
         if (this.comparisonController) return;
         if (!this.currentLoadedUrl) return;
 
-        const { ComparisonController } = await import('./iiif-compare');
+        const { ComparisonController } = await import('./features/iiif-compare');
 
         // Hide panels that don't apply in compare mode
-        if (this.tocContainer) this.tocContainer.style.display = 'none';
+        if (this.ui.tocContainer) this.ui.tocContainer.style.display = 'none';
 
         // Add compare-active class for expanded styling
-        if (this.comparePanel) {
-            this.comparePanel.classList.add('compare-active');
+        if (this.ui.comparePanel) {
+            this.ui.comparePanel.classList.add('compare-active');
         }
 
         // Build canvas entries — works for both manifests and single images
@@ -3073,20 +1614,20 @@ export class IIIFViewer {
         const getDockPosition = (el: HTMLElement): string | null => {
             const parent = el.parentElement;
             if (parent) {
-                for (const [pos, dock] of this.docks) {
+                for (const [pos, dock] of this.ui.docks) {
                     if (parent === dock) return pos;
                 }
             }
             return null;
         };
-        if (this.settingsPanel) {
-            universalPanels.push({ element: this.settingsPanel, dockPosition: getDockPosition(this.settingsPanel) });
+        if (this.ui.settingsPanel) {
+            universalPanels.push({ element: this.ui.settingsPanel, dockPosition: getDockPosition(this.ui.settingsPanel) });
         }
-        if (this.comparePanel) {
-            universalPanels.push({ element: this.comparePanel, dockPosition: getDockPosition(this.comparePanel) });
+        if (this.ui.comparePanel) {
+            universalPanels.push({ element: this.ui.comparePanel, dockPosition: getDockPosition(this.ui.comparePanel) });
         }
-        if (this.cvPanel) {
-            universalPanels.push({ element: this.cvPanel, dockPosition: getDockPosition(this.cvPanel) });
+        if (this.ui.cvPanel) {
+            universalPanels.push({ element: this.ui.cvPanel, dockPosition: getDockPosition(this.ui.cvPanel) });
         }
 
         this.comparisonController = new ComparisonController(this.container, {
@@ -3104,10 +1645,10 @@ export class IIIFViewer {
             currentCanvasIndex: this.currentCanvasIndex,
             savedEntries: this.compareAddedEntries,
             customAnnotationSpecs: this.customAnnotationSpecs,
-            listPanel: this.comparePanel?.querySelector('.iiif-panel-body') as HTMLDivElement,
+            listPanel: this.ui.comparePanel?.querySelector('.iiif-panel-body') as HTMLDivElement,
             universalPanels,
-            initialBackgroundColor: this.colorInput ? (() => {
-                const hex = this.colorInput!.value;
+            initialBackgroundColor: this.ui.colorInput ? (() => {
+                const hex = this.ui.colorInput!.value;
                 return {
                     r: parseInt(hex.slice(1, 3), 16) / 255,
                     g: parseInt(hex.slice(3, 5), 16) / 255,
@@ -3123,7 +1664,7 @@ export class IIIFViewer {
                 if (this.renderer?.canvas) this.renderer.canvas.style.display = 'none';
                 if (this.overlayContainer) this.overlayContainer.style.display = 'none';
                 // Hide main docks (universal panels will be in wrapper docks)
-                for (const dock of this.docks.values()) {
+                for (const dock of this.ui.docks.values()) {
                     dock.style.display = 'none';
                 }
             },
@@ -3132,7 +1673,7 @@ export class IIIFViewer {
                 if (this.renderer?.canvas) this.renderer.canvas.style.display = '';
                 if (this.overlayContainer) this.overlayContainer.style.display = '';
                 // Restore main docks
-                for (const dock of this.docks.values()) {
+                for (const dock of this.ui.docks.values()) {
                     dock.style.display = '';
                 }
                 this.startRenderLoop();
@@ -3158,26 +1699,26 @@ export class IIIFViewer {
         if (this.renderer?.canvas) this.renderer.canvas.style.display = '';
         if (this.overlayContainer) this.overlayContainer.style.display = '';
         // Restore main docks
-        for (const dock of this.docks.values()) {
+        for (const dock of this.ui.docks.values()) {
             dock.style.display = '';
         }
 
         // Restore panels based on manifest data (they set their own display)
-        this.updateCanvasNav();
-        this.updateTOC();
+        this.ui.updateCanvasNav();
+        this.ui.updateTOC();
 
         // Reset compare panel to original state
-        if (this.comparePanel) {
-            this.comparePanel.classList.remove('compare-active', 'active');
+        if (this.ui.comparePanel) {
+            this.ui.comparePanel.classList.remove('compare-active', 'active');
             // Collapse the body and reset toggle button
-            const body = this.comparePanel.querySelector('.iiif-panel-body');
+            const body = this.ui.comparePanel.querySelector('.iiif-panel-body');
             body?.classList.add('collapsed');
-            const toggleBtn = this.comparePanel.querySelector('.iiif-compare-panel-collapse');
+            const toggleBtn = this.ui.comparePanel.querySelector('.iiif-compare-panel-collapse');
             if (toggleBtn) toggleBtn.textContent = '+';
-            const closeBtn = this.comparePanel.querySelector('.iiif-compare-panel-close') as HTMLElement;
+            const closeBtn = this.ui.comparePanel.querySelector('.iiif-compare-panel-close') as HTMLElement;
             if (closeBtn) closeBtn.style.display = 'none';
         }
-        this.updateComparePanel();
+        this.ui.updateComparePanel();
 
         // Ensure render loop is running
         if (!this.renderLoopActive) {
@@ -3198,8 +1739,7 @@ export class IIIFViewer {
         this.abortController.abort();
         this.clearWorld();
         this.renderer?.destroy();
-        this.cvController?.destroy();
-        this.cvController = undefined;
+        this.ui.cvController?.destroy();
         this.overlayManager = undefined;
         this.annotationManager = undefined;
     }

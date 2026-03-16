@@ -1,6 +1,6 @@
 import './style.scss'
-import { IIIFViewer } from './IIIF/iiif';
-import type { ViewerConfig } from './IIIF/types';
+import { IIIFViewer } from '../src/IIIF/iiif';
+import type { ViewerConfig } from '../src/IIIF/types';
 
 const container = document.getElementById('iiif-container');
 if (container) {
